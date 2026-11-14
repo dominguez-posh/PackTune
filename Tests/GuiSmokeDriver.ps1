@@ -789,16 +789,49 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Set-CustomPath (Join-Path $s.Dir 'missing.msi')
             Test-Smoke 'a missing file is reported, nothing to deploy' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.TxtCustomRead.Text) $ui.TxtCustomRead.Text
             Set-CustomPath (Join-Path $s.Dir 'tool-1.0.msi')
-            Test-Smoke 'the MSI properties are shown' ($ui.TxtMsiName.Text -eq 'Smoke Tool' -and $ui.TxtMsiVersion.Text -eq '1.0.0' -and $ui.TxtMsiProduct.Text -eq '{BBBBBBBB-0000-0000-0000-000000000001}' -and $ui.TxtMsiManufacturer.Text -eq 'Smoke Corp' -and $ui.BtnCustomDeploy.IsEnabled) $ui.TxtMsiName.Text
+            Test-Smoke 'the MSI properties are shown' ($ui.TxtMsiName.Text -eq 'Smoke Tool' -and $ui.TxtMsiVersion.Text -eq '1.0.0' -and $ui.TxtMsiProduct.Text -eq '{BBBBBBBB-0000-0000-0000-000000000001}' -and $ui.TxtMsiManufacturer.Text -eq 'Smoke Corp') $ui.TxtMsiName.Text
             Save-SmokeShot '33-custom-dialog'
             $ui.TxtCustomProps.Text = 'ALLUSERS=1'
             $ui.CmbCustomAssign.SelectedIndex = 1
+            Test-Smoke 'gate: Deploy is off before the sandbox test, the tooltip says why' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.BtnCustomDeploy.ToolTip -eq 'Run the sandbox test first') ([string]$ui.BtnCustomDeploy.ToolTip)
+            $refused = ''; try { $null = New-PackTuneCustomMsiApp -MsiPath (Join-Path $s.Dir 'tool-1.0.msi') -Assignment None -Properties @{ ALLUSERS = '1' } } catch { $refused = $_.Exception.Message }
+            Test-Smoke 'gate: the backend refuses a deployment without a passed test, whatever the buttons say' ($refused -like '*Run the sandbox test first*') $refused
+            Set-Content (Join-Path $env:LOCALAPPDATA 'fake-sandbox-verdict.txt') 'Failed'
+            & $script:ClickActions[$ui.BtnCustomTest]
+            $s.Phase = 'T1'
+            return $false
+        }
+        if ("$($s.Phase)" -eq 'T1') {
+            if (-not (Test-Idle 'test')) { return $false }
+            Test-Smoke 'gate: a failed test shows the failing step and keeps Deploy off' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.TxtCustomDlgStatus.Text -like '*failed*Failed at step 2 of 5*') $ui.TxtCustomDlgStatus.Text
+            Set-Content (Join-Path $env:LOCALAPPDATA 'fake-sandbox-verdict.txt') 'Passed'
+            & $script:ClickActions[$ui.BtnCustomTest]
+            $s.Phase = 'T2'
+            return $false
+        }
+        if ("$($s.Phase)" -eq 'T2') {
+            if (-not (Test-Idle 'test')) { return $false }
+            Test-Smoke 'gate: after a passed test of this package Deploy is on' ($ui.BtnCustomDeploy.IsEnabled -and $ui.TxtCustomDlgStatus.Text -like '*passed*') $ui.TxtCustomDlgStatus.Text
+            $ui.TxtCustomProps.Text = 'ALLUSERS=2'
+            Test-Smoke 'gate: any change (the arguments) resets the test, Deploy is off again' (-not $ui.BtnCustomDeploy.IsEnabled)
+            $ui.TxtCustomProps.Text = 'ALLUSERS=1'
+            Test-Smoke 'gate: changing it back does not bring the old result back' (-not $ui.BtnCustomDeploy.IsEnabled)
+            & $script:ClickActions[$ui.BtnCustomTest]
+            $s.Phase = 'T3'
+            return $false
+        }
+        if ("$($s.Phase)" -eq 'T3') {
+            if (-not (Test-Idle 'test')) { return $false }
+            Test-Smoke 'gate: the new test of the same package turns Deploy on' $ui.BtnCustomDeploy.IsEnabled
             & $script:ClickActions[$ui.BtnCustomDeploy]
+            $s.Phase = 2
             return $false
         }
         if ($s.Phase -eq 2) {
             if (-not (Test-Idle 'removeinfo') -or -not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
             $s.Phase = 3
+            $deployedNotes = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | ForEach-Object { $_.notes }) -join ';'
+            Test-Smoke 'gate: the deployed app carries the test record in its notes' ($deployedNotes -like '*;test=passed;date=*;hash=*') $deployedNotes
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'deploy: the app is in Intune with the custom marker and the Available assignment' ($fake.Count -eq 1 -and $fake[0].displayName -eq 'Smoke Tool' -and $fake[0].assignment -eq 'available' -and $fake[0].notes -like '*ver=1.0.0;product={BBBBBBBB-0000-0000-0000-000000000001}*') (($fake | ForEach-Object notes) -join ';')
             Test-Smoke 'the custom page lists it with version and assignment' ($script:CustomRows.Count -eq 1 -and $script:CustomRows[0]['Title'] -eq 'Smoke Tool' -and $script:CustomRows[0]['Kind'] -eq 'MSI 1.0.0' -and $script:CustomRows[0]['Assigned'] -eq 'Available') ($script:CustomRows | ForEach-Object { $_['Kind'] })
@@ -814,8 +847,24 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Set-CustomPath $s.Dir
             Test-Smoke 'a folder with several MSI files offers a choice' ($ui.CmbCustomMsi.Visibility -eq 'Visible' -and $ui.CmbCustomMsi.Items.Count -eq 3) $ui.CmbCustomMsi.Items.Count
             Set-CustomPath (Join-Path $s.Dir 'tool-2.0.msi')
-            Test-Smoke 'the newer MSI is accepted' ($ui.BtnCustomDeploy.IsEnabled -and $ui.TxtCustomRead.Text -like '*Newer than 1.0.0*') $ui.TxtCustomRead.Text
+            Test-Smoke 'the newer MSI is accepted, Publish stays off until the sandbox test' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.TxtCustomRead.Text -like '*Newer than 1.0.0*') $ui.TxtCustomRead.Text
+            Start-CustomTest
+            $s.Phase = 'V1'
+            return $false
+        }
+        if ("$($s.Phase)" -eq 'V1') {
+            if (-not (Test-Idle 'test')) { return $false }
+            Test-Smoke 'gate: a new version tested for installation only is not enough, Publish needs the update test' ((-not $ui.BtnCustomDeploy.IsEnabled) -and ([string]$ui.BtnCustomDeploy.ToolTip) -like '*update from the previous version*') ([string]$ui.BtnCustomDeploy.ToolTip)
+            # the package store of the smoke is a stub that stores nothing, so the previous version comes from the file here (the store route is checked in Check-Custom)
+            Start-CustomTest (Join-Path $s.Dir 'tool-1.0.msi')
+            $s.Phase = 'V2'
+            return $false
+        }
+        if ("$($s.Phase)" -eq 'V2') {
+            if (-not (Test-Idle 'test')) { return $false }
+            Test-Smoke 'gate: the test of a new version plays the update from the previous version, then Publish is on' ($ui.BtnCustomDeploy.IsEnabled -and $ui.TxtCustomDlgStatus.Text -like '*update from the previous version*') $ui.TxtCustomDlgStatus.Text
             & $script:ClickActions[$ui.BtnCustomDeploy]
+            $s.Phase = 3
             return $false
         }
         if ($s.Phase -eq 3) {
@@ -837,6 +886,9 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'remove: one custom app is gone from Intune and from the list' ($fake.Count -eq 1 -and $script:CustomRows.Count -eq 1 -and $ui.PanelCustomDetails.Visibility -eq 'Collapsed') ($fake | ForEach-Object displayVersion)
             Remove-Item $s.Dir -Recurse -Force -ErrorAction SilentlyContinue
+            # the lab runs of this step must not shift the numbering the sandbox step counts on
+            Remove-Item (Join-Path $env:LOCALAPPDATA 'fake-sandbox') -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $env:LOCALAPPDATA 'fake-sandbox-verdict.txt') -Force -ErrorAction SilentlyContinue
             Show-Page 'Apps'
             return $true
         }
@@ -870,7 +922,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             # New application, Other
             & $script:ClickActions[$ui.BtnCustomNew]
             $ui.RbCustomOther.IsChecked = $true
-            Test-Smoke 'Other: the panel for the installation folder shows, MSI panel hidden, nothing to deploy yet' ($ui.PanelCustomOther.Visibility -eq 'Visible' -and $ui.PanelCustomMsi.Visibility -eq 'Collapsed' -and -not $ui.BtnCustomDeploy.IsEnabled -and $ui.BtnCustomDeploy.Content -eq 'Capture and deploy' -and $ui.BtnCustomTest.Visibility -eq 'Collapsed') ''
+            Test-Smoke 'Other: the panel for the installation folder shows, MSI panel hidden, nothing to deploy yet' ($ui.PanelCustomOther.Visibility -eq 'Visible' -and $ui.PanelCustomMsi.Visibility -eq 'Collapsed' -and -not $ui.BtnCustomDeploy.IsEnabled -and $ui.BtnCustomDeploy.Content -eq 'Capture, test and deploy' -and $ui.BtnCustomTest.Visibility -eq 'Collapsed') ''
             Set-OtherFolder $s.Dir
             Test-Smoke 'Other: entry point candidates (exe, cmd), setup.exe preselected, name from the folder' (@($ui.CmbOtherEntry.ItemsSource).Count -eq 2 -and $ui.CmbOtherEntry.SelectedItem -eq 'setup.exe' -and $ui.TxtOtherName.Text -eq 'smoke other') ((@($ui.CmbOtherEntry.ItemsSource)) -join ',')
             Test-Smoke 'Other: network for the capture is offered and off by default' ($ui.ChkOtherNetwork -and -not $ui.ChkOtherNetwork.IsChecked -and $ui.ChkOtherNetwork.Visibility -eq 'Visible')
@@ -881,7 +933,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             & $script:ClickActions[$ui.BtnCustomCancel]
             # Update dialog of the MSIX app
             & $script:ClickActions[$ui.BtnCustomNewVersion]
-            Test-Smoke 'New version of an MSIX app: the update dialog, next version, name fixed, stored files by default' ($ui.DlgCustom.Visibility -eq 'Visible' -and $ui.TxtCustomDlgTitle.Text -eq 'New version of Captured Tool' -and $ui.TxtOtherVersion.Text -eq '1.0.0.1' -and -not $ui.TxtOtherName.IsEnabled -and $ui.BoxCustomKind.Visibility -eq 'Collapsed' -and $ui.BtnCustomDeploy.Content -eq 'Capture and publish' -and $ui.BtnCustomDeploy.IsEnabled) $ui.TxtOtherVersion.Text
+            Test-Smoke 'New version of an MSIX app: the update dialog, next version, name fixed, stored files by default' ($ui.DlgCustom.Visibility -eq 'Visible' -and $ui.TxtCustomDlgTitle.Text -eq 'New version of Captured Tool' -and $ui.TxtOtherVersion.Text -eq '1.0.0.1' -and -not $ui.TxtOtherName.IsEnabled -and $ui.BoxCustomKind.Visibility -eq 'Collapsed' -and $ui.BtnCustomDeploy.Content -eq 'Capture, test and publish' -and $ui.BtnCustomDeploy.IsEnabled) $ui.TxtOtherVersion.Text
             Save-SmokeShot '38-custom-update'
             $ui.TxtOtherVersion.Text = ''
             Test-Smoke 'update: without a version there is nothing to publish' (-not $ui.BtnCustomDeploy.IsEnabled) ''
@@ -1225,9 +1277,9 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"name":"Consent Admin","upn":"admin@contoso.onmicrosoft.com","tid":"t-1"}')).TrimEnd('=').Replace('+', '-').Replace('/', '_')
                 $script:ConsentCalls = New-Object System.Collections.ArrayList
                 $script:EmbeddedAvailableOverride = $true
-                $script:EmbeddedSignInOverride = { param($t, $c, $sc, $h, $pr, $folder) [void]$script:ConsentCalls.Add("$pr|$c"); [pscustomobject]@{ token_type = 'Bearer'; expires_in = 3600; access_token = "x.$claims.y"; refresh_token = 'r'; scope = 'https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All' } }
+                $script:EmbeddedSignInOverride = { param($t, $c, $sc, $h, $pr, $folder) [void]$script:ConsentCalls.Add("$pr|$c"); [pscustomobject]@{ token_type = 'Bearer'; expires_in = 3600; access_token = "x.$claims.y"; refresh_token = 'r'; scope = 'https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All https://graph.microsoft.com/DeviceManagementScripts.ReadWrite.All' } }
                 $Global:AccessToken.Scopes = @('DeviceManagementApps.ReadWrite.All')
-                Test-Smoke 'status setup: missing scope is detected' (@(Get-StatusMissingScopes) -contains 'DeviceManagementConfiguration.ReadWrite.All') (@(Get-StatusMissingScopes) -join ',')
+                Test-Smoke 'status setup: missing scope is detected' (@(Get-StatusMissingScopes) -contains 'DeviceManagementScripts.ReadWrite.All') (@(Get-StatusMissingScopes) -join ',')
                 Start-StatusScriptSetup
                 $s.Phase = 1; return $false
             }
@@ -1239,6 +1291,16 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'license hint with the admin center path, Open and Check again offered' ($ui.BoxStepsNote.Visibility -eq 'Visible' -and $ui.TxtStepsNote.Text -like '*Windows data*I confirm that my tenant owns one of these licenses*' -and $ui.BtnStepsOpen.Visibility -eq 'Visible' -and $ui.BtnStepsAgain.Visibility -eq 'Visible' -and $script:StatusAdminUrl -like 'https://intune.microsoft.com/*') $ui.TxtStepsNote.Text
                 Test-Smoke 'step list rows: error icon and cause shown, progress bar determinate' ($ui.ListSteps.Children.Count -eq 5 -and $ui.BarSteps.Maximum -eq 5 -and $ui.BarSteps.Value -eq 1)
                 Save-SmokeShot '12b-status-setup-license'
+                # 403 with only the old scope = missing permission (not the license); with the Scripts scope the license hint stays
+                $saveScopes = $Global:AccessToken.Scopes
+                $fctx = New-InsightGraphContext -Invoke ([scriptblock]::Create($script:InsightFake))
+                $Global:AccessToken.Scopes = @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementConfiguration.ReadWrite.All')
+                $a1 = Test-InsightRemediationsAvailable -Context $fctx
+                $Global:AccessToken.Scopes = @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementScripts.ReadWrite.All')
+                $a2 = Test-InsightRemediationsAvailable -Context $fctx
+                $Global:AccessToken.Scopes = $saveScopes
+                Test-Smoke '403 with the old scope only: "Missing permission DeviceManagementScripts.ReadWrite.All - confirm it", not the license hint' ($a1.MissingScope -eq 'DeviceManagementScripts.ReadWrite.All' -and $a1.Reason -like 'Missing permission DeviceManagementScripts.ReadWrite.All - confirm it*') $a1.Reason
+                Test-Smoke '403 with the scope granted: license hint, and it can take a few minutes' (-not $a2.MissingScope -and $a2.Reason -like '*wait a few minutes*') $a2.Reason
                 Remove-Item $flag -Force
                 $ui.BtnStepsAgain.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
                 $s.Phase = 2; return $false
@@ -1479,6 +1541,47 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Switch-Tenant 'contoso.onmicrosoft.com' '11111111-2222-3333-4444-555555555555'
         $script:TenantGuidLookup = $null
         $true } }
+    @{ Name = 'custom applications in In tenant, assignment reader'; Phase = 0; Do = {
+        param($s)
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle)) { return $false }
+                # Realistic Graph payloads (mobileAppAssignment) and the module's shape read the same way
+                $graph = @(
+                    @{ '@odata.type' = '#microsoft.graph.mobileAppAssignment'; id = 'a1'; intent = 'available'; source = 'direct'; target = @{ '@odata.type' = '#microsoft.graph.allLicensedUsersAssignmentTarget' }; settings = @{ '@odata.type' = '#microsoft.graph.win32LobAppAssignmentSettings'; notifications = 'showAll' } }
+                    @{ '@odata.type' = '#microsoft.graph.mobileAppAssignment'; id = 'a2'; intent = 'required'; source = 'direct'; target = @{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = 'g-1' } }
+                    @{ '@odata.type' = '#microsoft.graph.mobileAppAssignment'; id = 'a3'; intent = 'uninstall'; source = 'direct'; target = @{ '@odata.type' = '#microsoft.graph.allDevicesAssignmentTarget' } })
+                $n = @($graph | ForEach-Object { ConvertTo-PackTuneAssignment ([pscustomobject]($_ | ConvertTo-Json -Depth 5 | ConvertFrom-Json)) })
+                $mod = ConvertTo-PackTuneAssignment ([pscustomobject]@{ Intent = 'Available'; Type = '#microsoft.graph.allLicensedUsersAssignmentTarget'; GroupID = $null; Notifications = 'hideAll' })
+                Test-Smoke 'assignment reader: Graph payloads (all users available, group required, all devices uninstall) and the module shape give the same normalized assignment' ($n[0].Intent -eq 'available' -and $n[0].Type -like '*allLicensedUsersAssignmentTarget' -and $n[0].Notifications -eq 'showAll' -and $n[1].Intent -eq 'required' -and $n[1].GroupID -eq 'g-1' -and $n[2].Type -like '*allDevicesAssignmentTarget' -and $mod.Intent -eq 'available' -and $mod.Type -like '*allLicensedUsers*') (($n | ForEach-Object { "$($_.Intent)/$($_.Type)" }) -join ' | ')
+                $ctx = New-InsightGraphContext -Invoke { param($m, $p, $b) @{ value = @(@{ id = 'x1'; intent = 'available'; target = @{ '@odata.type' = '#microsoft.graph.allLicensedUsersAssignmentTarget' } }, @{ id = 'x2'; intent = 'required'; target = @{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = 'g' } }) } }
+                $intents = @(Get-PackTuneAppIntents -AppId 'any' -Context $ctx)
+                Test-Smoke 'Intents of an app read from Graph (mobileApps/{id}/assignments), not "None"' ($intents -contains 'available' -and $intents -contains 'required') ($intents -join ',')
+                $script:TenantApps = $null; Start-TenantRefresh
+                $s.Phase = 1; return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                Show-Page 'Tenant'
+                $custom = @($script:TenantRowList | Where-Object { $_.Data.IsCustom })
+                Test-Smoke 'In tenant lists the custom applications too, with the source label Custom MSI / Custom MSIX, version and assignment' ($custom.Count -ge 1 -and @($custom | Where-Object { $_['Sub'] -like 'Custom MS*' }).Count -eq $custom.Count -and $custom[0]['Assigned'] -ne $null) (($custom | ForEach-Object { "$($_['Title'])|$($_['Sub'])|$($_['Version'])|$($_['Assigned'])" }) -join '; ')
+                if ($custom.Count) {
+                    $ui.LstTenant.SelectedItem = $custom[0]
+                    Test-Smoke 'panel of a custom app: counts and assignment switch like other apps, policy and sandbox replaced by the link to the Custom page, Remove gated like other apps' ($ui.BoxTenantCustom.Visibility -eq 'Visible' -and $ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.BoxTenantSummary.Visibility -eq 'Visible' -and $ui.GbTenantPolicy.Visibility -eq 'Collapsed' -and $ui.BtnTenantTest.Visibility -eq 'Collapsed' -and $ui.BtnTenantRemove.Visibility -eq 'Visible' -and ($ui.BtnTenantRemove.IsEnabled -or $ui.BtnTenantRemove.ToolTip -or $ui.TxtTenantRemoveNote.Text)) "$($ui.BoxTenantCustom.Visibility) $($ui.GbTenantAssign.Visibility) $($ui.BoxTenantSummary.Visibility) $($ui.GbTenantPolicy.Visibility) $($ui.BtnTenantTest.Visibility) $($ui.BtnTenantRemove.Visibility)"
+                    $s.CustomId = $custom[0].Data.Id
+                    & $script:ClickActions[$ui.BtnTenantCustomPage]
+                    $s.Phase = 2; return $false
+                }
+                Show-Page 'Tenant'
+                $true
+            }
+            2 {
+                if (-not (Test-Idle 'customlist')) { return $false }
+                Test-Smoke 'the link opens the Custom page with that app selected' ($script:CurrentPage -eq 'Custom' -and $ui.LstCustom.SelectedItem -and $ui.LstCustom.SelectedItem.Data.Id -eq $s.CustomId) "$($script:CurrentPage) $($ui.LstCustom.SelectedItem.Data.Id) vs $($s.CustomId)"
+                Show-Page 'Tenant'
+                $true
+            }
+        } } }
     @{ Name = 'install summary card and assignment for all users'; Phase = 0; Do = {
         param($s)
         $dir = $env:LOCALAPPDATA
@@ -1514,7 +1617,24 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             3 {
                 if (-not (Test-Idle)) { return $false }
                 $app = Get-SelectedTenantApp
-                Test-Smoke 'assignment section shows the current state (none yet in the fake Graph), groups info present' ($ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.RbAsgNone.IsChecked -and $ui.TxtAsgInfo.Text -like '*all-users assignment*') $ui.TxtAsgInfo.Text
+                Test-Smoke 'assignment section reads the real state (Available for all users, as deployed), groups info present' ($ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.RbAsgAvailable.IsChecked -and $ui.TxtAsgInfo.Text -like '*all-users assignment*') $ui.TxtAsgInfo.Text
+                # The segmented control fits the panel at the smallest window width and 100/125/150%
+                $bad = New-Object System.Collections.ArrayList
+                $w0 = $window.Width
+                foreach ($ww in 1280, 1080) {
+                    $window.Width = $ww
+                    foreach ($sc in 1.0, 1.25, 1.5) {
+                        $ui.RootGrid.LayoutTransform = New-Object System.Windows.Media.ScaleTransform $sc, $sc
+                        $window.UpdateLayout()
+                        foreach ($r in $ui.RbAsgRequired, $ui.RbAsgAvailable, $ui.RbAsgUninstall, $ui.RbAsgNone) {
+                            if (($r.ActualWidth + 0.5) -lt $r.DesiredSize.Width) { [void]$bad.Add("$($r.Content)@$ww/$sc narrower than its content") }
+                            $right = $r.TransformToAncestor($ui.GbTenantAssign).Transform((New-Object System.Windows.Point $r.ActualWidth, 0)).X
+                            if ($right -gt $ui.GbTenantAssign.ActualWidth + 1) { [void]$bad.Add("$($r.Content)@$ww/$sc runs out of the panel ($([int]$right) > $([int]$ui.GbTenantAssign.ActualWidth))") }
+                        }
+                    }
+                }
+                $window.Width = $w0; $ui.RootGrid.LayoutTransform = [System.Windows.Media.Transform]::Identity; $window.UpdateLayout()
+                Test-Smoke 'assignment segments fit the panel (window 1280 and 1080, 100/125/150%): no segment clipped, none outside the panel' ($bad.Count -eq 0) ($bad -join '; ')
                 $script:AsgSeq = @('Required', 'Available', 'Uninstall', 'None'); $script:AsgIdx = 0; $script:AsgResults = @()
                 $script:ConfirmAsked = New-Object System.Collections.ArrayList
                 $ui.RbAsgRequired.IsChecked = $true
@@ -1728,7 +1848,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         function New-FakeToken([string]$Name, [bool]$Consent = $false) {
             $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("{`"name`":`"$Name`",`"upn`":`"admin@contoso.onmicrosoft.com`",`"tid`":`"t-1`"}")).TrimEnd('=').Replace('+', '-').Replace('/', '_')
             [pscustomobject]@{ token_type = 'Bearer'; expires_in = 3600; access_token = "x.$claims.y"; refresh_token = "refresh-$Name"
-                scope = ('https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All' + $(if ($Consent) { ' https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All https://graph.microsoft.com/Sites.Selected' } else { '' })) }
+                scope = ('https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All' + $(if ($Consent) { ' https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All https://graph.microsoft.com/Sites.Selected https://graph.microsoft.com/DeviceManagementScripts.ReadWrite.All' } else { '' })) }
         }
         switch ($s.Phase) {
             0 {

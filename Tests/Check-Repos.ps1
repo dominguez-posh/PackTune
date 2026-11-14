@@ -31,6 +31,16 @@ function Get-Store { @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.jso
 $script:Waited = 0
 function Wait-PackTuneGitHub([int]$Seconds) { $script:Waited += $Seconds; $script:Gh.RateRemaining = 100 }
 
+
+# The sandbox lab is faked: the verdict is set per check, every call is kept (scripts, previous version)
+$script:LabVerdict = 'Passed'; $script:LabCalls = New-Object System.Collections.ArrayList
+function Start-PackTuneWin32Lab {
+    param([string]$DisplayName, [string]$Version, [hashtable]$Scripts, [string]$SourcePath, [hashtable]$PreviousScripts, [string]$PreviousSourcePath, [string]$PreviousVersion, [switch]$AutoRun)
+    [void]$script:LabCalls.Add(@{ Name = $DisplayName; Previous = [bool]$PreviousScripts; AutoRun = [bool]$AutoRun })
+    $steps = @(@{ Name = 'Detect before'; Status = 'Passed' }, @{ Name = 'Install'; Status = $(if ($script:LabVerdict -eq 'Passed') { 'Passed' } else { 'Failed' }) })
+    [pscustomobject]@{ State = $(if ($script:LabVerdict -eq 'Passed') { 'Succeeded' } else { 'Failed' }); Verdict = $script:LabVerdict; Message = $(if ($script:LabVerdict -eq 'Passed') { 'All 5 steps passed' } else { 'Failed at step 2 of 5: Install exited with 1603' }); Result = $steps; JobPath = 'x' }
+}
+
 function New-TestMsi {
     param([string]$Path, [hashtable]$Properties)
     $installer = New-Object -ComObject WindowsInstaller.Installer
@@ -272,7 +282,9 @@ Remove-PackTuneCustomApp -Id $id1
 # ---------------------------------------------------------------- Move to repository
 $s = Get-PackTuneSettings; $s.StoreSiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; Save-PackTuneSettings -Settings $s | Out-Null
 $null = Initialize-PackTuneStore
+$null = Test-PackTuneCustomApp -MsiPath $msi1 -AutoRun
 $mid1 = New-PackTuneCustomMsiApp -MsiPath $msi1 -Assignment None
+$null = Test-PackTuneCustomApp -MsiPath $msi2 -PreviousMsiPath $msi1 -AutoRun
 $mid2 = Publish-PackTuneCustomVersion -AppId $mid1 -MsiPath $msi2
 Test-Check 'move: setup, two versions kept in the store with Intune anchors' (@($script:Fs.Keys | Where-Object { $_ -like "$appId/*/manifest.json" }).Count -eq 2)
 $writeTok = 'github_pat_WRITEWRITE0123456789'; $roTok = 'github_pat_READONLY0123456789'

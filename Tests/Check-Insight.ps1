@@ -178,8 +178,12 @@ $ok = New-InsightGraphContext -Name fake -Invoke { param($m, $p, $b)
 $created = Set-InsightStatusScript -Context $ok
 Test-Check 'status script created and assigned hourly' ($created.Created -and $calls -contains 'POST /beta/deviceManagement/deviceHealthScripts' -and $calls -contains 'POST /beta/deviceManagement/deviceHealthScripts/hs1/assign')
 $deny = New-InsightGraphContext -Name fake -Invoke { param($m, $p, $b) throw 'Graph GET failed (403): The tenant is not licensed for this feature' }
+$Global:AccessToken = [pscustomobject]@{ Scopes = @('DeviceManagementScripts.ReadWrite.All') }
 $degraded = Set-InsightStatusScript -Context $deny
-Test-Check 'no licence: degrades without throwing' (-not $degraded.Created -and $degraded.Message -like '*not available*')
+Test-Check 'no licence (scope granted): degrades without throwing, license hint' (-not $degraded.Created -and $degraded.Message -like '*not available*' -and -not $degraded.MissingScope)
+$Global:AccessToken = [pscustomobject]@{ Scopes = @('DeviceManagementConfiguration.ReadWrite.All') }
+$noScope = Set-InsightStatusScript -Context $deny
+Test-Check '403 without the Scripts scope: missing permission, not the license' ($noScope.MissingScope -eq 'DeviceManagementScripts.ReadWrite.All' -and $noScope.Message -like 'Missing permission*')
 
 # ---- diagnostics: admin center pointer and zip extraction
 $info = Get-InsightDiagnosticsInfo -ManagedDeviceId 'm1' -Package 'git'
@@ -192,10 +196,11 @@ $files = @(Expand-InsightLogs -ZipPath $zip -OutDir (Join-Path $temp 'ex'))
 Test-Check 'zip: only our logs extracted' ($files.Count -eq 1 -and $files[0] -like '*IntuneChocoDeployment-git.log')
 
 # ---- permissions
-$ready = @(Test-InsightReadiness -GrantedScopes @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementConfiguration.ReadWrite.All'))
+$ready = @(Test-InsightReadiness -GrantedScopes @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementScripts.ReadWrite.All'))
 Test-Check 'readiness: apps and scripts ready, device views missing' (($ready | Where-Object Function -eq 'Get-InsightAppInstallStatus').Ready -and -not ($ready | Where-Object Function -eq 'Get-InsightDeviceRunStates').Ready -and (($ready | Where-Object Function -eq 'Get-InsightDeviceRunStates').Missing -contains 'DeviceManagementManagedDevices.Read.All'))
 $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"scp":"DeviceManagementApps.Read.All Group.Read.All"}')).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 Test-Check 'token scopes read from the scp claim' ((Get-InsightTokenScopes "x.$claims.y") -contains 'Group.Read.All')
+Test-Check 'Remediations need the Scripts permission (Learn: deviceHealthScripts), requested by new registrations and the consent flow' ($script:GraphInsightScopes -contains 'DeviceManagementScripts.ReadWrite.All' -and (Get-InsightRequiredScopes 'Set-InsightStatusScript') -contains 'DeviceManagementScripts.ReadWrite.All' -and (Get-InsightRequiredScopes 'Get-InsightStatusScriptState') -contains 'DeviceManagementScripts.Read.All' -and -not (Test-InsightReadiness -GrantedScopes @('DeviceManagementConfiguration.ReadWrite.All') | Where-Object Function -eq 'Set-InsightStatusScript').Ready)
 Test-Check 'registration requests the insight scope' ((Get-Content (Join-Path $repo 'PackTune-Main.ps1') -Raw) -match 'GraphInsightScopes' -and $script:GraphInsightScopes -contains 'DeviceManagementManagedDevices.Read.All')
 
 Remove-Item $temp -Recurse -Force -ErrorAction SilentlyContinue

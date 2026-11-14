@@ -755,6 +755,11 @@ function New-PackTuneRepoApp {
             if (@($Existing | Where-Object { $_.ProductCode -eq $Info.ProductCode -or ($_.AppId -eq $AppId -and $_.Version -eq $Version) }).Count) { throw "$($Info.Name) $($Info.Version) is deployed already." }
             $Built = New-PackTuneCustomAppPackage -Info $Info -AppId $AppId -ExtraArguments ([string]$Recipe.arguments)
             $Icon = Get-PackTuneMsiIconBase64 -Info $Info
+            # The gate: the package built here must pass the sandbox test before it is uploaded
+            $RepoArgs = [string]$Recipe.arguments
+            $null = Test-PackTuneBuiltPackage -Package $Built -DisplayName $Info.Name -Version $Info.Version -IconBase64 $Icon -Arguments $RepoArgs
+            $Test = Assert-PackTuneTestPassed -Fingerprint (Get-PackTunePackageFingerprint -SourcePath $Built.SourcePath -DetectionFile $Built.DetectionFile -IconBase64 $Icon -Arguments $RepoArgs)
+            $ExtraNotes += ";$(ConvertTo-PackTuneTestNote $Test)"
             $App = Add-PackTuneCustomIntuneApp -Info $Info -AppId $AppId -Built $Built -DisplayName $Info.Name -Publisher $Info.Manufacturer -IconBase64 $Icon -Manifest $Manifest -ExtraNotes $ExtraNotes
         }
         else {
@@ -769,6 +774,10 @@ function New-PackTuneRepoApp {
             $Build = [pscustomobject]@{ PackageName = [string]$Identity.Name; Version = [string]$Identity.Version; Subject = $Re.Publisher; Thumbprint = $Re.Thumbprint; Msix = $Re.Msix; Cer = $Re.Cer }
             if ($Re.OriginalThumbprint) { $ExtraNotes += ";origthumb=$($Re.OriginalThumbprint)" }
             $Package = New-PackTuneCustomMsixPackage -Build $Build -AppId $AppId
+            # The gate: the re-signed package must pass the sandbox test before it is uploaded
+            $null = Test-PackTuneBuiltPackage -Package $Package -DisplayName ([string]$Entry.App.name) -Version $Build.Version
+            $Test = Assert-PackTuneTestPassed -Fingerprint (Get-PackTunePackageFingerprint -SourcePath $Package.SourcePath -DetectionFile $Package.DetectionFile)
+            $ExtraNotes += ";$(ConvertTo-PackTuneTestNote $Test)"
             $App = Add-PackTuneCustomMsixIntuneApp -Build $Build -AppId $AppId -Package $Package -DisplayName ([string]$Entry.App.name) -Publisher ([string]$Entry.App.publisher) -Manifest $Manifest -ExtraNotes $ExtraNotes
         }
         Set-PackTuneAssignment -Id $App.id -Assignment $Assignment

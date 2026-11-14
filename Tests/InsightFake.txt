@@ -22,6 +22,19 @@ if ($P -like '*/mobileApps/*/assignments*') {
     $F = Join-Path $Dir 'fake-assignments.json'
     $All = @{}
     if (Test-Path $F) { $o = Get-Content $F -Raw | ConvertFrom-Json; foreach ($pr in $o.PSObject.Properties) { $All[$pr.Name] = @($pr.Value) } }
+    # Graph shape (mobileAppAssignment): what the deployment recorded in the fake store, until an assignment was changed through Graph
+    if (-not $All.ContainsKey($Id)) {
+        $Store = Join-Path $Dir 'fake-intune.json'
+        if (Test-Path $Store) {
+            $App = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.id -eq $Id })[0]
+            if ($App -and $App.assignments) {
+                $Ix = 0; $All[$Id] = @(@($App.assignments) | Where-Object { $_ } | ForEach-Object { $Ix++
+                    $tg = @{ '@odata.type' = [string]$_.Type }; if ($_.GroupID) { $tg.groupId = [string]$_.GroupID }
+                    @{ '@odata.type' = '#microsoft.graph.mobileAppAssignment'; id = "as-$Id-$Ix"; intent = [string]$_.Intent; source = 'direct'; target = $tg
+                        settings = @{ '@odata.type' = '#microsoft.graph.win32LobAppAssignmentSettings'; notifications = $(if ($_.Notifications) { [string]$_.Notifications } else { 'showAll' }) } } })
+            }
+        }
+    }
     $List = @($All[$Id] | Where-Object { $_ })
     if ($Method -eq 'POST') {
         $n = @{ id = "as-$([guid]::NewGuid().ToString('N').Substring(0, 6))"; intent = [string]$Body.intent; target = @{ '@odata.type' = [string]$Body.target.'@odata.type' }; settings = @{ notifications = [string]$Body.settings.notifications } }

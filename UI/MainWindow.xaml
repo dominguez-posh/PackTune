@@ -643,15 +643,22 @@
                                                     <Button x:Name="BtnSumStatus" Content="Per device details ..." HorizontalAlignment="Left" Margin="0,8,0,0" Padding="14,5"/>
                                                 </StackPanel>
                                             </Border>
+                                            <Border x:Name="BoxTenantCustom" Visibility="Collapsed" Background="#F7F7F7" CornerRadius="8" Padding="14,10" Margin="0,16,0,0">
+                                                <StackPanel>
+                                                    <TextBlock Text="Your own application" Style="{StaticResource FieldLabel}"/>
+                                                    <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap" Text="New version, Export and Test in sandbox are on the Custom page: they need the package store and the sandbox."/>
+                                                    <Button x:Name="BtnTenantCustomPage" Content="Manage on the Custom page ..." HorizontalAlignment="Left" Margin="0,8,0,0" Padding="14,5"/>
+                                                </StackPanel>
+                                            </Border>
                                             <StackPanel x:Name="GbTenantAssign" Margin="0,18,0,0">
                                                 <TextBlock Text="Assignment (all users)" Style="{StaticResource FieldLabel}"/>
-                                                <Border x:Name="BoxAssignSeg" Style="{StaticResource Segmented}" HorizontalAlignment="Left" AutomationProperties.Name="Assignment for all users">
-                                                    <StackPanel Orientation="Horizontal">
+                                                <Border x:Name="BoxAssignSeg" Style="{StaticResource Segmented}" HorizontalAlignment="Stretch" AutomationProperties.Name="Assignment for all users">
+                                                    <UniformGrid Columns="2">
                                                         <RadioButton x:Name="RbAsgRequired" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="Install" ToolTip="Required: installed on all users' devices"/>
                                                         <RadioButton x:Name="RbAsgAvailable" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="Company Portal" ToolTip="Available: users install it themselves from the Company Portal"/>
                                                         <RadioButton x:Name="RbAsgUninstall" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="Uninstall" ToolTip="Removes the app from all users' devices"/>
                                                         <RadioButton x:Name="RbAsgNone" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="None" ToolTip="Removes the all-users assignment"/>
-                                                    </StackPanel>
+                                                    </UniformGrid>
                                                 </Border>
                                                 <TextBlock x:Name="TxtAsgInfo" Style="{StaticResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap"/>
                                                 <StackPanel x:Name="PanelAsgSteps" Visibility="Collapsed" Margin="0,8,0,0">

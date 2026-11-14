@@ -22,7 +22,7 @@ $script:StoreGraph = "https://graph.microsoft.com/v1.0"
 $script:StoreSmallLimit = 4MB
 $script:StoreChunk = 327680 * 32
 $script:StoreSegment = '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$'
-$script:StoreFileNames = "package.intunewin", "package.msix", "installer.zip", "recipe.json", "signing.cer", "documentation.zip"
+$script:StoreFileNames = "package.intunewin", "package.msix", "installer.zip", "recipe.json", "signing.cer", "documentation.zip", "test.json"
 # Shown before and after the one-time site grant (interface, command line, README)
 $script:StoreGrantConsentNote = "The consents for Sites.FullControl.All and Group.ReadWrite.All (the second one only for creating the site) that the setup sign-in gives Microsoft's app 'Microsoft Graph Command Line Tools' stays in the tenant afterwards; PackTune uses it for the grant only. Remove it when it is not needed any more: Entra admin center > Enterprise applications > Microsoft Graph Command Line Tools > Permissions (Admin consent and User consent) > Revoke, or with Microsoft Graph PowerShell remove its oauth2PermissionGrant (Remove-MgOauth2PermissionGrant) or take these two permissions out of its scope (Update-MgOauth2PermissionGrant)."
 
