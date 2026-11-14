@@ -12,6 +12,47 @@
 $script:Sources = "Chocolatey", "Winget"
 $script:SourceFilters = "All", "Winget", "Chocolatey", "Both"
 
+#region winget map
+
+# Reviewed Chocolatey id -> winget id table (data\winget-map.json, made by Tools\Update-WingetMap.ps1 at development time).
+# The catalog winget id stays authoritative, the map fills the gaps, the strict name match of the popular list is the fallback.
+$script:WingetMapPath = Join-Path $PSScriptRoot "data\winget-map.json"
+$script:WingetMapLoaded = $null
+
+function Get-PackTuneWingetMap {
+    <#
+        The map as a hashtable: lower case Chocolatey id -> winget id. Only entries with a valid winget id and the
+        confidence "high" or "reviewed". Read once per file and write time; a missing or broken file gives an empty map.
+    #>
+    param([string]$Path = $script:WingetMapPath)
+    $Stamp = $null
+    try { $Stamp = "$Path|$((Get-Item -LiteralPath $Path -ErrorAction Stop).LastWriteTimeUtc.Ticks)" } catch { return @{} }
+    if ($script:WingetMapLoaded -and $script:WingetMapLoaded.Stamp -eq $Stamp) { return $script:WingetMapLoaded.Map }
+    $Map = @{}
+    try {
+        $Doc = Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+        foreach ($Property in @($Doc.apps.PSObject.Properties)) {
+            $Id = [string]$Property.Value.winget
+            if ($Id -match $script:WingetIdPattern -and [string]$Property.Value.confidence -in "high", "reviewed") { $Map[$Property.Name.ToLower()] = $Id }
+        }
+    }
+    catch { Write-Verbose "The winget map is unreadable: $($_.Exception.Message)"; $Map = @{} }
+    $script:WingetMapLoaded = [pscustomobject]@{ Stamp = $Stamp; Map = $Map }
+    return $Map
+}#Chocolatey id to winget id table
+
+function Get-PackTuneMappedWingetId {
+    # The winget id of a Chocolatey package from the map, or $null
+    param([string]$ChocoId, [string]$Path = $script:WingetMapPath)
+    if (-not $ChocoId) { return $null }
+    $Map = Get-PackTuneWingetMap -Path $Path
+    $Key = $ChocoId.ToLower()
+    if ($Map.ContainsKey($Key)) { return [string]$Map[$Key] }
+    return $null
+}#The mapped winget id of one package
+
+#endregion
+
 #region versions and recommendation
 
 function ConvertTo-SourceVersionParts {
@@ -420,7 +461,8 @@ function Get-PackTunePopularApps {
         if ($CanMatch -and -not $WingetFinder) { try { Assert-WingetClient } catch { $CanMatch = $false; Write-Warning "winget is not available, the popular apps are listed for Chocolatey only" } }
         $Records = foreach ($P in $Selected) {
             $Hit = $null
-            if ($CanMatch) {
+            # A package of the map needs no search: the row takes the mapped id (below)
+            if ($CanMatch -and -not (Get-PackTuneMappedWingetId $P.Name)) {
                 try { $Hit = if ($WingetFinder) { Resolve-PackTuneWingetMatch -Package $P -Finder $WingetFinder } else { Resolve-PackTuneWingetMatch -Package $P } }
                 catch { Write-Verbose "winget match of $($P.Name) failed: $($_.Exception.Message)" }
             }
@@ -450,7 +492,16 @@ function Get-PackTunePopularApps {
                 Downloads = $R.Downloads; LicenseNote = $R.LicenseNote; License = $null; Partial = $false
             }
         }
-        $Row = New-PackTuneSourceRow -Name $R.Name -Category $R.Category -ChocoId $R.ChocoId -WingetId $R.WingetId -ChocoVersion $R.Version -WingetVersion $R.WingetVersion
+        # Winget id: the reviewed map first, then the strict name match of the record; the version only when the cache knows it
+        $WingetId = $R.WingetId; $WingetVersion = $R.WingetVersion
+        if (-not $NoWinget) {
+            $Mapped = Get-PackTuneMappedWingetId $R.ChocoId
+            if ($Mapped) {
+                $WingetId = $Mapped; $WingetVersion = $null
+                if ($Cache) { $Known = $Cache[(Get-SourceCacheKey "Winget" $Mapped)]; if ($Known -and $Known.Version) { $WingetVersion = $Known.Version } }
+            }
+        }
+        $Row = New-PackTuneSourceRow -Name $R.Name -Category $R.Category -ChocoId $R.ChocoId -WingetId $WingetId -ChocoVersion $R.Version -WingetVersion $WingetVersion
         $Row | Add-Member -NotePropertyName Popular -NotePropertyValue $true -Force
         $Row | Add-Member -NotePropertyName Downloads -NotePropertyValue ([double]($R.Downloads -replace '[^\d]', '0')) -Force
         $Row

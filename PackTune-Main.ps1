@@ -2745,8 +2745,8 @@ function Get-PackTuneCatalog {
     foreach ($Entry in $Catalog) {
         [pscustomobject]@{
             Id          = $Entry.id
-            # Optional: the same app in the winget community repository
-            WingetId    = $Entry.winget
+            # Optional: the same app in the winget community repository; without one the reviewed map (data\winget-map.json) fills in
+            WingetId    = $(if ($Entry.winget) { $Entry.winget } else { Get-PackTuneMappedWingetId $Entry.id })
             Name        = $Entry.name
             Category    = $Entry.category
             LicenseNote = Get-ChocoLicenseNote $Entry.id
