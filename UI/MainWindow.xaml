@@ -502,14 +502,17 @@
                                         <TextBlock x:Name="TxtCustomMeta" Style="{StaticResource Hint}"/>
                                         <TextBlock Text="Version" Style="{StaticResource FieldLabel}" Margin="0,16,0,4"/>
                                         <TextBlock x:Name="TxtCustomVersion"/>
-                                        <TextBlock Text="Product code" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
+                                        <TextBlock x:Name="LblCustomProduct" Text="Product code" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
                                         <TextBox x:Name="TxtCustomProduct" Style="{StaticResource SelectableText}" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
-                                        <TextBlock Text="Upgrade code" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
+                                        <TextBlock x:Name="LblCustomUpgrade" Text="Upgrade code" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
                                         <TextBox x:Name="TxtCustomUpgrade" Style="{StaticResource SelectableText}" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
                                         <TextBlock Text="Assigned" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
                                         <TextBlock x:Name="TxtCustomAssigned" TextWrapping="Wrap"/>
                                         <Button x:Name="BtnCustomNewVersion" Margin="0,20,0,0" Content="New version ..." Tag="&#xE898;"/>
-                                        <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Pick a newer MSI: a new app is created that supersedes this one on the devices."/>
+                                        <TextBlock x:Name="TxtCustomVersionHint" Style="{StaticResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap" Text="Pick a newer MSI: a new app is created that supersedes this one on the devices."/>
+                                        <TextBlock x:Name="TxtCustomStore" Style="{StaticResource Hint}" Margin="0,14,0,0" TextWrapping="Wrap"/>
+                                        <Button x:Name="BtnCustomExport" Margin="0,6,0,0" Content="Export to edit ..." Tag="&#xE896;"/>
+                                        <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Downloads the package and the original installer files from the package store, checked against the manifest. Change the files, then New version."/>
                                         <Button x:Name="BtnCustomOpen" Margin="0,14,0,0" Content="Open in Intune" Tag="&#xE774;"/>
                                         <Button x:Name="BtnCustomRemove" Margin="0,14,0,0" Content="Remove from Intune" Tag="&#xE74D;"/>
                                         <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Devices keep the installed software."/>
@@ -1025,7 +1028,31 @@
                         <TextBlock x:Name="TxtCustomOther" Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Other: installers, scripts and several files are captured as an MSIX in Windows Sandbox. MSIX capture comes in the next step."/>
                     </StackPanel>
                     <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="420">
-                        <StackPanel x:Name="PanelCustomMsi" Margin="28,0,28,8">
+                        <StackPanel>
+                        <StackPanel x:Name="PanelCustomOther" Margin="28,0,28,8" Visibility="Collapsed">
+                            <TextBlock x:Name="LblOtherFolder" Text="Folder with all installation files" Style="{StaticResource FieldLabel}"/>
+                            <Grid Margin="0,4,0,0">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBox x:Name="TxtOtherFolder" AutomationProperties.Name="Installation folder"/>
+                                <Button x:Name="BtnOtherFolder" Grid.Column="1" Margin="8,0,0,0" Content="Choose folder ..."/>
+                            </Grid>
+                            <TextBlock Text="Entry point" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
+                            <ComboBox x:Name="CmbOtherEntry" IsEditable="True" AutomationProperties.Name="Entry point"/>
+                            <TextBlock Text="Arguments (silent install)" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
+                            <TextBox x:Name="TxtOtherArgs" AutomationProperties.Name="Arguments" ToolTip="e.g. /S or /VERYSILENT /NORESTART"/>
+                            <Grid x:Name="GridOtherIdentity" Margin="0,12,0,0">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="120"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <StackPanel Margin="0,0,8,0"><TextBlock Text="Name" Style="{StaticResource FieldLabel}"/><TextBox x:Name="TxtOtherName" Margin="0,4,0,0" AutomationProperties.Name="Application name"/></StackPanel>
+                                <StackPanel Grid.Column="1" Margin="0,0,8,0"><TextBlock Text="Version" Style="{StaticResource FieldLabel}"/><TextBox x:Name="TxtOtherVersion" Margin="0,4,0,0" AutomationProperties.Name="Version"/></StackPanel>
+                                <StackPanel Grid.Column="2"><TextBlock Text="Publisher" Style="{StaticResource FieldLabel}"/><TextBox x:Name="TxtOtherPublisher" Margin="0,4,0,0" AutomationProperties.Name="Publisher"/></StackPanel>
+                            </Grid>
+                            <TextBlock x:Name="TxtOtherInfo" Style="{StaticResource Hint}" Margin="0,10,0,0" TextWrapping="Wrap"/>
+                            <StackPanel x:Name="PanelOtherAssign">
+                                <TextBlock Text="Assignment" Style="{StaticResource FieldLabel}" Margin="0,14,0,4"/>
+                                <ComboBox x:Name="CmbOtherAssign" HorizontalAlignment="Left" Width="260" AutomationProperties.Name="Assignment"/>
+                            </StackPanel>
+                        </StackPanel>
+<StackPanel x:Name="PanelCustomMsi" Margin="28,0,28,8">
                             <TextBlock Text="MSI file" Style="{StaticResource FieldLabel}"/>
                             <Grid Margin="0,4,0,0">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -1056,6 +1083,7 @@
                             <TextBox x:Name="TxtCustomProps" AutomationProperties.Name="Extra MSI properties" ToolTip="NAME=value pairs separated by spaces, e.g. ALLUSERS=1 INSTALLDIR=C:\Tools\App"/>
                             <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,0" Text="Installs silently with msiexec /i /qn /norestart as SYSTEM; removed by product code. Detected by product code and version."/>
                         </StackPanel>
+                        </StackPanel>
                     </ScrollViewer>
                     <Border Grid.Row="2" Style="{StaticResource DialogFooter}" Padding="28,14">
                         <Grid>
@@ -1065,6 +1093,41 @@
                             <StackPanel Grid.Column="2" Orientation="Horizontal">
                                 <Button x:Name="BtnCustomCancel" Content="Cancel" Margin="0,0,8,0" Padding="16,8"/>
                                 <Button x:Name="BtnCustomDeploy" Style="{StaticResource PrimaryButton}" Padding="18,8" Content="Deploy"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <!-- Package store -->
+            <Border x:Name="DlgStore" Style="{StaticResource Dialog}" Width="720" Visibility="Collapsed">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <StackPanel Margin="28,22,28,10">
+                        <TextBlock Text="Package store" FontSize="20" FontWeight="SemiBold"/>
+                        <TextBlock Style="{StaticResource Subtitle}" TextWrapping="Wrap" Text="Intune cannot give packages back, so every version of a custom application is kept in a document library of a private SharePoint site in your tenant: the package, the original installer files, the certificate and a manifest with the SHA256 of everything. That is what makes updating and editing from another PC possible."/>
+                    </StackPanel>
+                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="400">
+                        <StackPanel Margin="28,0,28,8">
+                            <TextBlock Text="1. Create a private SharePoint site (team or communication site), members: only the administrators of Intune apps. Whoever can write there can replace an installer that becomes an app for all devices." Style="{StaticResource Hint}" TextWrapping="Wrap"/>
+                            <TextBlock Text="2. Address of the site" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
+                            <TextBox x:Name="TxtStoreSite" AutomationProperties.Name="SharePoint site address" ToolTip="https://contoso.sharepoint.com/sites/PackTune"/>
+                            <TextBlock Text="Document library" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
+                            <TextBox x:Name="TxtStoreLibrary" AutomationProperties.Name="Document library"/>
+                            <TextBlock Text="3. An administrator grants PackTune access to this one site (role write, or manage when the library has to be created). The sign-in needs Sites.FullControl.All and is used for this call only; daily work uses Sites.Selected." Style="{StaticResource Hint}" TextWrapping="Wrap" Margin="0,12,0,0"/>
+                            <WrapPanel Margin="0,8,0,0">
+                                <Button x:Name="BtnStoreGrant" Content="Grant access (administrator) ..." Margin="0,0,8,6"/>
+                                <Button x:Name="BtnStoreCreate" Content="Create library" Margin="0,0,8,6"/>
+                            </WrapPanel>
+                            <TextBlock x:Name="TxtStoreStatus" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                        </StackPanel>
+                    </ScrollViewer>
+                    <Border Grid.Row="2" Style="{StaticResource DialogFooter}" Padding="28,14">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                <Button x:Name="BtnStoreClose" Content="Close" Margin="0,0,8,0" Padding="16,8"/>
+                                <Button x:Name="BtnStoreSave" Style="{StaticResource PrimaryButton}" Padding="18,8" Content="Save and check"/>
                             </StackPanel>
                         </Grid>
                     </Border>

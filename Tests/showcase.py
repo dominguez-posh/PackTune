@@ -167,7 +167,7 @@ def save_png(img, path, oxipng):
 
 
 def run_shots(a):
-    names = ('start', 'apps', 'deploy', 'tenant', 'schedule', 'status', 'import', 'activity', 'settings')
+    names = ('start', 'apps', 'deploy', 'tenant', 'schedule', 'status', 'import', 'activity', 'settings', 'custom', 'custom-dialog', 'package-store')
     os.makedirs(a.out, exist_ok=True)
     wins = {}
     for n in names:

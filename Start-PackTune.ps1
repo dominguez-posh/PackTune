@@ -679,7 +679,7 @@ function Show-Page([string]$Name) {
     $navName = if ($Name -eq 'Status') { 'Tenant' } else { $Name }
     $ui["Nav$navName"].IsChecked = $true
     switch ($Name) {
-        'Start'    { $script:SandboxState = $null; Update-Readiness }
+        'Start'    { $script:SandboxState = $null; Update-Readiness; if (-not $script:StoreState) { Start-StoreCheck } }
         'Apps'     { Update-CatalogRows; Update-AppList; Start-CatalogPrefetch }
         'Custom'   { if ((Test-SignedIn) -and $null -eq $script:CustomApps) { Start-CustomRefresh } else { Update-CustomRows } }
         'Tenant'   { if ((Test-SignedIn) -and $null -eq $script:TenantApps -and -not (Test-TaskRunning 'tenant')) { Start-TenantRefresh } else { Update-TenantRows } }
@@ -697,13 +697,13 @@ foreach ($p in 'Start', 'Apps', 'Custom', 'Tenant', 'Activity', 'Settings') {
 }
 
 function Show-Dialog([string]$Name) {
-    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgHelp') { $ui[$d].Visibility = if ($d -eq $Name) { 'Visible' } else { 'Collapsed' } }
+    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgHelp') { $ui[$d].Visibility = if ($d -eq $Name) { 'Visible' } else { 'Collapsed' } }
     $ui.DialogLayer.Visibility = 'Visible'
     $script:OpenDialog = $Name
 }
 function Close-Dialog {
     $ui.DialogLayer.Visibility = 'Collapsed'
-    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgHelp') { $ui[$d].Visibility = 'Collapsed' }
+    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgHelp') { $ui[$d].Visibility = 'Collapsed' }
     $script:OpenDialog = $null
 }
 $script:OpenDialog = $null
@@ -871,6 +871,7 @@ function Get-ReadinessItems {
                                       Fix = 'Get it'; Action = { Start-Process $script:SandboxStudioUrl } } }
         else { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'ok'; Optional = $true; Text = 'Windows Sandbox and MSIX Sandbox Studio are ready for the Test buttons.' } }
     )
+    $items += Get-StoreReadinessItems
     $items
 }
 
@@ -1406,13 +1407,19 @@ Add-Click $ui.BtnCustomRefresh { $script:CustomApps = $null; Start-CustomRefresh
 function Show-CustomDetails($App) {
     $ui.PanelCustomDetails.Visibility = if ($App) { 'Visible' } else { 'Collapsed' }
     if (-not $App) { return }
+    $isMsix = $App.Kind -eq 'msix'
     $ui.TxtCustomTitle.Text = $App.DisplayName
-    $ui.TxtCustomMeta.Text = "$($App.Kind.ToUpper()) application, $($App.Publisher)"
+    $ui.TxtCustomMeta.Text = "$(if ($isMsix) { 'MSIX (captured)' } else { 'MSI' }) application, $($App.Publisher)"
     $ui.TxtCustomVersion.Text = $App.Version
-    $ui.TxtCustomProduct.Text = $App.ProductCode
-    $ui.TxtCustomUpgrade.Text = $App.UpgradeCode
+    $ui.LblCustomProduct.Text = if ($isMsix) { 'Package identity' } else { 'Product code' }
+    $ui.LblCustomUpgrade.Text = if ($isMsix) { 'Certificate of this version' } else { 'Upgrade code' }
+    $ui.TxtCustomProduct.Text = if ($isMsix) { $App.Identity } else { $App.ProductCode }
+    $ui.TxtCustomUpgrade.Text = if ($isMsix) { $App.Thumbprint } else { $App.UpgradeCode }
     $ui.TxtCustomAssigned.Text = Get-IntentsText $App.Intents
-    $ui.BtnCustomNewVersion.IsEnabled = ($App.Kind -eq 'msi')
+    $ui.BtnCustomNewVersion.IsEnabled = $true
+    $ui.TxtCustomVersionHint.Text = if ($isMsix) { 'Rebuilds the package on top of the previous version (restored from the package store) with a new installer: a new app supersedes this one on the devices.' } else { 'Pick a newer MSI: a new app is created that supersedes this one on the devices.' }
+    $ui.TxtCustomStore.Text = if ($App.Manifest) { "Kept in the package store (manifest $($App.Manifest))." } elseif ($isMsix) { 'No manifest in the notes: not kept in the package store.' } else { 'Not kept in the package store (none was set up when it was deployed).' }
+    $ui.BtnCustomExport.IsEnabled = [bool]$App.Manifest
 }
 $ui.LstCustom.Add_SelectionChanged({
     $row = $ui.LstCustom.SelectedItem
@@ -1493,31 +1500,151 @@ Add-Click $ui.BtnCustomFolder {
     $dlg.Description = 'Folder with the MSI (several MSI files: you choose one)'
     if ($dlg.ShowDialog() -eq 'OK') { Set-CustomPath $dlg.SelectedPath }
 }
+function Get-CustomEntryCandidates([string]$Folder) {
+    # Files that can start an installation: installers and scripts (relative paths, the shortest first)
+    if (-not $Folder -or -not (Test-Path -LiteralPath $Folder -PathType Container)) { return @() }
+    $root = (Get-Item -LiteralPath $Folder).FullName.TrimEnd('\')
+    @(Get-ChildItem -LiteralPath $root -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Extension -in '.exe', '.msi', '.ps1', '.cmd', '.bat' } | Select-Object -First 300 |
+        ForEach-Object { $_.FullName.Substring($root.Length + 1) } | Sort-Object { $_.Length }, { $_ })
+}
+function Set-OtherFolder([string]$Folder) {
+    $ui.TxtOtherFolder.Text = $Folder
+    $entries = Get-CustomEntryCandidates $Folder
+    $ui.CmbOtherEntry.ItemsSource = $entries
+    if ($entries.Count) {
+        $ui.CmbOtherEntry.SelectedIndex = 0
+        $setup = @($entries | Where-Object { $_ -match '(?i)(^|\\)(setup|install)[^\\]*\.(exe|msi)$' } | Select-Object -First 1)
+        if ($setup.Count) { $ui.CmbOtherEntry.SelectedItem = $setup[0] }
+        $ui.CmbOtherEntry.Text = [string]$ui.CmbOtherEntry.SelectedItem
+    }
+    if ($Folder -and -not $ui.TxtOtherName.Text -and $script:CustomMode -eq 'New') { $ui.TxtOtherName.Text = (Split-Path $Folder -Leaf) -replace '[-_.]+', ' ' }
+    $ui.TxtCustomDlgStatus.Text = if ($Folder -and -not $entries.Count) { 'No .exe, .msi, .ps1, .cmd or .bat file in this folder.' } else { '' }
+    Update-OtherDeploy
+}
+function Update-OtherDeploy {
+    # The button is on when everything that is needed is filled in
+    if ($script:CustomMode -notin 'New', 'Update' -or $script:CustomKind -ne 'Other') { return }
+    $folderOk = $ui.TxtOtherFolder.Text.Trim() -and (Test-Path -LiteralPath $ui.TxtOtherFolder.Text.Trim() -PathType Container)
+    if ($script:CustomMode -eq 'Update') { $ok = ($folderOk -or -not $ui.TxtOtherFolder.Text.Trim()) -and $ui.TxtOtherVersion.Text.Trim() }
+    else { $ok = $folderOk -and [string]$ui.CmbOtherEntry.Text -and $ui.TxtOtherName.Text.Trim() -and $ui.TxtOtherVersion.Text.Trim() }
+    $ui.BtnCustomDeploy.IsEnabled = [bool]$ok
+}
+function Set-CustomKind([string]$Kind) {
+    $script:CustomKind = $Kind
+    $ui.PanelCustomMsi.Visibility = ConvertTo-Vis ($Kind -eq 'Msi')
+    $ui.PanelCustomOther.Visibility = ConvertTo-Vis ($Kind -eq 'Other')
+    $ui.TxtCustomOther.Visibility = ConvertTo-Vis ($Kind -eq 'Msi' -and $script:CustomMode -eq 'New' -and -not $ui.RbCustomOther.IsEnabled)
+    if ($Kind -eq 'Other') { $ui.BtnCustomDeploy.IsEnabled = $false; $ui.BtnCustomTest.Visibility = 'Collapsed'; $ui.BtnCustomDeploy.Content = if ($script:CustomMode -eq 'Update') { 'Capture and publish' } else { 'Capture and deploy' }; Update-OtherDeploy }
+    else { $ui.BtnCustomTest.Visibility = 'Visible'; $ui.BtnCustomDeploy.Content = if ($script:CustomMode -eq 'Version') { 'Publish version' } else { 'Deploy' }; $ui.BtnCustomDeploy.IsEnabled = [bool]$script:CustomInfo }
+}
+$script:CustomKind = 'Msi'
+$ui.CmbOtherAssign.ItemsSource = @('Required (installed on all devices)', 'Available in the Company Portal', 'None (assign in Intune yourself)')
+$ui.CmbOtherAssign.SelectedIndex = $ui.CmbCustomAssign.SelectedIndex
+$ui.RbCustomMsi.Add_Checked({ if ($script:OpenDialog -eq 'DlgCustom') { Set-CustomKind 'Msi' } })
+$ui.RbCustomOther.Add_Checked({ if ($script:OpenDialog -eq 'DlgCustom') { Set-CustomKind 'Other' } })
+foreach ($c in $ui.TxtOtherName, $ui.TxtOtherVersion, $ui.TxtOtherArgs) { $c.Add_TextChanged({ try { Update-OtherDeploy } catch { } }) }
+$ui.CmbOtherEntry.Add_SelectionChanged({ try { Update-OtherDeploy } catch { } })
+$ui.CmbOtherEntry.AddHandler([System.Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent, [System.Windows.RoutedEventHandler] { try { Update-OtherDeploy } catch { } })
+$ui.TxtOtherFolder.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { try { Set-OtherFolder $ui.TxtOtherFolder.Text.Trim().Trim('"') } catch { Show-Error $_.Exception.Message } } })
+$ui.TxtOtherFolder.Add_LostFocus({ try { Set-OtherFolder $ui.TxtOtherFolder.Text.Trim().Trim('"') } catch { } })
+Add-Click $ui.BtnOtherFolder {
+    Add-Type -AssemblyName System.Windows.Forms
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = 'Folder with ALL files of the installation (setup, data, scripts)'
+    if ($dlg.ShowDialog() -eq 'OK') { Set-OtherFolder $dlg.SelectedPath }
+}
 function Show-CustomDialog([string]$Mode, $App) {
+    # New: new application (MSI or Other) | Version: new MSI version | Update: new capture of an MSIX application
     $script:CustomMode = $Mode
     $script:CustomUpdateApp = $App
-    $isVersion = $Mode -eq 'Version'
-    $ui.TxtCustomDlgTitle.Text = if ($isVersion) { "New version of $($App.DisplayName)" } else { 'New application' }
-    $ui.TxtCustomDlgSub.Text = if ($isVersion) { "Installed version: $($App.Version). Pick the newer MSI of the same product." } else { 'Choose how the software is packaged.' }
-    $ui.BoxCustomKind.Visibility = ConvertTo-Vis (-not $isVersion)
-    $ui.TxtCustomOther.Visibility = ConvertTo-Vis (-not $isVersion)
-    $ui.PanelCustomAssign.Visibility = ConvertTo-Vis (-not $isVersion)
-    $ui.BtnCustomDeploy.Content = if ($isVersion) { 'Publish version' } else { 'Deploy' }
+    $script:CustomInfo = $null
+    $isNew = $Mode -eq 'New'
+    $studio = Get-PackTuneStudioState
+    $ui.RbCustomOther.IsEnabled = ($studio.State -eq 'Ready')
+    $ui.RbCustomOther.ToolTip = if ($studio.State -eq 'Ready') { 'Installers, scripts and several files: captured as MSIX in Windows Sandbox' } else { $studio.Message }
+    $ui.TxtCustomOther.Text = if ($studio.State -eq 'Ready') { 'Other: installers, scripts and several files are captured as an MSIX in Windows Sandbox.' } else { "Other (EXE setups, scripts, several files) is not available: $($studio.Message)" }
+    $ui.TxtCustomDlgTitle.Text = switch ($Mode) { 'Version' { "New version of $($App.DisplayName)" } 'Update' { "New version of $($App.DisplayName)" } default { 'New application' } }
+    $ui.TxtCustomDlgSub.Text = switch ($Mode) {
+        'Version' { "Installed version: $($App.Version). Pick the newer MSI of the same product." }
+        'Update' { "Installed version: $($App.Version). The previous package is restored from the package store in a fresh sandbox, the new installer runs on top of it, and the result goes out as a new version." }
+        default { 'Choose how the software is packaged.' }
+    }
+    $ui.BoxCustomKind.Visibility = ConvertTo-Vis $isNew
+    $ui.PanelCustomAssign.Visibility = ConvertTo-Vis $isNew
+    $ui.PanelOtherAssign.Visibility = ConvertTo-Vis $isNew
+    $ui.GridOtherIdentity.Visibility = ConvertTo-Vis $true
     $ui.TxtCustomProps.Text = ''
     $ui.TxtCustomDlgStatus.Text = ''
     $ui.CmbCustomMsi.Visibility = 'Collapsed'
     Set-CustomPath ''
+    foreach ($c in $ui.TxtOtherFolder, $ui.TxtOtherArgs, $ui.TxtOtherName, $ui.TxtOtherPublisher) { $c.Text = '' }
+    $ui.CmbOtherEntry.ItemsSource = @(); $ui.CmbOtherEntry.Text = ''
+    $ui.TxtOtherVersion.Text = if ($Mode -eq 'Update') { Get-PackTuneNextVersion $App.Version } else { '1.0.0.0' }
+    $ui.TxtOtherName.IsEnabled = $isNew; $ui.TxtOtherPublisher.IsEnabled = $isNew
+    if ($Mode -eq 'Update') {
+        $ui.TxtOtherName.Text = $App.DisplayName; $ui.TxtOtherPublisher.Text = $App.Publisher
+        $ui.LblOtherFolder.Text = 'New installer folder (empty: the stored installer files are used again)'
+        $ui.TxtOtherInfo.Text = 'Leave the folder empty to rebuild from the stored installer files, or point to a folder with the new files (for example an export that you edited). Entry point and arguments are taken from the stored recipe when left empty.'
+    }
+    else {
+        $ui.LblOtherFolder.Text = 'Folder with all installation files'
+        $ui.TxtOtherInfo.Text = 'The capture runs unattended in a fresh Windows Sandbox and takes a few minutes. The original files are kept with every version in the package store, signed with a certificate made for this version alone.'
+    }
+    $ui.RbCustomMsi.IsChecked = $true
+    Set-CustomKind $(if ($Mode -eq 'Update') { 'Other' } else { 'Msi' })
     Show-Dialog 'DlgCustom'
 }
 Add-Click $ui.BtnCustomNew { Show-CustomDialog 'New' $null }
 Add-Click $ui.BtnCustomNewVersion {
     $app = Get-SelectedCustomApp
-    if ($app) { Show-CustomDialog 'Version' $app }
+    if (-not $app) { return }
+    if ($app.Kind -eq 'msix') {
+        $studio = Get-PackTuneStudioState
+        if ($studio.State -ne 'Ready') { throw $studio.Message }
+        Show-CustomDialog 'Update' $app
+    }
+    else { Show-CustomDialog 'Version' $app }
 }
 Add-Click $ui.BtnCustomCancel { Close-Dialog }
 Add-Click $ui.BtnCustomDeploy {
-    if (-not $script:CustomInfo) { throw 'Choose an MSI first.' }
     if (-not (Test-SignedIn)) { throw 'Sign in to Intune first (Sign in, top right).' }
+    if ($script:CustomKind -eq 'Other') {
+        $folder = $ui.TxtOtherFolder.Text.Trim().Trim('"')
+        $entry = [string]$ui.CmbOtherEntry.Text
+        $name = $ui.TxtOtherName.Text.Trim()
+        $version = $ui.TxtOtherVersion.Text.Trim()
+        if ($version -notmatch '^\d+(\.\d+){0,3}$') { throw "The version '$version' must be a number like 1.0.0.0." }
+        if ($script:CustomMode -eq 'Update') {
+            $old = $script:CustomUpdateApp
+            $arguments = @{ Id = $old.Id; Version = $version }
+            if ($folder) { $arguments.Folder = $folder }
+            if ($entry) { $arguments.Entry = $entry }
+            if ($ui.TxtOtherArgs.Text.Trim()) { $arguments.Args = $ui.TxtOtherArgs.Text.Trim() }
+            Close-Dialog
+            Update-UiToken
+            $work = 'param($Id, $Version, $Folder, $Entry, $Args) $p = @{ AppId = $Id; Version = $Version }; if ($Folder) { $p.InstallerFolder = $Folder }; if ($Entry) { $p.EntryPoint = $Entry }; if ($Args) { $p.Arguments = $Args }; Update-PackTuneCustomOtherApp @p'
+            [void](Start-UiTask -Kind 'custom' -Title "Capturing version $version of $($old.DisplayName) in Windows Sandbox (a few minutes)" -Display "$($old.DisplayName) $version" -NeedsAuth -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
+                param($Result, $Job)
+                if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] published: devices with the old version get it through supersedence." 'Success'; Show-Toast "$($Job.Display) was published." 'ok' }
+                $script:CustomApps = $null; Start-CustomRefresh
+            })
+        }
+        else {
+            $assign = $script:AssignValues[[Math]::Max(0, $ui.CmbOtherAssign.SelectedIndex)]
+            Close-Dialog
+            Update-UiToken
+            $arguments = @{ Folder = $folder; Entry = $entry; Args = $ui.TxtOtherArgs.Text.Trim(); Name = $name; Version = $version; Publisher = $ui.TxtOtherPublisher.Text.Trim(); Assignment = $assign }
+            $work = 'param($Folder, $Entry, $Args, $Name, $Version, $Publisher, $Assignment) New-PackTuneCustomOtherApp -Folder $Folder -EntryPoint $Entry -Arguments $Args -Name $Name -Version $Version -Publisher $Publisher -Assignment $Assignment'
+            [void](Start-UiTask -Kind 'custom' -Title "Capturing $name in Windows Sandbox (a few minutes), then deploying" -Display "$name $version" -NeedsAuth -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
+                param($Result, $Job)
+                if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] captured, stored and created in Intune." 'Success'; Show-Toast "$($Job.Display) is in Intune." 'ok' }
+                $script:CustomApps = $null; Start-CustomRefresh
+            })
+        }
+        Show-Page 'Activity'
+        return
+    }
+    if (-not $script:CustomInfo) { throw 'Choose an MSI first.' }
     $props = ConvertFrom-CustomProps $ui.TxtCustomProps.Text
     $msi = $script:CustomInfo.Path
     $name = $script:CustomInfo.Name
@@ -1568,11 +1695,115 @@ Add-Click $ui.BtnCustomRemove {
     $app = Get-SelectedCustomApp
     if (-not $app) { return }
     if (-not (Confirm-Action "Remove '$($app.DisplayName) $($app.Version)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software.")) { return }
+    $deleteStore = $false
+    if ($script:Settings.StoreSiteUrl -and $app.AppId -and @($script:CustomApps | Where-Object { $_.AppId -eq $app.AppId }).Count -le 1) {
+        $deleteStore = Confirm-Action "This is the last Intune app of '$($app.DisplayName)'.`n`nAlso delete its stored files (packages, original installer files, certificates) from the package store?`n`nYes: delete them (SharePoint keeps them in its recycle bin).`nNo: keep them, so the application can still be exported."
+    }
     Update-UiToken
-    [void](Start-UiTask -Kind 'custom' -Title "Removing $($app.DisplayName) from Intune" -Display $app.DisplayName -NeedsAuth -Arguments @{ Id = $app.Id } -Work 'param($Id) Remove-PackTuneCustomApp -Id $Id' -OnDone {
+    $work = if ($deleteStore) { 'param($Id) Remove-PackTuneCustomApp -Id $Id -DeleteStore' } else { 'param($Id) Remove-PackTuneCustomApp -Id $Id' }
+    [void](Start-UiTask -Kind 'custom' -Title "Removing $($app.DisplayName) from Intune" -Display $app.DisplayName -NeedsAuth -Arguments @{ Id = $app.Id } -Work $work -OnDone {
         param($Result, $Job)
         if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] removed from Intune." 'Success'; Show-Toast "$($Job.Display) was removed from Intune." 'ok' }
         $script:CustomApps = $null; Show-CustomDetails $null; Start-CustomRefresh
+    })
+}
+Add-Click $ui.BtnCustomExport {
+    $app = Get-SelectedCustomApp
+    if (-not $app) { return }
+    if (-not $script:Settings.StoreSiteUrl) { throw 'No package store is set up (Start page, Package store).' }
+    $target = $script:ExportTarget
+    if (-not $target) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dlg.Description = "Folder for the export of $($app.DisplayName) $($app.Version) (a sub folder is created)"
+        if ($dlg.ShowDialog() -ne 'OK') { return }
+        $target = $dlg.SelectedPath
+    }
+    $destination = Join-Path $target ("$($app.AppId)-$($app.Version)")
+    Update-UiToken
+    [void](Start-UiTask -Kind 'custom' -Title "Exporting $($app.DisplayName) $($app.Version) from the package store" -Display "Export $($app.DisplayName)" -NeedsAuth -Arguments @{ AppId = $app.AppId; Version = $app.Version; Destination = $destination } `
+        -Work 'param($AppId, $Version, $Destination) Export-PackTuneCustomApp -AppId $AppId -Version $Version -Destination $Destination' -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'succeeded') {
+            $saved = @($Result | Where-Object { $_.Destination }) | Select-Object -First 1
+            Write-UiLog "[$($Job.Display)] saved and checked in $($saved.Destination). Edit the files in 'installer', then New version." 'Success'
+            Show-Toast "$($Job.Display) was saved to $($saved.Destination)." 'ok'
+            if (-not $env:PACKTUNE_SMOKE -and $saved.Destination) { Start-Process explorer.exe $saved.Destination }
+        }
+    })
+}
+
+# ---------------------------------------------------------------- package store and Sandbox Studio (readiness, dialog)
+$script:StoreState = $null
+function Start-StoreCheck {
+    if (-not (Test-SignedIn) -or (Test-TaskRunning 'storecheck')) { return }
+    if (-not $script:Settings.StoreSiteUrl) { $script:StoreState = [pscustomobject]@{ State = 'NotConfigured'; Message = 'Enter the address of the SharePoint site that keeps the packages.' }; Update-Readiness; return }
+    # Tests: no request to Microsoft Graph from the smoke run
+    if ($env:PACKTUNE_SMOKE) { $script:StoreState = [pscustomobject]@{ State = 'NoAccess'; Message = 'The site cannot be read (smoke test). An administrator grants PackTune access to this one site (Grant access).' }; Update-Readiness; return }
+    Update-UiToken
+    [void](Start-UiTask -Kind 'storecheck' -Title 'Checking the package store' -Display 'Package store' -Hidden -NeedsAuth -Pool $script:UserPool -Work 'Get-PackTuneStoreState | Select-Object State, Message' -OnDone {
+        param($Result, $Job)
+        $r = @($Result | Where-Object { $_.State }) | Select-Object -First 1
+        $script:StoreState = if ($r) { $r } else { [pscustomobject]@{ State = 'NoAccess'; Message = 'The package store could not be checked, see Activity.' } }
+        Update-Readiness
+        if ($script:OpenDialog -eq 'DlgStore') { Update-StoreDialog }
+    })
+}
+function Get-StoreReadinessItems {
+    $studio = Get-PackTuneStudioState
+    $items = @()
+    $items += if ($studio.State -eq 'Ready') { @{ Key = 'studio'; Title = 'Custom applications: MSIX capture (optional)'; State = 'ok'; Optional = $true; Text = $studio.Message } }
+              else { @{ Key = 'studio'; Title = 'Custom applications: MSIX capture (optional)'; State = 'warn'; Optional = $true; Text = "$($studio.Message) MSI applications work without it."; Fix = 'Get it'; Action = { Start-Process $script:SandboxStudioUrl } } }
+    $items += if (-not (Test-SignedIn)) { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Text = 'Keeps every version of a custom application in a private SharePoint library, so it can be updated and edited from any PC. Sign in first.' } }
+              elseif (-not $script:Settings.StoreSiteUrl) { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Text = 'Keeps every version of a custom application in a private SharePoint library, so it can be updated and edited from any PC. MSIX applications need it.'; Fix = 'Set up'; Action = { Show-StoreDialog } } }
+              elseif (-not $script:StoreState) { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'storecheck'); Text = 'Checking the package store ...'; Fix = 'Check'; Action = { Start-StoreCheck } } }
+              elseif ($script:StoreState.State -eq 'Ready') { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'ok'; Optional = $true; Text = $script:StoreState.Message } }
+              else { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Text = $script:StoreState.Message; Fix = 'Set up'; Action = { Show-StoreDialog } } }
+    return $items
+}
+function Update-StoreDialog {
+    $ui.TxtStoreStatus.Text = if ($script:StoreState) { $script:StoreState.Message } elseif ($script:Settings.StoreSiteUrl) { 'Not checked yet.' } else { '' }
+    $ui.TxtStoreStatus.Foreground = if ($script:StoreState -and $script:StoreState.State -eq 'Ready') { $script:PillColors['ok'][1] } else { [System.Windows.Media.Brushes]::Black }
+    $ui.BtnStoreCreate.IsEnabled = ($script:StoreState -and $script:StoreState.State -eq 'NoLibrary')
+    $ui.BtnStoreGrant.IsEnabled = [bool]$script:Settings.StoreSiteUrl -and (Test-SignedIn)
+}
+function Show-StoreDialog {
+    $ui.TxtStoreSite.Text = $script:Settings.StoreSiteUrl
+    $ui.TxtStoreLibrary.Text = $script:Settings.StoreLibrary
+    Update-StoreDialog
+    Show-Dialog 'DlgStore'
+}
+Add-Click $ui.BtnStoreClose { Close-Dialog }
+Add-Click $ui.BtnStoreSave {
+    $s = Get-PackTuneSettings
+    $s.StoreSiteUrl = $ui.TxtStoreSite.Text.Trim(); $s.StoreLibrary = $ui.TxtStoreLibrary.Text.Trim()
+    [void](Save-PackTuneSettings -Settings $s)
+    $script:Settings = Get-PackTuneSettings
+    $script:StoreState = $null
+    Update-StoreDialog
+    Start-StoreCheck
+    Update-Readiness
+}
+Add-Click $ui.BtnStoreCreate {
+    Update-UiToken
+    [void](Start-UiTask -Kind 'store' -Title 'Creating the document library of the package store' -Display 'Package store' -NeedsAuth -Pool $script:UserPool -Work 'Initialize-PackTuneStore | Out-Null' -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'succeeded') { Write-UiLog 'The document library of the package store was created.' 'Success' }
+        $script:StoreState = $null; Start-StoreCheck
+    })
+}
+Add-Click $ui.BtnStoreGrant {
+    if (-not $script:Settings.StoreSiteUrl) { throw 'Save the address of the site first.' }
+    $token = $null
+    try { $token = Get-EmbeddedToken -TenantID $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'organizations' }) -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Sites.FullControl.All') -Hint 'Sign in with an administrator account: it grants PackTune access to this one SharePoint site.' }
+    catch { if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Write-UiLog 'Sign-in cancelled.' }; return }
+    $role = if ($script:StoreState -and $script:StoreState.State -eq 'NoLibrary') { 'manage' } else { 'write' }
+    $access = if ($token) { [string]$token.access_token } else { '' }
+    [void](Start-UiTask -Kind 'store' -Title "Granting PackTune access to the SharePoint site (role $role)" -Display 'Package store' -Pool $script:UserPool -Arguments @{ Site = $script:Settings.StoreSiteUrl; Client = $script:Settings.ClientID; Token = $access; Role = $role } `
+        -Work 'param($Site, $Client, $Token, $Role) $p = @{ SiteUrl = $Site; ClientID = $Client; Role = $Role }; if ($Token) { $p.Token = $Token }; Grant-PackTuneStoreAccess @p | Out-Null' -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'succeeded') { Write-UiLog 'PackTune has access to the SharePoint site now.' 'Success'; Show-Toast 'Access to the SharePoint site granted.' 'ok' }
+        $script:StoreState = $null; Start-StoreCheck
     })
 }
 

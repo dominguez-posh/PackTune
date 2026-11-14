@@ -69,7 +69,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Update-SandboxState
         Test-Smoke 'settings were copied from the folder of the earlier name' ((Test-Path (Join-Path $env:LOCALAPPDATA 'PackTune\settings.json')) -and (Test-Path (Join-Path $env:LOCALAPPDATA 'PackTune\migrated-from-intunechoco.txt')) -and (Test-Path (Join-Path $env:LOCALAPPDATA 'IntuneChocoDeployment\settings.json'))) ''
         Test-Smoke 'fake module counts as installed' $script:ModuleState.Ok $script:ModuleState.Version
-        Test-Smoke 'readiness shows 6 items' ($ui.ReadinessPanel.Children.Count -eq 6) $ui.ReadinessPanel.Children.Count
+        Test-Smoke 'readiness shows 8 items' ($ui.ReadinessPanel.Children.Count -eq 8) $ui.ReadinessPanel.Children.Count
         Test-Smoke 'signed out: split button shown, account pill hidden' ((-not (Test-SignedIn)) -and $ui.PanelSignedOut.Visibility -eq 'Visible' -and $ui.BtnAccount.Visibility -eq 'Collapsed' -and $ui.BtnSignIn.IsEnabled)
         Test-Smoke 'navigation has the five entries, no package source switch' ($ui.NavStart -and $ui.NavApps -and $ui.NavTenant -and $ui.NavActivity -and $ui.NavSettings -and $ui.NavHelp -and -not $ui.ContainsKey('SrcWinget'))
         Test-Smoke 'help dialog opens' ($(Show-Help; $ui.DialogLayer.Visibility -eq 'Visible' -and $ui.DlgHelp.Visibility -eq 'Visible' -and $ui.HelpBody.Children.Count -ge 4))
@@ -430,7 +430,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:SandboxOverride = @{ Present = $false; Home = $false; Studio = $true }
         $item = Get-SandboxItem
         Test-Smoke 'start page: Sandbox item is optional and offers Install' ($item.Optional -and $item.State -eq 'warn' -and $item.Fix -eq 'Install' -and $item.Text -like '*not installed*administrator approval*restart*') $item.Text
-        Test-Smoke 'checklist has the Sandbox item (6 rows)' ($ui.ReadinessPanel.Children.Count -eq 6)
+        Test-Smoke 'checklist has the Sandbox item (8 rows)' ($ui.ReadinessPanel.Children.Count -eq 8)
         Test-Smoke 'Test buttons disabled with the reason and a pointer to the Start page' (-not $ui.BtnDetailTest.IsEnabled -and -not $ui.BtnTenantTest.IsEnabled -and $ui.BtnDetailTest.ToolTip -like '*Windows Sandbox is not installed*Start page*' -and $ui.BtnTenantTest.ToolTip -like '*Start page*') "$($ui.BtnDetailTest.IsEnabled) $($ui.BtnTenantTest.ToolTip)"
         # Set up everything does not install it
         Start-SetupAll
@@ -624,7 +624,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Save-SmokeShot '32-custom-empty'
             & $script:ClickActions[$ui.BtnCustomNew]
             Test-Smoke 'New application opens the dialog with MSI chosen' ($ui.DlgCustom.Visibility -eq 'Visible' -and $ui.RbCustomMsi.IsChecked -and -not $ui.BtnCustomDeploy.IsEnabled) ''
-            Test-Smoke 'Other is visible but disabled until the MSIX capture exists' ((-not $ui.RbCustomOther.IsEnabled) -and $ui.TxtCustomOther.Text -like '*next step*') ''
+            Test-Smoke 'Other is available when MSIX Sandbox Studio is ready' ($ui.RbCustomOther.IsEnabled -and $ui.TxtCustomOther.Text -like '*captured as an MSIX*') $ui.TxtCustomOther.Text
             Set-CustomPath (Join-Path $s.Dir 'missing.msi')
             Test-Smoke 'a missing file is reported, nothing to deploy' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.TxtCustomRead.Text) $ui.TxtCustomRead.Text
             Set-CustomPath (Join-Path $s.Dir 'tool-1.0.msi')
@@ -674,6 +674,76 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'remove: one custom app is gone from Intune and from the list' ($fake.Count -eq 1 -and $script:CustomRows.Count -eq 1 -and $ui.PanelCustomDetails.Visibility -eq 'Collapsed') ($fake | ForEach-Object displayVersion)
             Remove-Item $s.Dir -Recurse -Force -ErrorAction SilentlyContinue
+            Show-Page 'Apps'
+            return $true
+        }
+        $true } }
+    @{ Name = 'custom applications: Other, update dialog, export, package store dialog'; Phase = 0; Do = {
+        param($s)
+        if ($s.Phase -eq 0) {
+            $s.Phase = 1
+            $s.Dir = Join-Path $env:LOCALAPPDATA 'smoke-other'; New-Item -ItemType Directory -Path (Join-Path $s.Dir 'bin') -Force | Out-Null
+            'setup' | Set-Content (Join-Path $s.Dir 'setup.exe'); 'data' | Set-Content (Join-Path $s.Dir 'bin\tool.dll'); 'x' | Set-Content (Join-Path $s.Dir 'run.cmd')
+            # an MSIX application as it would be in the tenant (made by the capture path)
+            $storePath = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
+            $apps = @(Get-Content $storePath -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+            $apps += [pscustomobject]@{ id = 'msix-app-1'; displayName = 'Captured Tool'; publisher = 'Smoke Corp'; description = 'x'; createdDateTime = (Get-Date).ToString('o')
+                notes = 'PoweredByPackTune;custom=msix;app=captured-tool-1a2b3c4d;ver=1.0.0.0;identity=PackTune.CapturedTool;thumb=' + ('AB' * 20) + ';manifest=0123456789abcdef'
+                displayVersion = '1.0.0.0'; assignment = 'available'; assignments = @([pscustomobject]@{ Type = '#microsoft.graph.allLicensedUsersAssignmentTarget'; Intent = 'available' }); dependencies = @(); supersedence = @() }
+            ConvertTo-Json -InputObject @($apps) -Depth 6 | Set-Content $storePath
+            $script:CustomApps = $null
+            Show-Page 'Custom'
+            return $false
+        }
+        if ($s.Phase -eq 1) {
+            if (-not (Test-Idle 'customlist')) { return $false }
+            $s.Phase = 2
+            $msixRows = @($script:CustomRows | Where-Object { $_['Title'] -eq 'Captured Tool' })
+            Test-Smoke 'the MSIX application is listed as MSIX' ($msixRows.Count -eq 1 -and $msixRows[0]['Kind'] -eq 'MSIX 1.0.0.0') ($script:CustomRows | ForEach-Object { $_['Kind'] })
+            $ui.LstCustom.SelectedItem = $msixRows[0]
+            Test-Smoke 'details of an MSIX app: package identity and the certificate of this version' ($ui.LblCustomProduct.Text -eq 'Package identity' -and $ui.TxtCustomProduct.Text -eq 'PackTune.CapturedTool' -and $ui.TxtCustomUpgrade.Text -eq ('AB' * 20) -and $ui.LblCustomUpgrade.Text -like 'Certificate*') ''
+            Test-Smoke 'details: kept in the package store (manifest), Export is available' ($ui.TxtCustomStore.Text -like '*manifest 0123456789abcdef*' -and $ui.BtnCustomExport.IsEnabled) $ui.TxtCustomStore.Text
+            Save-SmokeShot '36-custom-msix-details'
+            # New application, Other
+            & $script:ClickActions[$ui.BtnCustomNew]
+            $ui.RbCustomOther.IsChecked = $true
+            Test-Smoke 'Other: the panel for the installation folder shows, MSI panel hidden, nothing to deploy yet' ($ui.PanelCustomOther.Visibility -eq 'Visible' -and $ui.PanelCustomMsi.Visibility -eq 'Collapsed' -and -not $ui.BtnCustomDeploy.IsEnabled -and $ui.BtnCustomDeploy.Content -eq 'Capture and deploy' -and $ui.BtnCustomTest.Visibility -eq 'Collapsed') ''
+            Set-OtherFolder $s.Dir
+            Test-Smoke 'Other: entry point candidates (exe, cmd), setup.exe preselected, name from the folder' (@($ui.CmbOtherEntry.ItemsSource).Count -eq 2 -and $ui.CmbOtherEntry.SelectedItem -eq 'setup.exe' -and $ui.TxtOtherName.Text -eq 'smoke other') ((@($ui.CmbOtherEntry.ItemsSource)) -join ',')
+            Test-Smoke 'Other: the button is on when folder, entry point, name and version are there' ($ui.BtnCustomDeploy.IsEnabled) ''
+            $ui.TxtOtherName.Text = ''
+            Test-Smoke 'Other: without a name there is nothing to deploy' (-not $ui.BtnCustomDeploy.IsEnabled) ''
+            Save-SmokeShot '37-custom-other'
+            & $script:ClickActions[$ui.BtnCustomCancel]
+            # Update dialog of the MSIX app
+            & $script:ClickActions[$ui.BtnCustomNewVersion]
+            Test-Smoke 'New version of an MSIX app: the update dialog, next version, name fixed, stored files by default' ($ui.DlgCustom.Visibility -eq 'Visible' -and $ui.TxtCustomDlgTitle.Text -eq 'New version of Captured Tool' -and $ui.TxtOtherVersion.Text -eq '1.0.0.1' -and -not $ui.TxtOtherName.IsEnabled -and $ui.BoxCustomKind.Visibility -eq 'Collapsed' -and $ui.BtnCustomDeploy.Content -eq 'Capture and publish' -and $ui.BtnCustomDeploy.IsEnabled) $ui.TxtOtherVersion.Text
+            Save-SmokeShot '38-custom-update'
+            $ui.TxtOtherVersion.Text = ''
+            Test-Smoke 'update: without a version there is nothing to publish' (-not $ui.BtnCustomDeploy.IsEnabled) ''
+            & $script:ClickActions[$ui.BtnCustomCancel]
+            # package store dialog
+            $script:ExportTarget = $null
+            Show-StoreDialog
+            Test-Smoke 'package store dialog opens with the library name' ($ui.DlgStore.Visibility -eq 'Visible' -and $ui.TxtStoreLibrary.Text -eq 'PackTune Packages') ''
+            $ui.TxtStoreSite.Text = 'http://evil.example/x'
+            try { & $script:ClickActions[$ui.BtnStoreSave] } catch { }
+            Test-Smoke 'an invalid site address is not saved' (-not $script:Settings.StoreSiteUrl) $script:Settings.StoreSiteUrl
+            $ui.TxtStoreSite.Text = 'https://contoso.sharepoint.com/sites/PackTune'
+            & $script:ClickActions[$ui.BtnStoreSave]
+            Test-Smoke 'a valid site address is saved' ($script:Settings.StoreSiteUrl -eq 'https://contoso.sharepoint.com/sites/PackTune' -and (Get-Content $script:SettingsPath -Raw) -match 'sharepoint.com/sites/PackTune') ''
+            Test-Smoke 'the store item on the Start page asks for access' ($script:StoreState -and $script:StoreState.State -ne 'Ready' -and $ui.BtnStoreGrant.IsEnabled) ($script:StoreState | ConvertTo-Json -Compress)
+            Save-SmokeShot '39-package-store'
+            & $script:ClickActions[$ui.BtnStoreClose]
+            Show-Page 'Start'
+            $items = @(Get-ReadinessItems | Where-Object { $_.Key -in 'studio', 'store' })
+            Test-Smoke 'readiness: Sandbox Studio ready, package store not ready yet (both optional)' ($items.Count -eq 2 -and ($items | Where-Object Key -eq 'studio').State -eq 'ok' -and ($items | Where-Object Key -eq 'store').State -eq 'warn' -and @($items | Where-Object { -not $_.Optional }).Count -eq 0) (($items | ForEach-Object { "$($_.Key)=$($_.State)" }) -join ',')
+            # remove the test app and the saved site
+            $s2 = Get-PackTuneSettings; $s2.StoreSiteUrl = ''; [void](Save-PackTuneSettings -Settings $s2); $script:Settings = Get-PackTuneSettings; $script:StoreState = $null
+            $storePath = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
+            ConvertTo-Json -InputObject @(@(Get-Content $storePath -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.id -ne 'msix-app-1' })) -Depth 6 | Set-Content $storePath
+            Remove-Item $s.Dir -Recurse -Force -ErrorAction SilentlyContinue
+            $script:CustomApps = $null
             Show-Page 'Apps'
             return $true
         }

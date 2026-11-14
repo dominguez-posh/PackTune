@@ -227,6 +227,20 @@ function Get-PackTuneNextVersion {
     return ($Parts -join ".")
 }
 
+function Get-PackTuneLongPath {
+    # A path with the long names (a folder like C:\Users\LUCAS~1.DOM\... as 8.3 short names breaks the entry point check of
+    # the capture, which compares the path as given with the one .NET expands)
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not ('PackTune.LongPath' -as [type])) {
+        Add-Type -Namespace PackTune -Name LongPath -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)] public static extern int GetLongPathName(string shortPath, System.Text.StringBuilder longPath, int bufferSize);'
+    }
+    $Full = (Resolve-Path -LiteralPath $Path).ProviderPath
+    $Buffer = New-Object System.Text.StringBuilder 1024
+    $Length = [PackTune.LongPath]::GetLongPathName($Full, $Buffer, $Buffer.Capacity)
+    if ($Length -gt 0 -and $Length -lt $Buffer.Capacity) { return $Buffer.ToString().TrimEnd('\') }
+    return $Full.TrimEnd('\')
+}
+
 function Invoke-PackTuneCustomMsixBuild {
     <#
         Captures the folder to an MSIX in a fresh sandbox and signs it with a certificate made for this call: non-exportable
@@ -238,6 +252,8 @@ function Invoke-PackTuneCustomMsixBuild {
         [Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertFolder
     )
     $null = Import-PackTuneStudio
+    $Folder = Get-PackTuneLongPath -Path $Folder
+    if ($BasePackage) { $BasePackage = Get-PackTuneLongPath -Path $BasePackage }
     $Identity = Get-PackTuneCustomMsixIdentity -Name $Name
     if (-not $CertFolder) { $CertFolder = Join-Path $script:WorkRoot ("certs\" + [guid]::NewGuid().ToString("N").Substring(0, 8)) }
     New-Item -ItemType Directory -Path $CertFolder -Force | Out-Null

@@ -68,6 +68,22 @@ $script:DocSteps = [System.Collections.ArrayList]@(
     @{ Do = { param($s) if (-not (Test-DocsIdle)) { return $false }; Save-DocShot 'status'
         Show-Page 'Tenant'; $script:ImportApps = $null; Show-ImportDialog; $true } }
     @{ Do = { param($s) if (-not (Test-DocsIdle)) { return $false }; Update-ImportRows; Save-DocShot 'import'; Close-Dialog
+        # custom applications: demo data (an MSI app with two versions and a captured MSIX app), the package store dialog
+        $demo = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
+        $apps = @(Get-Content $demo -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+        $assign = @([pscustomobject]@{ Type = '#microsoft.graph.allLicensedUsersAssignmentTarget'; Intent = 'available' })
+        $apps += [pscustomobject]@{ id = 'demo-msi-2'; displayName = 'Contoso Inventory Agent'; publisher = 'Contoso Ltd'; description = 'x'; createdDateTime = (Get-Date).ToString('o'); notes = 'PoweredByPackTune;custom=msi;app=contoso-inventory-agent-1a2b3c4d;ver=2.4.0;product={7D3C9B50-1111-4C2E-9A10-000000000240};upgrade={7D3C9B50-0000-4C2E-9A10-0000000000AA};manifest=3f9a1c0be27d4c11'; displayVersion = '2.4.0'; assignment = 'available'; assignments = $assign; dependencies = @(); supersedence = @([pscustomobject]@{ targetId = 'demo-msi-1'; supersedenceType = 'update' }) }
+        $apps += [pscustomobject]@{ id = 'demo-msi-1'; displayName = 'Contoso Inventory Agent'; publisher = 'Contoso Ltd'; description = 'x'; createdDateTime = (Get-Date).AddDays(-30).ToString('o'); notes = 'PoweredByPackTune;custom=msi;app=contoso-inventory-agent-1a2b3c4d;ver=2.3.0;product={7D3C9B50-1111-4C2E-9A10-000000000230};upgrade={7D3C9B50-0000-4C2E-9A10-0000000000AA};manifest=aa00bb11cc22dd33'; displayVersion = '2.3.0'; assignment = 'available'; assignments = $assign; dependencies = @(); supersedence = @() }
+        $apps += [pscustomobject]@{ id = 'demo-msix-1'; displayName = 'Fabrikam Label Printer'; publisher = 'Fabrikam'; description = 'x'; createdDateTime = (Get-Date).AddDays(-3).ToString('o'); notes = 'PoweredByPackTune;custom=msix;app=fabrikam-label-printer-5e6f7a8b;ver=1.2.0.0;identity=PackTune.FabrikamLabelPrinter;thumb=' + ('C3' * 20) + ';manifest=9d8c7b6a5f4e3d2c'; displayVersion = '1.2.0.0'; assignment = 'required'; assignments = @([pscustomobject]@{ Type = '#microsoft.graph.allDevicesAssignmentTarget'; Intent = 'required' }); dependencies = @(); supersedence = @() }
+        ConvertTo-Json -InputObject @($apps) -Depth 6 | Set-Content $demo
+        $script:CustomApps = $null; Show-Page 'Custom'; $true } }
+    @{ Do = { param($s) if (-not (Test-DocsIdle 'customlist')) { return $false }; $ui.LstCustom.SelectedItem = @($script:CustomRows | Where-Object { $_['Title'] -eq 'Fabrikam Label Printer' })[0]; Save-DocShot 'custom'
+        $demoFolder = Join-Path $env:LOCALAPPDATA 'Fabrikam Label Printer 1.3'; New-Item -ItemType Directory -Path $demoFolder -Force | Out-Null; 'x' | Set-Content (Join-Path $demoFolder 'setup.exe')
+        & $script:ClickActions[$ui.BtnCustomNew]; $ui.RbCustomOther.IsChecked = $true; Set-OtherFolder $demoFolder; $ui.TxtOtherFolder.Text = 'C:\Installers\Fabrikam Label Printer 1.3'; $ui.TxtOtherArgs.Text = '/VERYSILENT /NORESTART'; $ui.TxtOtherPublisher.Text = 'Fabrikam'; $ui.TxtOtherName.Text = 'Fabrikam Label Printer'
+        Save-DocShot 'custom-dialog'; Close-Dialog
+        $cfg2 = Get-PackTuneSettings; $cfg2.StoreSiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; [void](Save-PackTuneSettings -Settings $cfg2); $script:Settings = Get-PackTuneSettings
+        $script:StoreState = [pscustomobject]@{ State = 'Ready'; Message = 'The package store ''PackTune Packages'' on PackTune is ready.' }
+        Show-StoreDialog; Save-DocShot 'package-store'; Close-Dialog
         Show-Page 'Settings'; Save-DocShot 'settings'; $true } }
 )
 

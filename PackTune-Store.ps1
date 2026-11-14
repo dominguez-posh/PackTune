@@ -148,11 +148,16 @@ function Grant-PackTuneStoreAccess {
         daily work needs Sites.Selected only. -Token is that administrator's access token.
     #>
     param(
-        [Parameter(Mandatory = $true)][string]$SiteUrl, [Parameter(Mandatory = $true)][string]$ClientID, [Parameter(Mandatory = $true)][string]$Token,
+        [Parameter(Mandatory = $true)][string]$SiteUrl, [Parameter(Mandatory = $true)][string]$ClientID, [string]$Token,
         [ValidateSet("write", "manage")][string]$Role = "write"
     )
     if (-not (Test-PackTuneStoreSiteUrl $SiteUrl)) { throw "The address of the SharePoint site is not valid." }
     if ($ClientID -notmatch '^[0-9a-fA-F-]{36}$') { throw "The client ID of the app registration is not valid." }
+    if (-not $Token) {
+        # No token handed over (the window of the interface was not available): sign in in the browser, with the setup app of Microsoft
+        $Tenant = if ($script:Settings.TenantID) { $script:Settings.TenantID } else { "organizations" }
+        $Token = [string](Invoke-PackTunePkceSignIn -TenantID $Tenant -ClientID "14d82eec-204b-4c2f-b7e8-296a70dab67e" -Scope "https://graph.microsoft.com/Sites.FullControl.All offline_access openid profile").access_token
+    }
     $Uri = [uri]$SiteUrl
     $Headers = @{ Authorization = "Bearer $Token" }
     $Site = Invoke-RestMethod -Uri "$($script:StoreGraph)/sites/$($Uri.Host):$($Uri.AbsolutePath.TrimEnd('/'))?`$select=id" -Headers $Headers -ErrorAction Stop
