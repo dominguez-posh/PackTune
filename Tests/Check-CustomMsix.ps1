@@ -72,6 +72,7 @@ function New-PackTuneSigningCertificate { param([string]$Subject, [string]$Outpu
     [pscustomobject]@{ Thumbprint = $thumb; Subject = $Subject; CerPath = $cer; NotAfter = (Get-Date).AddYears(5) }
 }
 function Remove-PackTuneSigningCertificate { param([string]$Thumbprint) [void]$script:Events.Add('remove'); [void]$script:CertsRemoved.Add($Thumbprint); $true }
+function Assert-PackTuneTrustCertificate { param([string]$CerPath, [string]$Publisher) $script:TrustChecked = @{ Cer = $CerPath; Publisher = $Publisher }; "X" }  # the fake certificates are text files; Check-Repos checks the real rules
 function Invoke-PackTuneMsixCapture {
     param([string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$PackageName, [string]$DisplayName, [string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertificateThumbprint, [switch]$SkipSigning, [string]$Publisher, [switch]$AllowNetwork)
     [void]$script:Events.Add('capture')

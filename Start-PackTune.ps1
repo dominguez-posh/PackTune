@@ -4709,9 +4709,9 @@ Add-Click $ui.BtnRepoAdd {
     $address = $ui.TxtRepoAddress.Text.Trim()
     if (-not $address) { throw 'Enter the repository as owner/name or its github.com address.' }
     $null = ConvertTo-PackTuneRepoKey $address
-    $repoArgs = @{ Repository = $address; Token = $ui.PwdRepoToken.Password; Own = [bool]$ui.ChkRepoOwn.IsChecked; Signed = [bool]$ui.ChkRepoSigned.IsChecked }
+    $repoArgs = @{ Repository = $address; Token = $ui.PwdRepoToken.Password; Own = [bool]$ui.ChkRepoOwn.IsChecked; Signed = [bool]$ui.ChkRepoSigned.IsChecked; Logins = @($ui.TxtRepoLogins.Text -split '[,; ]+' | Where-Object { $_ }) }
     $ui.PwdRepoToken.Clear()
-    [void](Start-UiTask -Kind 'repoadd' -Title "Connecting $address" -Display "Repository $address" -Pool $script:UserPool -Arguments $repoArgs -Work 'param($Repository, $Token, $Own, $Signed) $null = Add-PackTuneRepository -Repository $Repository -Token $Token -Own:$Own -RequireSignedCommits:$Signed' -OnDone {
+    [void](Start-UiTask -Kind 'repoadd' -Title "Connecting $address" -Display "Repository $address" -Pool $script:UserPool -Arguments $repoArgs -Work 'param($Repository, $Token, $Own, $Signed, $Logins) $null = Add-PackTuneRepository -Repository $Repository -Token $Token -Own:$Own -RequireSignedCommits:$Signed -AllowedLogins $Logins' -OnDone {
             param($Result, $Job)
             if ($Job.Status -eq 'succeeded') { $ui.TxtRepoAddress.Text = ''; Show-Toast 'Repository connected.' 'ok' }
             Update-RepoView
@@ -4731,7 +4731,7 @@ function Format-RepoApprovalText($Request) {
     $title = "$($Request.Name) $($Request.Version) from $($Request.Label) ($($Request.Repository))"
     if ($Request.ThirdParty) { $title += ' - THIRD-PARTY SOURCE' }
     $compare = if ($Request.PreviousVersion) { "Changes against the approved version $($Request.PreviousVersion):" } else { 'First approval of this app:' }
-    @($title, "Commit $($c.Sha.Substring(0, 12)) by $($c.Author) on $($c.Date)", "Message: $($c.Message)", "Signature: $(if ($c.Verified) { 'verified by GitHub' } else { 'NOT verified' })",
+    @($title, "Commit $($c.Sha.Substring(0, 12)) by $($c.Author) on $($c.Date)", "Message: $($c.Message)", "Signature: $(if ($c.Verified) { 'verified by GitHub (signed with the committer''s own key: that says who signed, not who may publish)' } else { 'NOT verified' })", "Author login: $($c.Login), committer login: $($c.CommitterLogin)", "Allowed signers of this repository: $(if (@($Request.AllowedLogins).Count) { @($Request.AllowedLogins) -join ', ' } else { 'none set (anyone with access to the repository)' })",
         "Manifest SHA256 $($Request.Manifest)", $compare, $files, 'Approving lets this exact content be deployed to your devices.') -join "`n"
 }
 Add-Click $ui.BtnRepoApprove {
