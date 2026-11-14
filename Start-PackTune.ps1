@@ -176,6 +176,56 @@ function Write-UiLog([string]$Text, [string]$Level = 'Info') {
 }
 Set-PackTuneSignInLog { param($Text, $Level) Write-UiLog $Text $(if ($Level) { $Level } else { 'Info' }) }
 
+# ---- nothing may close the window without a trace: an exception that nobody caught (in an event handler of the window, in a thread or in a task)
+# is written with its full stack to logs\crash.log and the day log and shown as a toast; the window stays open. The handlers are C#: they must
+# also work on threads that have no PowerShell runspace.
+if (-not ('PackTune.CrashGuard' -as [type])) {
+    $crashSource = @"
+using System;
+using System.IO;
+using System.Text;
+using System.Collections.Concurrent;
+using System.Threading.Tasks;
+using System.Windows.Threading;
+namespace PackTune {
+    public static class CrashGuard {
+        public static string LogFile;
+        public static ConcurrentQueue<string> Pending = new ConcurrentQueue<string>();
+        public static string Describe(Exception ex) {
+            StringBuilder sb = new StringBuilder();
+            for (Exception e = ex; e != null; e = e.InnerException) {
+                sb.AppendLine(e.GetType().FullName + ": " + e.Message);
+                try {
+                    System.Management.Automation.IContainsErrorRecord rec = e as System.Management.Automation.IContainsErrorRecord;
+                    if (rec != null && rec.ErrorRecord != null && !string.IsNullOrEmpty(rec.ErrorRecord.ScriptStackTrace)) sb.AppendLine("script stack: " + rec.ErrorRecord.ScriptStackTrace);
+                } catch { }
+                if (!string.IsNullOrEmpty(e.StackTrace)) sb.AppendLine(e.StackTrace);
+            }
+            return sb.ToString().TrimEnd();
+        }
+        public static void Report(string kind, Exception ex) {
+            string text = kind + " exception, not handled by the code: " + Describe(ex);
+            try { if (!string.IsNullOrEmpty(LogFile)) File.AppendAllText(LogFile, DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss") + "  " + text + "\r\n\r\n", Encoding.UTF8); } catch { }
+            Pending.Enqueue(text);
+        }
+        public static void Attach(Dispatcher dispatcher, string logFile) {
+            LogFile = logFile;
+            dispatcher.UnhandledException += delegate(object s, DispatcherUnhandledExceptionEventArgs e) { Report("UI", e.Exception); e.Handled = true; };
+            AppDomain.CurrentDomain.UnhandledException += delegate(object s, UnhandledExceptionEventArgs e) { Report("Thread", e.ExceptionObject as Exception); };
+            TaskScheduler.UnobservedTaskException += delegate(object s, UnobservedTaskExceptionEventArgs e) { Report("Task", e.Exception); e.SetObserved(); };
+        }
+    }
+}
+"@
+    Add-Type -ReferencedAssemblies WindowsBase, ([PSObject].Assembly.Location) -TypeDefinition $crashSource
+}
+New-Item -Path $script:LogFolder -ItemType Directory -Force -ErrorAction SilentlyContinue | Out-Null
+[PackTune.CrashGuard]::Attach($window.Dispatcher, (Join-Path $script:LogFolder 'crash.log'))
+function Get-ErrorText($Record) {
+    # The message, the script stack and the exception type of a caught error, for the log (a message alone does not say where it came from)
+    try { "$($Record.Exception.GetType().FullName): $($Record.Exception.Message)`n$($Record.ScriptStackTrace)" } catch { [string]$Record }
+}
+
 $script:Toasts = New-Object System.Collections.ArrayList
 function Show-Toast([string]$Text, [string]$Kind = 'info', [string]$ActionLabel, [scriptblock]$Action) {
     <# Short message in the corner: what a job did, or what went wrong. Success and info vanish after 6 s, problems after 12 s. #>
@@ -657,7 +707,15 @@ $timer.Add_Tick({
         }
         if ($script:Tick % 240 -eq 0 -and $script:Shared.Auth) { Update-ConnectionStatus }
     }
-    catch { Write-UiLog ($_.Exception.Message) 'Error' }
+    catch { Write-UiLog (Get-ErrorText $_) 'Error' }
+    # Exceptions that nobody caught (handlers of the window, threads, tasks): logged with the stack by CrashGuard, shown here, the window stays
+    $crash = $null
+    $shown = 0
+    while ([PackTune.CrashGuard]::Pending.TryDequeue([ref]$crash)) {
+        Write-UiLog $crash 'Error'
+        if ($shown -eq 0) { Show-Toast 'Something went wrong inside PackTune. The window stays open; Details has the log (crash.log in the logs folder).' 'bad' 'Details' { Show-Page 'Activity' } }
+        $shown++
+    }
 })
 
 # ---------------------------------------------------------------- package infos (feed cache, 24 hours)

@@ -295,6 +295,19 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:RemovedApps.Clear(); $script:PendingApps.Clear(); $script:CustomApps = $null
         $script:TenantApps = $origApps; $script:TenantPackages = $origPackages; $script:RecentDeploys = $origRecent; Update-TenantRows -Force
         $true } }
+    @{ Name = 'crash guard'; Do = {
+        # an exception that nothing catches (like one thrown in an event handler of the window) must not end the process: it is logged with the stack and the window goes on
+        $crashLog = Join-Path $script:LogFolder 'crash.log'
+        Remove-Item $crashLog -Force -ErrorAction SilentlyContinue
+        [void]$window.Dispatcher.BeginInvoke([System.Action]{ throw 'smoke boom in an event handler' })
+        $window.Dispatcher.Invoke([System.Action]{ }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+        $window.Dispatcher.Invoke([System.Action]{ }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+        $logged = (Test-Path $crashLog) -and ((Get-Content $crashLog -Raw) -match 'smoke boom in an event handler')
+        Test-Smoke 'an unhandled UI exception is written to crash.log with its stack and the window stays' ($logged -and (Get-Content $crashLog -Raw) -match 'script stack') ''
+        [PackTune.CrashGuard]::Report('Thread', (New-Object System.InvalidOperationException 'smoke boom in a thread'))
+        $line = $null; $seen = @(); while ([PackTune.CrashGuard]::Pending.TryDequeue([ref]$line)) { $seen += $line }
+        Test-Smoke 'a thread exception is logged too and queued for the log and toast of the window' ((Get-Content $crashLog -Raw) -match 'smoke boom in a thread' -and $seen.Count -ge 1)
+        $true } }
     @{ Name = 'graph outage text'; Do = {
         Test-Smoke 'a 403 "Remediations not available" is no Graph outage (the .NET text mentions the remote server)' (-not (Test-GraphReadFailureText 'The remote server returned an error: (403) Forbidden.') -and -not (Test-GraphReadFailureText 'Der Remoteserver hat einen Fehler zur?ckgegeben: (403) Unzul?ssig') -and -not (Test-GraphReadFailureText 'Authorization_RequestDenied: Insufficient privileges') -and -not (Test-GraphReadFailureText 'The remote server returned an error: (400) Bad Request'))
         Test-Smoke 'network and server errors still are' ((Test-GraphReadFailureText 'The remote name could not be resolved: graph.microsoft.com') -and (Test-GraphReadFailureText 'The remote server returned an error: (503) Server Unavailable') -and (Test-GraphReadFailureText 'Der Remotename konnte nicht aufgel?st werden') -and (Test-GraphReadFailureText 'The operation has timed out'))
@@ -800,7 +813,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if ($s.Phase -eq 4) {
-            if (-not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
+            if (-not (Test-Idle 'removeinfo') -or -not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'remove: one custom app is gone from Intune and from the list' ($fake.Count -eq 1 -and $script:CustomRows.Count -eq 1 -and $ui.PanelCustomDetails.Visibility -eq 'Collapsed') ($fake | ForEach-Object displayVersion)
             Remove-Item $s.Dir -Recurse -Force -ErrorAction SilentlyContinue
