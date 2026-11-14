@@ -1207,7 +1207,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'the old Sandbox Studio setting is gone from the settings' (-not (Get-PackTuneSettings).PSObject.Properties['SandboxStudioPath'] -and -not $ui.ContainsKey('TxtSandboxStudioPath'))
                 Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Title 'PuTTY' -Version 'latest' -Policy @{ UpdateMode = 'Custom'; GraceHours = 24 }
                 Test-Smoke 'sandbox test started: toast says Windows Sandbox opens in a moment' (@($script:Toasts | Where-Object { $_.Text -like 'Sandbox test started*Windows Sandbox opens in a moment' }).Count -eq 1)
-                Test-Smoke 'sandbox buttons turn busy at once (Starting sandbox ..., disabled), everywhere' (($ui.BtnDetailTest, $ui.BtnTenantTest, $ui.BtnCustomTest | Where-Object { $_.Content -eq 'Starting sandbox ...' -and -not $_.IsEnabled }).Count -eq 3) (($ui.BtnDetailTest, $ui.BtnTenantTest, $ui.BtnCustomTest | ForEach-Object { "$($_.Content)/$($_.IsEnabled)" }) -join ' ')
+                Test-Smoke 'sandbox buttons turn busy at once (Starting sandbox ..., disabled), everywhere' (($ui.BtnDetailTest, $ui.BtnTenantTest, $ui.BtnCustomTest | Where-Object { (Get-ButtonLabel $_) -eq 'Starting sandbox ...' -and -not $_.IsEnabled }).Count -eq 3) (($ui.BtnDetailTest, $ui.BtnTenantTest, $ui.BtnCustomTest | ForEach-Object { "$(Get-ButtonLabel $_)/$($_.IsEnabled)" }) -join ' ')
                 Test-Smoke 'the job is in Activity and the badge counts it' ((@($script:Tasks | Where-Object { $_.Job.Kind -eq 'test' -and -not $_.Hidden }).Count -eq 1) -and $ui.BadgeActivity.Visibility -eq 'Visible')
                 $script:Toasts.Clear()
                 Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Version 'latest' -Policy @{ UpdateMode = 'Off'; GraceHours = 24 }
@@ -1247,12 +1247,28 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Show-TestMenu 'Custom' $ui.BtnCustomTestMenu
                 $headers = @($script:LastMenu.Items | ForEach-Object { [string]$_.Header })
                 Test-Smoke 'Test in sandbox is a split button: Test installation and Test update from the previous version' ($headers.Count -eq 2 -and $headers[0] -eq 'Test installation' -and $headers[1] -like 'Test update from the previous version*') ($headers -join ' | ')
+                # Custom update test: the previous version comes from the package store when there is one, else a file dialog
+                $savedStore = $script:Settings.StoreSiteUrl; $savedMode = $script:CustomMode; $savedApp = $script:CustomUpdateApp
+                $script:Settings.StoreSiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; $script:CustomMode = 'Version'; $script:CustomUpdateApp = [pscustomobject]@{ AppId = 'smoke-tool-1a2b3c4d' }
+                $script:CustomInfo = [pscustomobject]@{ Name = 'Menu Tool'; Version = '2.0.0'; Path = (Join-Path $env:TEMP 'menu.msi') }
+                Show-TestMenu 'Custom' $ui.BtnCustomTestMenu
+                $storeHeaders = @($script:LastMenu.Items | ForEach-Object { [string]$_.Header })
+                $script:LastMenu.IsOpen = $false
+                $script:Settings.StoreSiteUrl = ''
+                Show-TestMenu 'Custom' $ui.BtnCustomTestMenu
+                $fileHeaders = @($script:LastMenu.Items | ForEach-Object { [string]$_.Header })
+                $script:LastMenu.IsOpen = $false
+                $script:Settings.StoreSiteUrl = $savedStore; $script:CustomMode = $savedMode; $script:CustomUpdateApp = $savedApp; $script:CustomInfo = $null
+                Test-Smoke 'custom update test: previous version from the package store, file dialog only without a store' ($storeHeaders[1] -like '*(package store)' -and $fileHeaders[1] -like '*...' -and $fileHeaders[1] -notlike '*package store*') (($storeHeaders + $fileHeaders) -join ' | ')
+                Test-Smoke 'the old static busy glyph is gone from the busy code' ((Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..\Start-PackTune.ps1') -Raw) -notmatch "Tag = \[string\]\[char\]0xE895")
                 Test-Smoke 'the drop buttons exist next to every Test in sandbox button' ($ui.BtnDetailTestMenu -and $ui.BtnTenantTestMenu -and $ui.BtnCustomTestMenu)
                 $script:LastMenu.IsOpen = $false; $script:CustomInfo = $null
                 # The update test: the previous version goes into the lab job, same Activity job and busy state
                 $script:Toasts.Clear()
                 Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Title 'PuTTY' -Version 'latest' -Policy @{ UpdateMode = 'Custom'; GraceHours = 24 } -FromVersion '0.78.0'
-                Test-Smoke 'update test: same busy state and a job named after the update' ($ui.BtnTenantTest.Content -eq 'Starting sandbox ...' -and @($script:Tasks | Where-Object { $_.Job.Kind -eq 'test' -and $_.Job.Display -like '*update from 0.78.0*' }).Count -eq 1)
+                Test-Smoke 'update test: same busy state and a job named after the update' ((Get-ButtonLabel $ui.BtnTenantTest) -eq 'Starting sandbox ...' -and @($script:Tasks | Where-Object { $_.Job.Kind -eq 'test' -and $_.Job.Display -like '*update from 0.78.0*' }).Count -eq 1)
+                $spin = $ui.BtnTenantTest.Content.Children[0]
+                Test-Smoke 'busy button: a real rotating spinner (animated rotation), not a static glyph' ($ui.BtnTenantTest.Content -is [System.Windows.Controls.StackPanel] -and $spin.RenderTransform -is [System.Windows.Media.RotateTransform] -and $spin.RenderTransform.HasAnimatedProperties)
                 $s.Phase = 3
                 return $false
             }

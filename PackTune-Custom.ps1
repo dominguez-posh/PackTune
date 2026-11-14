@@ -473,7 +473,17 @@ function Test-PackTuneCustomApp {
         Tests an MSI app in Windows Sandbox with the test lab of PackTune: the package scripts exactly as deployed (Install,
         Detect, Uninstall with one click each, as SYSTEM). Returns the verdict.
     #>
-    param([Parameter(Mandatory = $true)][string]$MsiPath, [hashtable]$Properties = @{}, [string]$PreviousMsiPath, [hashtable]$PreviousProperties = @{}, [switch]$AutoRun)
+    param([Parameter(Mandatory = $true)][string]$MsiPath, [hashtable]$Properties = @{}, [string]$PreviousMsiPath, [hashtable]$PreviousProperties = @{}, [switch]$AutoRun,
+        # Intune custom app id (the AppId of the notes): its latest stored version in the package store is the previous version
+        [string]$PreviousStoreAppId)
+    if ($PreviousStoreAppId -and -not $PreviousMsiPath) {
+        $StoreFolder = New-PackTuneWorkFolder -Name "previous-$PreviousStoreAppId"
+        Write-Host "Taking the previous version of $PreviousStoreAppId from the package store"
+        $Stored = Export-PackTuneCustomApp -AppId $PreviousStoreAppId -Destination $StoreFolder
+        $StoredMsi = if ($Stored.InstallerFolder) { Get-ChildItem -LiteralPath $Stored.InstallerFolder -Filter *.msi -Recurse -File | Select-Object -First 1 }
+        if (-not $StoredMsi) { throw "The stored version $($Stored.Version) of $PreviousStoreAppId holds no MSI." }
+        $PreviousMsiPath = $StoredMsi.FullName
+    }
     $Info = Get-PackTuneMsiInfo -Path $MsiPath
     $AppId = Get-PackTuneCustomAppId $Info
     $Scripts = Get-PackTuneCustomMsiScripts -Info $Info -AppId $AppId -ExtraArguments (ConvertTo-PackTuneMsiArguments $Properties)

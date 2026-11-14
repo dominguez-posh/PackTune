@@ -266,6 +266,31 @@ Remove-PackTuneCustomApp -Id (New-PackTuneCustomOtherApp -Folder $folder -EntryP
 $another = (Get-PackTuneCustomAppId ([pscustomobject]@{ Name = 'PackTune.AnotherThing'; UpgradeCode = '' }))
 Test-Check 'delete with the store part: the stored files of the last version go too' (@($script:Fs.Keys | Where-Object { $_ -like "$another/*" }).Count -eq 0)
 
+# --- icon: the largest Square150x150 asset of the captured package
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+function New-LogoPng([int]$Size) { $b = New-Object System.Drawing.Bitmap $Size, $Size; $g = [System.Drawing.Graphics]::FromImage($b); $g.Clear([System.Drawing.Color]::SteelBlue); $g.Dispose(); $m = New-Object IO.MemoryStream; $b.Save($m, [System.Drawing.Imaging.ImageFormat]::Png); $b.Dispose(); $m.ToArray() }
+function New-LogoMsix([string]$Path, [string]$Visual, [hashtable]$Assets) {
+    $zip = [IO.Compression.ZipFile]::Open($Path, 'Create')
+    try {
+        $e = $zip.CreateEntry('AppxManifest.xml'); $w = New-Object IO.StreamWriter($e.Open()); $w.Write("<Package xmlns='http://schemas.microsoft.com/appx/manifest/foundation/windows10' xmlns:uap='http://schemas.microsoft.com/appx/manifest/uap/windows10'><Applications><Application Id='A'><uap:VisualElements $Visual/></Application></Applications></Package>"); $w.Dispose()
+        foreach ($k in $Assets.Keys) { $e = $zip.CreateEntry($k); $s = $e.Open(); $s.Write($Assets[$k], 0, $Assets[$k].Length); $s.Dispose() }
+    }
+    finally { $zip.Dispose() }
+}
+$logoDir = Join-Path $work 'logo'; New-Item -ItemType Directory -Path $logoDir -Force | Out-Null
+$msixA = Join-Path $logoDir 'a.msix'
+New-LogoMsix $msixA "Square150x150Logo='Assets\Logo.png' Square44x44Logo='Assets\Small.png'" @{ 'Assets/Logo.scale-100.png' = (New-LogoPng 150); 'Assets/Logo.scale-200.png' = (New-LogoPng 300); 'Assets/Logo.scale-400.png' = (New-LogoPng 600); 'Assets/Small.scale-200.png' = (New-LogoPng 88) }
+$logo = Get-PackTuneMsixLogoBase64 -MsixPath $msixA
+$logoSize = if ($logo) { $img = [System.Drawing.Image]::FromStream((New-Object IO.MemoryStream (, [Convert]::FromBase64String($logo)))); $img.Width } else { 0 }
+Test-Check 'msix logo: the largest file of the Square150x150 asset (all scales) is used' ($logo -and $logoSize -ge 300) "width $logoSize"
+$msixB = Join-Path $logoDir 'b.msix'
+New-LogoMsix $msixB "Square44x44Logo='Assets\Small.png'" @{ 'Assets/Small.targetsize-48.png' = (New-LogoPng 48); 'Assets/Small.targetsize-256.png' = (New-LogoPng 256) }
+$logoB = Get-PackTuneMsixLogoBase64 -MsixPath $msixB
+Test-Check 'msix logo: without a 150 asset the 44x44 one is taken' ([bool]$logoB)
+$msixC = Join-Path $logoDir 'c.msix'
+New-LogoMsix $msixC "Square150x150Logo='Assets\Missing.png'" @{ 'Assets/Other.png' = (New-LogoPng 50) }
+Test-Check 'msix logo: no matching asset gives no icon (the fallback applies)' ($null -eq (Get-PackTuneMsixLogoBase64 -MsixPath $msixC))
 # --- readiness texts exist
 Test-Check 'the readiness helpers exist for the interface' ((Get-Command Get-PackTuneToolchainState, Get-PackTuneStoreState -ErrorAction SilentlyContinue).Count -eq 2)
 

@@ -298,6 +298,46 @@ function New-PackTuneCustomMsixPackage {
     [pscustomobject]@{ WorkPath = $WorkPath; SourcePath = $SourcePath; DetectionFile = $DetectionFile; Package = $Package }
 }
 
+function Get-PackTuneMsixLogoBase64 {
+    <#
+        The logo of a captured MSIX as PNG (base64) for the Company Portal: the largest file of the Square150x150Logo (else
+        Square44x44Logo) asset named in AppxManifest.xml (the package holds it per scale and target size). $null when
+        there is none.
+    #>
+    param([Parameter(Mandatory = $true)][string]$MsixPath)
+    $Temp = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $Zip = [IO.Compression.ZipFile]::OpenRead($MsixPath)
+        try {
+            $Entry = $Zip.GetEntry('AppxManifest.xml')
+            if (-not $Entry) { return $null }
+            $Reader = New-Object IO.StreamReader($Entry.Open())
+            try { $Xml = [xml]$Reader.ReadToEnd() } finally { $Reader.Dispose() }
+            $Visual = @($Xml.SelectNodes("//*[local-name()='VisualElements']")) | Select-Object -First 1
+            if (-not $Visual) { return $null }
+            foreach ($Attribute in 'Square150x150Logo', 'Square44x44Logo') {
+                $Path = ([string]$Visual.GetAttribute($Attribute)) -replace '\\', '/'
+                if (-not $Path) { continue }
+                $Folder = if ($Path.Contains('/')) { $Path.Substring(0, $Path.LastIndexOf('/')) + '/' } else { '' }
+                $File = $Path.Substring($Folder.Length)
+                $Base = [IO.Path]::GetFileNameWithoutExtension($File); $Ext = [IO.Path]::GetExtension($File)
+                $Pattern = '^' + [regex]::Escape($Folder + $Base) + '(\.(scale|targetsize)-\d+)?(_altform-[A-Za-z-]+)?' + [regex]::Escape($Ext) + '$'
+                $Best = @($Zip.Entries | Where-Object { $_.FullName -match $Pattern -and $_.Length -gt 0 }) | Sort-Object Length -Descending | Select-Object -First 1
+                if (-not $Best) { continue }
+                $Temp = Join-Path ([IO.Path]::GetTempPath()) ('packtune-msix-logo-' + [guid]::NewGuid().ToString('N') + $Ext)
+                [IO.Compression.ZipFileExtensions]::ExtractToFile($Best, $Temp, $true)
+                $Icon = Get-ChocoIconBase64 -ChocoName 'custom-msix-logo' -IconFile $Temp -NoIconPrompt -NoFeedLookup
+                if ($Icon) { return $Icon }
+            }
+        }
+        finally { $Zip.Dispose() }
+    }
+    catch { Write-Verbose "The logo of the MSIX could not be used: $($_.Exception.Message)" }
+    finally { if ($Temp) { Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue } }
+    $null
+}
+
 function Add-PackTuneCustomMsixIntuneApp {
     param(
         [Parameter(Mandatory = $true)]$Build, [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)]$Package, [Parameter(Mandatory = $true)][string]$DisplayName,
@@ -358,7 +398,7 @@ function New-PackTuneCustomOtherApp {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Folder, [Parameter(Mandatory = $true)][string]$EntryPoint, [string]$Arguments = "",
-        [Parameter(Mandatory = $true)][string]$Name, [string]$Version = "1.0.0.0", [string]$Publisher, [string]$Description, [string]$IconBase64,
+        [Parameter(Mandatory = $true)][string]$Name, [string]$Version = "1.0.0.0", [string]$Publisher, [string]$Description, [string]$IconBase64, [string]$FallbackIconBase64,
         [ValidateSet("Available", "Required", "None")][string]$Assignment = $script:Settings.Assignment, [switch]$AllowNetwork
     )
     Assert-PackTunePrerequisites
@@ -381,6 +421,9 @@ function New-PackTuneCustomOtherApp {
     $Recipe = [ordered]@{ format = "PackTune.Recipe"; kind = "msix"; app = $AppId; name = $Name; version = $Build.Version; publisher = $Publisher; entryPoint = $EntryPoint; arguments = $Arguments; subject = $Build.Subject; identity = $Build.PackageName; thumbprint = $Build.Thumbprint }
     $Manifest = Save-PackTuneCustomVersionToStore -AppId $AppId -Version $Build.Version -Kind "msix" -InstallerFolder $Folder -Recipe $Recipe -IntuneWin $Package.Package.Path -Msix $Build.Msix -Cer $Build.Cer -Documentation $Build.Documentation -Store $State.Store
     Write-Host "Creating and uploading $Name as win32 App to Intune"
+    # Icon: the one chosen, else the logo of the captured package, else the fallback (icon of the entry point)
+    if (-not $IconBase64) { $IconBase64 = Get-PackTuneMsixLogoBase64 -MsixPath $Build.Msix }
+    if (-not $IconBase64) { $IconBase64 = $FallbackIconBase64 }
     $App = Add-PackTuneCustomMsixIntuneApp -Build $Build -AppId $AppId -Package $Package -DisplayName $Name -Description $Description -Publisher $Publisher -IconBase64 $IconBase64 -Manifest $Manifest
     Set-PackTuneAssignment -Id $App.id -Assignment $Assignment
     Write-Host "Deployment of $Name was successful"
@@ -431,7 +474,7 @@ function Update-PackTuneCustomOtherApp {
         Write-Host "Keeping the new version in the package store"
         $NewRecipe = [ordered]@{ format = "PackTune.Recipe"; kind = "msix"; app = $OldNotes.AppId; name = [string]$Old.displayName; version = $Build.Version; publisher = [string]$Old.publisher; entryPoint = $Entry; arguments = $Args; subject = $Build.Subject; identity = $Build.PackageName; thumbprint = $Build.Thumbprint }
         $Manifest = Save-PackTuneCustomVersionToStore -AppId $OldNotes.AppId -Version $Build.Version -Kind "msix" -InstallerFolder $Folder -Recipe $NewRecipe -IntuneWin $Package.Package.Path -Msix $Build.Msix -Cer $Build.Cer -Documentation $Build.Documentation -Store $State.Store
-        $Icon = if ($IconBase64) { $IconBase64 } elseif ($Old.largeIcon -and $Old.largeIcon.value) { [string]$Old.largeIcon.value } else { $null }
+        $Icon = if ($IconBase64) { $IconBase64 } elseif ($Old.largeIcon -and $Old.largeIcon.value) { [string]$Old.largeIcon.value } else { Get-PackTuneMsixLogoBase64 -MsixPath $Build.Msix }
         $Architecture = ConvertTo-PackTuneArchitecture $Old
         if (-not $Architecture) { $Architecture = $script:Settings.Architecture }
         Write-Host "Creating and uploading the new app"

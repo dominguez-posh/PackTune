@@ -825,8 +825,8 @@ $script:RuntimeInfo = $null        # Get-PackTuneRuntimeState: State Missing | M
 $script:StatusScript = $null       # @{ State = 'Present' | 'Missing' | 'NotAvailable'; Id; Reason }
 
 function New-ReadinessCard {
-    param([int]$Number, [string]$Title, [ValidateSet('ok', 'warn', 'bad')][string]$State, [string]$Text, [string]$ActionText, [scriptblock]$Action, [bool]$Last)
-    # One row: state dot | title and text | action button
+    param([int]$Number, [string]$Title, [ValidateSet('ok', 'warn', 'bad')][string]$State, [string]$Text, [string]$ActionText, [scriptblock]$Action, [bool]$Last, [bool]$Wait)
+    # One row: state dot | title and text | action button (a running step: spinner in the dot)
     $border = New-Object System.Windows.Controls.Border
     $border.Padding = '16,14'; $border.BorderBrush = Get-Brush 'Divider'; $border.BorderThickness = $(if ($Last) { '0' } else { '0,0,0,1' })
     $grid = New-Object System.Windows.Controls.Grid
@@ -844,7 +844,7 @@ function New-ReadinessCard {
         'warn' { $dot.Background = Get-Brush 'WarningBg'; $mark.Foreground = Get-Brush 'Warning'; $mark.Text = '!' }
         default { $dot.Background = Get-Brush 'Card'; $dot.BorderBrush = ConvertTo-Brush '#8A8A8A'; $dot.BorderThickness = 1.5; $mark.Foreground = Get-Brush 'MutedText'; $mark.Text = [string]$Number }
     }
-    $dot.Child = $mark
+    $dot.Child = if ($Wait) { New-Spinner 14 (Get-Brush 'Warning') } else { $mark }
     [void]$grid.Children.Add($dot)
     $stack = New-Object System.Windows.Controls.StackPanel
     $stack.VerticalAlignment = 'Center'
@@ -956,7 +956,7 @@ function Update-Readiness {
     foreach ($i in $items) {
         $n++
         $action = if ($i.State -ne 'ok' -and $i.Action -and -not $i.Wait) { $i.Action } else { $null }
-        [void]$ui.ReadinessPanel.Children.Add((New-ReadinessCard $n $i.Title $i.State $i.Text $i.Fix $action ($n -eq $items.Count)))
+        [void]$ui.ReadinessPanel.Children.Add((New-ReadinessCard $n $i.Title $i.State $i.Text $i.Fix $action ($n -eq $items.Count) ([bool]$i.Wait)))
     }
     $open = @($items | Where-Object { $_.State -ne 'ok' -and -not $_.Optional })
     $ui.TxtReadinessSummary.Text = if ($script:SetupRunning) { 'Setting up, step by step ...' }
@@ -1402,7 +1402,7 @@ function Get-RefreshProgress {
 function Update-RefreshButton {
     $busy = (Test-TaskRunning 'popular') -or (Test-TaskRunning 'meta')
     $ui.BtnRefreshApps.IsEnabled = -not $busy
-    $ui.BtnRefreshApps.Content = if ($busy -and $script:Refreshing) { 'Refreshing ...' } else { 'Refresh versions' }
+    Set-ButtonBusy $ui.BtnRefreshApps ([bool]($busy -and $script:Refreshing)) 'Refreshing ...'
     if (-not $busy -and $script:Refreshing) {
         # A full refresh is done: the next automatic one waits an hour (the Chocolatey feed limits the requests)
         $script:Refreshing = $false
@@ -1633,7 +1633,7 @@ function Update-CustomIconPreview {
     $src = $null
     $hint = ''
     if ($script:CustomIconFile) { $src = $script:CustomIconFile; $hint = 'The icon you chose.' }
-    elseif ($script:CustomIconAuto) { $src = $script:CustomIconAuto; $hint = $(if ($script:CustomKind -eq 'Msi') { 'The icon of the MSI.' } else { 'The icon of the entry point.' }) }
+    elseif ($script:CustomIconAuto) { $src = $script:CustomIconAuto; $hint = $(if ($script:CustomKind -eq 'Msi') { 'The icon of the MSI.' } else { 'The icon of the entry point (the logo of the captured package is used when it has one).' }) }
     elseif ($script:CustomMode -in 'Version', 'Update' -and $script:CustomUpdateApp) {
         $cur = Get-TenantAppIcon $script:CustomUpdateApp
         if ($cur) { $src = $cur; $hint = 'The current icon in Intune stays unless you choose another.' }
@@ -1872,9 +1872,10 @@ Add-Click $ui.BtnCustomDeploy {
             $assign = $script:AssignValues[[Math]::Max(0, $ui.CmbOtherAssign.SelectedIndex)]
             Close-Dialog
             Update-UiToken
-            $iconFile = if ($script:CustomIconFile) { $script:CustomIconFile } else { $script:CustomIconAuto }
-            $arguments = @{ Folder = $folder; Entry = $entry; Args = $ui.TxtOtherArgs.Text.Trim(); Name = $name; Version = $version; Publisher = $ui.TxtOtherPublisher.Text.Trim(); Assignment = $assign; Network = [bool]$ui.ChkOtherNetwork.IsChecked; Icon = $(if ($iconFile) { try { Get-ChocoIconBase64 -ChocoName 'custom-other' -IconFile $iconFile -NoIconPrompt -NoFeedLookup } catch { '' } } else { '' }) }
-            $work = 'param($Folder, $Entry, $Args, $Name, $Version, $Publisher, $Assignment, $Network, $Icon) $p = @{ Folder = $Folder; EntryPoint = $Entry; Arguments = $Args; Name = $Name; Version = $Version; Publisher = $Publisher; Assignment = $Assignment; AllowNetwork = [bool]$Network }; if ($Icon) { $p.IconBase64 = $Icon }; New-PackTuneCustomOtherApp @p'
+            $arguments = @{ Folder = $folder; Entry = $entry; Args = $ui.TxtOtherArgs.Text.Trim(); Name = $name; Version = $version; Publisher = $ui.TxtOtherPublisher.Text.Trim(); Assignment = $assign; Network = [bool]$ui.ChkOtherNetwork.IsChecked
+                Icon = $(if ($script:CustomIconFile) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:CustomIconFile)) } else { '' })
+                Fallback = $(if ($script:CustomIconAuto) { try { Get-ChocoIconBase64 -ChocoName 'custom-other' -IconFile $script:CustomIconAuto -NoIconPrompt -NoFeedLookup } catch { '' } } else { '' }) }
+            $work = 'param($Folder, $Entry, $Args, $Name, $Version, $Publisher, $Assignment, $Network, $Icon, $Fallback) $p = @{ Folder = $Folder; EntryPoint = $Entry; Arguments = $Args; Name = $Name; Version = $Version; Publisher = $Publisher; Assignment = $Assignment; AllowNetwork = [bool]$Network }; if ($Icon) { $p.IconBase64 = $Icon }; if ($Fallback) { $p.FallbackIconBase64 = $Fallback }; New-PackTuneCustomOtherApp @p'
             [void](Start-UiTask -Kind 'custom' -Title "Capturing $name in Windows Sandbox (a few minutes), then deploying" -Display "$name $version" -NeedsAuth -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
                 param($Result, $Job)
                 if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] captured, stored and created in Intune." 'Success'; Show-Toast "$($Job.Display) is in Intune." 'ok' }
@@ -1912,13 +1913,14 @@ Add-Click $ui.BtnCustomDeploy {
     }
     Show-Page 'Activity'
 }
-function Start-CustomTest([string]$PreviousMsi) {
+function Start-CustomTest([string]$PreviousMsi, [string]$PreviousStoreAppId) {
     if (-not $script:CustomInfo) { return }
     if (Block-SandboxStart) { return }
     $props = ConvertFrom-CustomProps $ui.TxtCustomProps.Text
     $name = $script:CustomInfo.Name
-    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name$(if ($PreviousMsi) { " (update from the previous version)" })" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props; Previous = $PreviousMsi } `
-        -Work 'param($Msi, $Props, $Previous) $p = @{ MsiPath = $Msi; Properties = $Props }; if ($Previous) { $p.PreviousMsiPath = $Previous }; Test-PackTuneCustomApp @p -AutoRun' -OnDone {
+    $authArgs = if ($PreviousStoreAppId) { @{ NeedsAuth = $true } } else { @{} }   # the package store needs the sign-in
+    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name$(if ($PreviousMsi -or $PreviousStoreAppId) { " (update from the previous version)" })" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props; Previous = $PreviousMsi; StoreApp = $PreviousStoreAppId } @authArgs `
+        -Work 'param($Msi, $Props, $Previous, $StoreApp) $p = @{ MsiPath = $Msi; Properties = $Props }; if ($Previous) { $p.PreviousMsiPath = $Previous }; if ($StoreApp) { $p.PreviousStoreAppId = $StoreApp }; Test-PackTuneCustomApp @p -AutoRun' -OnDone {
         param($Result, $Job)
         $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
         if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Display)] the sandbox test could not run, see above." 'Error'; Show-Toast "Sandbox test of $($Job.Display) could not run: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" 'bad' 'Details' { Show-Page 'Activity' } }
@@ -3539,12 +3541,40 @@ function Get-SandboxBlocker {
     $null
 }
 
-$script:SandboxBtnLook = @{}
+function New-Spinner([double]$Size = 14, $Brush) {
+    # A rotating "sync" glyph for everything that is busy
+    $tb = New-Object System.Windows.Controls.TextBlock
+    $tb.FontFamily = $window.FindResource('IconFont'); $tb.Text = [string][char]0xE895; $tb.FontSize = $Size
+    $tb.VerticalAlignment = 'Center'; $tb.HorizontalAlignment = 'Center'
+    if ($Brush) { $tb.Foreground = $Brush }
+    $tb.RenderTransformOrigin = New-Object System.Windows.Point 0.5, 0.5
+    $rotate = New-Object System.Windows.Media.RotateTransform
+    $tb.RenderTransform = $rotate
+    $anim = New-Object System.Windows.Media.Animation.DoubleAnimation 0.0, 360.0, ([System.Windows.Duration][TimeSpan]::FromSeconds(1.1))
+    $anim.RepeatBehavior = [System.Windows.Media.Animation.RepeatBehavior]::Forever
+    $rotate.BeginAnimation([System.Windows.Media.RotateTransform]::AngleProperty, $anim)
+    $tb
+}
+$script:BusyLook = @{}
+function Set-ButtonBusy($Button, [bool]$Busy, [string]$Text) {
+    # Busy: a rotating spinner and the text instead of the usual content; back to the original afterwards
+    if (-not $script:BusyLook.ContainsKey($Button.Name)) { $script:BusyLook[$Button.Name] = @($Button.Content, $Button.Tag) }
+    $look = $script:BusyLook[$Button.Name]
+    if ($Busy) {
+        if ($Button.Content -is [System.Windows.Controls.StackPanel] -and $Button.Content.Tag -eq 'busy') { $Button.Content.Children[1].Text = $Text; return }
+        $panel = New-Object System.Windows.Controls.StackPanel
+        $panel.Orientation = 'Horizontal'; $panel.Tag = 'busy'
+        $spin = New-Spinner 14 $Button.Foreground; $spin.Margin = '0,0,8,0'
+        $label = New-Object System.Windows.Controls.TextBlock; $label.Text = $Text; $label.VerticalAlignment = 'Center'
+        [void]$panel.Children.Add($spin); [void]$panel.Children.Add($label)
+        $Button.Tag = $null; $Button.Content = $panel
+    }
+    elseif ($Button.Content -is [System.Windows.Controls.StackPanel] -and $Button.Content.Tag -eq 'busy') { $Button.Content = $look[0]; $Button.Tag = $look[1] }
+}
+function Get-ButtonLabel($Button) { if ($Button.Content -is [System.Windows.Controls.StackPanel]) { [string]$Button.Content.Children[1].Text } else { [string]$Button.Content } }
 function Set-SandboxButtonBusy($Button, [bool]$Busy, [bool]$Enabled, $Tip) {
-    # A running test: the button says so at once (icon + "Starting sandbox ...") and is disabled
-    if (-not $script:SandboxBtnLook.ContainsKey($Button.Name)) { $script:SandboxBtnLook[$Button.Name] = @($Button.Content, $Button.Uid, $Button.Tag) }
-    $look = $script:SandboxBtnLook[$Button.Name]
-    if ($Busy) { $Button.Content = 'Starting sandbox ...'; $Button.Tag = [string][char]0xE895 } else { $Button.Content = $look[0]; $Button.Tag = $look[2] }
+    # A running test: the button says so at once (spinner + "Starting sandbox ...") and is disabled
+    Set-ButtonBusy $Button $Busy 'Starting sandbox ...'
     $Button.IsEnabled = $Enabled -and -not $Busy
     $Button.ToolTip = $Tip
 }
@@ -3565,12 +3595,22 @@ function Show-TestMenu([ValidateSet('Detail', 'Tenant', 'Custom')][string]$Kind,
     switch ($Kind) {
         'Custom' {
             & $add 'Test installation' 'Install, detect and uninstall this MSI in a fresh Windows Sandbox.' ([bool]$script:CustomInfo -and -not $blocker) { Start-CustomTest }
-            & $add 'Test update from the previous version ...' 'Choose the previous MSI: it is installed first, then this one as the update.' ([bool]$script:CustomInfo -and -not $blocker) {
+            # The previous version comes from the package store (latest stored version of the app); the file dialog only when there is no store
+            $storeApp = $null
+            if ($script:Settings.StoreSiteUrl -and (Test-SignedIn)) {
+                if ($script:CustomMode -eq 'Version' -and $script:CustomUpdateApp -and $script:CustomUpdateApp.AppId) { $storeApp = [string]$script:CustomUpdateApp.AppId }
+                elseif ($script:CustomInfo) { $cid = Get-PackTuneCustomAppId $script:CustomInfo; if (@($script:CustomApps | Where-Object { $_.AppId -eq $cid }).Count) { $storeApp = $cid } }
+            }
+            if ($storeApp) {
+                $sid = $storeApp
+                & $add 'Test update from the previous version (package store)' 'The latest stored version of this app is installed first (taken from the package store), then this MSI as the update.' ([bool]$script:CustomInfo -and -not $blocker) { Start-CustomTest '' $sid }.GetNewClosure()
+            }
+            else { & $add 'Test update from the previous version ...' 'No package store version: choose the previous MSI. It is installed first, then this one as the update.' ([bool]$script:CustomInfo -and -not $blocker) {
                 $dlg = New-Object Microsoft.Win32.OpenFileDialog
                 $dlg.Title = 'Previous version (MSI)'; $dlg.Filter = 'MSI files (*.msi)|*.msi'
                 if ($script:CustomMode -eq 'Version' -and $script:CustomUpdateApp -and $script:CustomUpdateApp.Path) { $dlg.InitialDirectory = Split-Path $script:CustomUpdateApp.Path }
                 if ($dlg.ShowDialog($window)) { Start-CustomTest $dlg.FileName }
-            }
+            } }
         }
         default {
             if ($Kind -eq 'Detail') {
