@@ -417,7 +417,9 @@ function Publish-PackTuneCustomVersion {
     param(
         [Parameter(Mandatory = $true)][string]$AppId,
         [Parameter(Mandatory = $true)][string]$MsiPath,
-        [hashtable]$Properties = @{}
+        [hashtable]$Properties = @{},
+        # A new icon (image file); without it the icon of the installed version stays
+        [string]$IconFile
     )
     Assert-PackTunePrerequisites
     Assert-PackTuneConnection
@@ -438,7 +440,7 @@ function Publish-PackTuneCustomVersion {
 
     Write-Host "Building the package for $($Info.Name) $($Info.Version)"
     $Built = New-PackTuneCustomAppPackage -Info $Info -AppId $AppKey -ExtraArguments $Extra
-    $Icon = if ($Old.largeIcon -and $Old.largeIcon.value) { [string]$Old.largeIcon.value } else { Get-PackTuneMsiIconBase64 -Info $Info }
+    $Icon = if ($IconFile) { Get-PackTuneMsiIconBase64 -Info $Info -IconFile $IconFile } elseif ($Old.largeIcon -and $Old.largeIcon.value) { [string]$Old.largeIcon.value } else { Get-PackTuneMsiIconBase64 -Info $Info }
     $Architecture = ConvertTo-PackTuneArchitecture $Old
     if (-not $Architecture) { $Architecture = $script:Settings.Architecture }
     $Windows = Get-PackTuneMinimumWindows $Old

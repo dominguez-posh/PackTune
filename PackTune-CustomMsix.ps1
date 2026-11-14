@@ -396,7 +396,9 @@ function Update-PackTuneCustomOtherApp {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AppId,
-        [string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$Version, [switch]$AllowNetwork
+        [string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$Version, [switch]$AllowNetwork,
+        # A new icon (base64 PNG); without it the icon of the installed version stays
+        [string]$IconBase64
     )
     Assert-PackTunePrerequisites
     Assert-PackTuneConnection
@@ -429,7 +431,7 @@ function Update-PackTuneCustomOtherApp {
         Write-Host "Keeping the new version in the package store"
         $NewRecipe = [ordered]@{ format = "PackTune.Recipe"; kind = "msix"; app = $OldNotes.AppId; name = [string]$Old.displayName; version = $Build.Version; publisher = [string]$Old.publisher; entryPoint = $Entry; arguments = $Args; subject = $Build.Subject; identity = $Build.PackageName; thumbprint = $Build.Thumbprint }
         $Manifest = Save-PackTuneCustomVersionToStore -AppId $OldNotes.AppId -Version $Build.Version -Kind "msix" -InstallerFolder $Folder -Recipe $NewRecipe -IntuneWin $Package.Package.Path -Msix $Build.Msix -Cer $Build.Cer -Documentation $Build.Documentation -Store $State.Store
-        $Icon = if ($Old.largeIcon -and $Old.largeIcon.value) { [string]$Old.largeIcon.value } else { $null }
+        $Icon = if ($IconBase64) { $IconBase64 } elseif ($Old.largeIcon -and $Old.largeIcon.value) { [string]$Old.largeIcon.value } else { $null }
         $Architecture = ConvertTo-PackTuneArchitecture $Old
         if (-not $Architecture) { $Architecture = $script:Settings.Architecture }
         Write-Host "Creating and uploading the new app"

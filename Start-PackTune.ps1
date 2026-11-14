@@ -177,7 +177,7 @@ function Write-UiLog([string]$Text, [string]$Level = 'Info') {
 Set-PackTuneSignInLog { param($Text, $Level) Write-UiLog $Text $(if ($Level) { $Level } else { 'Info' }) }
 
 $script:Toasts = New-Object System.Collections.ArrayList
-function Show-Toast([string]$Text, [string]$Kind = 'info') {
+function Show-Toast([string]$Text, [string]$Kind = 'info', [string]$ActionLabel, [scriptblock]$Action) {
     <# Short message in the corner: what a job did, or what went wrong. Success and info vanish after 6 s, problems after 12 s. #>
     $pill = $script:PillColors[$Kind]; if (-not $pill) { $pill = @('#FFFFFF', '#1B1B1B') }
     $glyph = @{ ok = [char]0xE73E; warn = [char]0xE7BA; bad = [char]0xEA39; info = [char]0xE946 }[$Kind]
@@ -194,10 +194,19 @@ function Show-Toast([string]$Text, [string]$Kind = 'info') {
     $label.Text = $Text; $label.TextWrapping = 'Wrap'; $label.Foreground = ConvertTo-Brush $(if ($Kind -eq 'info') { '#1B1B1B' } else { $pill[1] })
     [System.Windows.Controls.Grid]::SetColumn($label, 1)
     [void]$grid.Children.Add($icon); [void]$grid.Children.Add($label)
+    if ($ActionLabel -and $Action) {
+        $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = [System.Windows.GridLength]::Auto; [void]$grid.ColumnDefinitions.Add($c)
+        $link = New-Object System.Windows.Controls.Button
+        $link.Content = $ActionLabel; $link.Padding = '10,2'; $link.Margin = '10,0,0,0'; $link.MinHeight = 0; $link.VerticalAlignment = 'Top'
+        [System.Windows.Controls.Grid]::SetColumn($link, 2)
+        $link.Add_Click({ param($b, $a) try { & $b.Tag } catch { } }.GetNewClosure())
+        $link.Tag = $Action
+        [void]$grid.Children.Add($link)
+    }
     $border.Child = $grid
     [void]$ui.ToastHost.Children.Add($border)
     [void]$script:Toasts.Add(@{ Element = $border; Expires = (Get-Date).AddSeconds($(if ($Kind -in 'bad', 'warn') { 12 } else { 6 })); Text = $Text; Kind = $Kind })
-    while ($ui.ToastHost.Children.Count -gt 4) { [void]$script:Toasts.RemoveAt(0); $ui.ToastHost.Children.RemoveAt(0) }
+    while ($ui.ToastHost.Children.Count -gt 4) { $first = $ui.ToastHost.Children[0]; $ui.ToastHost.Children.RemoveAt(0); foreach ($old in @($script:Toasts | Where-Object { $_.Element -eq $first })) { $script:Toasts.Remove($old) } }
 }
 function Update-Toasts {
     foreach ($toast in @($script:Toasts)) {
@@ -205,18 +214,58 @@ function Update-Toasts {
     }
 }
 
+function Get-FriendlyCause([string]$Raw) {
+    <# A short English cause in plain words for what Graph, the network or .NET reported (often localized and technical).
+       The raw text stays in the log and behind Details. #>
+    $text = [string]$Raw
+    if (-not $text) { return 'Something went wrong.' }
+    if ($text -match '(?i)\b403\b|forbidden|verboten|insufficient privileges|Authorization_RequestDenied|access is denied|zugriff verweigert') { return 'No permission: confirm the new permissions or check the license.' }
+    if ($text -match '(?i)\b40[04]\b|bad request|not found|nicht gefunden|ung(Ã¼|u|ue)ltige anforderung|BadRequest|ResourceNotFound') { return 'Not available in this tenant (Remediations need Windows Enterprise E3/E5 licensing).' }
+    if ($text -match '(?i)remoteserver|remote server|remotename|could not be resolved|unable to connect|no such host|timed out|timeout|zeit(Ã¼|u|ue)berschreitung|network|netzwerk|connection (was )?(closed|refused|reset)|Verbindung|name or service not known|SSL|TLS') { return "Can't reach Microsoft Graph." }
+    $one = ($text -replace '\s+', ' ').Trim()
+    if ($one.Length -gt 140) { $one = $one.Substring(0, 137) + '...' }
+    $one
+}
+
+function Show-SignInCancelled {
+    # A cancelled sign-in is no error: a quiet note, and the header shows Sign in again
+    Write-UiLog 'Sign-in cancelled.'
+    Show-Toast 'Sign-in cancelled' 'info'
+    try { Update-ConnectionStatus } catch { }
+}
+
 function Show-Error([string]$Message) {
+    # No system dialog: the cause as a toast with Details (the activity page with the log); a cancelled sign-in only a note
+    if ($Message -like 'Sign-in cancelled*') { Show-SignInCancelled; return }
     Write-UiLog $Message 'Error'
-    Show-Toast $Message 'bad'
-    if ($env:PACKTUNE_SMOKE) { return }   # tests: no dialogs on the desktop
-    [void][System.Windows.MessageBox]::Show($window, $Message, 'PackTune', 'OK', 'Error')
+    $short = Get-FriendlyCause $Message
+    Show-Toast $short 'bad' 'Details' { Show-Page 'Activity' }
 }
 
-function Confirm-Action([string]$Message, [string]$Title = 'PackTune') {
-    if ($env:PACKTUNE_SMOKE) { return $true }
-    return ([System.Windows.MessageBox]::Show($window, $Message, $Title, 'YesNo', 'Question') -eq 'Yes')
+$script:ConfirmFrame = $null
+$script:ConfirmAnswer = $false
+function Confirm-Action([string]$Message, [string]$Title = 'PackTune', [string]$YesLabel = 'Continue', [string]$NoLabel = 'Cancel') {
+    # The app's own confirmation (card above everything, Enter = yes, Esc = no). Returns the answer; the window keeps running meanwhile.
+    if ($env:PACKTUNE_SMOKE -and -not $script:ConfirmDialogTest) { return $true }
+    if ($script:ConfirmFrame) { return $false }
+    $ui.ConfirmTitle.Text = $Title
+    $ui.ConfirmText.Text = $Message
+    $ui.BtnConfirmYes.Content = $YesLabel; $ui.BtnConfirmNo.Content = $NoLabel
+    $script:ConfirmAnswer = $false
+    $script:ConfirmFrame = New-Object System.Windows.Threading.DispatcherFrame
+    $ui.ConfirmLayer.Visibility = 'Visible'
+    [void]$ui.BtnConfirmYes.Focus()
+    try { [System.Windows.Threading.Dispatcher]::PushFrame($script:ConfirmFrame) }
+    finally { $ui.ConfirmLayer.Visibility = 'Collapsed'; $script:ConfirmFrame = $null }
+    return $script:ConfirmAnswer
 }
-
+function Complete-Confirm([bool]$Answer) {
+    if (-not $script:ConfirmFrame) { return }
+    $script:ConfirmAnswer = $Answer
+    $script:ConfirmFrame.Continue = $false
+}
+$ui.BtnConfirmYes.Add_Click({ Complete-Confirm $true })
+$ui.BtnConfirmNo.Add_Click({ Complete-Confirm $false })
 $script:ClickActions = @{}
 function Add-Click {
     # Click handler with error handling: an exception shows a message instead of killing the window.
@@ -696,7 +745,19 @@ foreach ($p in 'Start', 'Apps', 'Custom', 'Tenant', 'Activity', 'Settings') {
     })
 }
 
+$script:DialogWidths = @{}
+function Update-DialogWidths {
+    # Dialogs have a design width, but never more than the room in the window (scaling makes the window narrower for the layout)
+    $room = [Math]::Max(320, $ui.RootGrid.ActualWidth - 56)
+    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgHelp', 'DlgConfirm') {
+        $el = $ui[$d]
+        if (-not $script:DialogWidths.ContainsKey($d)) { $script:DialogWidths[$d] = $el.Width }
+        $el.Width = [Math]::Min($script:DialogWidths[$d], $room)
+    }
+}
+$ui.RootGrid.Add_SizeChanged({ try { Update-DialogWidths } catch { } })
 function Show-Dialog([string]$Name) {
+    Update-DialogWidths
     foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgHelp') { $ui[$d].Visibility = if ($d -eq $Name) { 'Visible' } else { 'Collapsed' } }
     $ui.DialogLayer.Visibility = 'Visible'
     $script:OpenDialog = $Name
@@ -707,7 +768,7 @@ function Close-Dialog {
     $script:OpenDialog = $null
 }
 $script:OpenDialog = $null
-$window.Add_PreviewKeyDown({ param($s, $e) if ($e.Key -eq 'Escape' -and $script:OpenDialog) { Close-Dialog; $e.Handled = $true } })
+$window.Add_PreviewKeyDown({ param($s, $e) if ($e.Key -eq 'Escape' -and $script:ConfirmFrame) { Complete-Confirm $false; $e.Handled = $true; return }; if ($e.Key -eq 'Escape' -and $script:OpenDialog) { Close-Dialog; $e.Handled = $true } })
 
 $script:HelpTexts = @{
     Start    = @(
@@ -785,7 +846,7 @@ function New-ReadinessCard {
     [void]$grid.Children.Add($stack)
     if ($ActionText -and $Action) {
         $b = New-Object System.Windows.Controls.Button
-        $b.Content = $ActionText; $b.Margin = '12,0,0,0'; $b.Padding = '14,6'; $b.VerticalAlignment = 'Center'
+        $b.Content = $ActionText; $b.Margin = '12,0,0,0'; $b.Padding = '16,6'; $b.MinWidth = 84; $b.VerticalAlignment = 'Center'
         $b.SetValue([System.Windows.Automation.AutomationProperties]::NameProperty, "${ActionText}: $Title")
         $script:ReadinessActions[$b] = $Action
         $b.Add_Click({ param($src) try { & $script:ReadinessActions[$src] } catch { Show-Error $_.Exception.Message } })
@@ -855,7 +916,7 @@ function Get-ReadinessItems {
     $items += $(if (-not (Test-SignedIn)) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = 'Devices report their update log to Intune, so failures show up under In tenant. Needs Remediations (Windows Enterprise E3/E5).' } }
                 elseif (-not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statuscheck'); Text = 'Checking ...' } }
                 elseif ($script:StatusScript.State -eq 'Present') { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'ok'; Optional = $true; Text = 'The status script is in Intune; devices report their update log hourly.' } }
-                elseif ($script:StatusScript.State -eq 'NotAvailable') { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = "Not available in this tenant. The install status still works; the device log needs Remediations. $($script:StatusScript.Reason)" } }
+                elseif ($script:StatusScript.State -eq 'NotAvailable') { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = "Not available in this tenant. The install status still works; the device log needs Remediations. $(Get-FriendlyCause $script:StatusScript.Reason)" } }
                 else { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statusscript')
                           Text = 'Devices report their update log to Intune, so failures show up with their cause. Needs Remediations (Windows Enterprise E3/E5).'
                           Fix = 'Set up'; Action = { Start-StatusScriptSetup } } })
@@ -948,7 +1009,7 @@ function Start-AppRegistration {
         $setupToken = Get-EmbeddedToken -TenantID $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'organizations' }) -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Application.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All', 'User.Read') -Hint 'Sign in with an administrator account: this creates the app registration and grants the admin consent.'
     }
     catch {
-        if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Write-UiLog 'Sign-in cancelled.' }
+        if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Show-SignInCancelled }
         $script:SignInAfterRegistration = $false; Complete-SetupStep $false 'creating the app registration'
         return
     }
@@ -1003,7 +1064,7 @@ function Start-StatusScriptSetup {
     [void](Start-UiTask -Kind 'statusscript' -Title 'Setting up the status script (Remediations) in Intune' -Display 'Status report' -NeedsAuth -Arguments @{ Fake = $script:InsightFake } -Work $work -OnDone {
         param($Result, $Job)
         $r = @($Result | Where-Object { $_ -and $null -ne $_.Created }) | Select-Object -First 1
-        if ($r -and $r.Created) { Show-Toast "Status report: $($r.Message)." 'ok' } elseif ($r) { Show-Toast $r.Message 'warn' }
+        if ($r -and $r.Created) { Show-Toast "Status report: $($r.Message)." 'ok' } elseif ($r) { Write-UiLog "Status report: $($r.Message)" 'Warning'; Show-Toast (Get-FriendlyCause $r.Message) 'warn' 'Details' { Show-Page 'Activity' } }
         $script:StatusScript = $null
         Start-StatusCheck
         Update-Readiness
@@ -1025,7 +1086,7 @@ $State = if ($Avail.Available) { try { Get-InsightStatusScriptState -Context $Ct
         param($Result, $Job)
         $r = @($Result | Where-Object { $_ -and $null -ne $_.Available }) | Select-Object -First 1
         if ($Job.Status -ne 'succeeded' -or -not $r) { $script:StatusScript = @{ State = 'NotAvailable'; Id = $null; Reason = 'It could not be checked.' } }
-        else { $script:StatusScript = @{ State = $(if (-not $r.Available) { 'NotAvailable' } elseif ($r.Id) { 'Present' } else { 'Missing' }); Id = $r.Id; Reason = $r.Reason } }
+        else { $script:StatusScript = @{ State = $(if (-not $r.Available) { 'NotAvailable' } elseif ($r.Id) { 'Present' } else { 'Missing' }); Id = $r.Id; Reason = $r.Reason }; if (-not $r.Available) { Write-UiLog "Status report check: $($r.Reason)" 'Warning' } }
         Update-Readiness
         if ($script:CurrentPage -eq 'Status') { Update-StatusBanner }
     })
@@ -1440,6 +1501,78 @@ function ConvertFrom-CustomProps([string]$Text) {
     }
     return $result
 }
+# ---- icon of a custom application (Company Portal): from the package, or chosen
+$script:CustomIconFile = $null      # PNG the person chose (converted like the catalog custom icon)
+$script:CustomIconAuto = $null      # icon found in the package (file)
+function Get-CustomPackageIconFile {
+    # MSI: the icon of the Icon table (ARPPRODUCTICON). Other: the icon of the entry point when it is an .exe (the logo of the captured MSIX comes with the capture).
+    try {
+        $dir = Join-Path $script:WorkRoot 'icons\customdialog'
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        if ($script:CustomKind -eq 'Msi') {
+            if ($script:CustomInfo -and $script:CustomInfo.IconName) {
+                $f = Join-Path $dir 'msi-icon.ico'
+                if (Save-PackTuneMsiIcon -Path $script:CustomInfo.Path -IconName $script:CustomInfo.IconName -Destination $f) { return $f }
+            }
+            return $null
+        }
+        $entry = $ui.CmbOtherEntry.Text.Trim(); $folder = $ui.TxtOtherFolder.Text.Trim().Trim('"')
+        if ($entry -like '*.exe' -and $folder) {
+            $exe = if ([IO.Path]::IsPathRooted($entry)) { $entry } else { Join-Path $folder $entry }
+            if (Test-Path -LiteralPath $exe -PathType Leaf) {
+                Add-Type -AssemblyName System.Drawing
+                $ico = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
+                if ($ico) { $f = Join-Path $dir 'exe-icon.png'; $bmp = $ico.ToBitmap(); $bmp.Save($f, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose(); return $f }
+            }
+        }
+    }
+    catch { }
+    $null
+}
+function Update-CustomIconPreview {
+    $script:CustomIconAuto = Get-CustomPackageIconFile
+    $src = $null
+    $hint = ''
+    if ($script:CustomIconFile) { $src = $script:CustomIconFile; $hint = 'The icon you chose.' }
+    elseif ($script:CustomIconAuto) { $src = $script:CustomIconAuto; $hint = $(if ($script:CustomKind -eq 'Msi') { 'The icon of the MSI.' } else { 'The icon of the entry point.' }) }
+    elseif ($script:CustomMode -in 'Version', 'Update' -and $script:CustomUpdateApp) {
+        $cur = Get-TenantAppIcon $script:CustomUpdateApp
+        if ($cur) { $src = $cur; $hint = 'The current icon in Intune stays unless you choose another.' }
+    }
+    $image = $null
+    if ($src) { $image = if ($src -is [string]) { ConvertTo-ImageSource $src } else { $src } }
+    $ui.ImgCustomAppIcon.Source = $image
+    $ui.ImgCustomAppIcon.Visibility = ConvertTo-Vis ([bool]$image)
+    $ui.TxtCustomAppIconPlaceholder.Visibility = ConvertTo-Vis (-not $image)
+    $ui.TxtCustomAppIconHint.Text = if ($image) { $hint } else { 'No icon in the package - choose one, otherwise the Company Portal shows a default icon.' }
+    $ui.BtnCustomAppIconReset.IsEnabled = [bool]$script:CustomIconFile
+}
+function Set-CustomAppIcon([string]$Path) {
+    $window.Cursor = 'Wait'
+    try {
+        $bytes = [IO.File]::ReadAllBytes($Path)
+        if ($bytes.Length -gt 5MB) { throw 'The icon file is larger than 5 MB.' }
+        $dir = Join-Path $script:WorkRoot 'icons\customdialog'
+        New-Item -Path $dir -ItemType Directory -Force | Out-Null
+        $png = ConvertTo-PngBytes -Bytes $bytes -WorkPath $dir
+        $file = Join-Path $dir 'chosen.png'
+        [IO.File]::WriteAllBytes($file, $png)
+        $script:CustomIconFile = $file
+    }
+    finally { $window.Cursor = $null }
+    Update-CustomIconPreview
+}
+Add-Click $ui.BtnCustomAppIconPick {
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Title = 'Icon for the Company Portal'
+    $dlg.Filter = 'Images (*.png;*.jpg;*.jpeg;*.svg;*.ico)|*.png;*.jpg;*.jpeg;*.svg;*.ico|All files (*.*)|*.*'
+    if (-not $dlg.ShowDialog($window)) { return }
+    Set-CustomAppIcon $dlg.FileName
+}
+Add-Click $ui.BtnCustomAppIconReset { $script:CustomIconFile = $null; Update-CustomIconPreview }
+$ui.CmbOtherEntry.Add_LostFocus({ try { Update-CustomIconPreview } catch { } })
+$ui.CmbOtherEntry.Add_SelectionChanged({ try { Update-CustomIconPreview } catch { } })
+
 function Set-CustomInfo($Info, [string]$Message) {
     $script:CustomInfo = $Info
     $ui.TxtCustomRead.Text = $Message
@@ -1450,6 +1583,7 @@ function Set-CustomInfo($Info, [string]$Message) {
     }
     $ui.BtnCustomDeploy.IsEnabled = [bool]$Info
     $ui.BtnCustomTest.IsEnabled = [bool]$Info
+    Update-CustomIconPreview
 }
 function Read-CustomMsi([string]$Path) {
     try {
@@ -1533,6 +1667,7 @@ function Update-OtherDeploy {
 }
 function Set-CustomKind([string]$Kind) {
     $script:CustomKind = $Kind
+    try { Update-CustomIconPreview } catch { }
     $ui.PanelCustomMsi.Visibility = ConvertTo-Vis ($Kind -eq 'Msi')
     $ui.PanelCustomOther.Visibility = ConvertTo-Vis ($Kind -eq 'Other')
     $ui.TxtCustomOther.Visibility = ConvertTo-Vis ($Kind -eq 'Msi' -and $script:CustomMode -eq 'New' -and -not $ui.RbCustomOther.IsEnabled)
@@ -1560,6 +1695,7 @@ function Show-CustomDialog([string]$Mode, $App) {
     $script:CustomMode = $Mode
     $script:CustomUpdateApp = $App
     $script:CustomInfo = $null
+    $script:CustomIconFile = $null
     $isNew = $Mode -eq 'New'
     $studio = Get-CustomCaptureState
     $ui.RbCustomOther.IsEnabled = ($studio.State -eq 'Ready')
@@ -1620,13 +1756,13 @@ Add-Click $ui.BtnCustomDeploy {
         if ($version -notmatch '^\d+(\.\d+){0,3}$') { throw "The version '$version' must be a number like 1.0.0.0." }
         if ($script:CustomMode -eq 'Update') {
             $old = $script:CustomUpdateApp
-            $arguments = @{ Id = $old.Id; Version = $version; Network = [bool]$ui.ChkOtherNetwork.IsChecked }
+            $arguments = @{ Id = $old.Id; Version = $version; Network = [bool]$ui.ChkOtherNetwork.IsChecked; Icon = $(if ($script:CustomIconFile) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:CustomIconFile)) } else { '' }) }
             if ($folder) { $arguments.Folder = $folder }
             if ($entry) { $arguments.Entry = $entry }
             if ($ui.TxtOtherArgs.Text.Trim()) { $arguments.Args = $ui.TxtOtherArgs.Text.Trim() }
             Close-Dialog
             Update-UiToken
-            $work = 'param($Id, $Version, $Folder, $Entry, $Args, $Network) $p = @{ AppId = $Id; Version = $Version; AllowNetwork = [bool]$Network }; if ($Folder) { $p.InstallerFolder = $Folder }; if ($Entry) { $p.EntryPoint = $Entry }; if ($Args) { $p.Arguments = $Args }; Update-PackTuneCustomOtherApp @p'
+            $work = 'param($Id, $Version, $Folder, $Entry, $Args, $Network, $Icon) $p = @{ AppId = $Id; Version = $Version; AllowNetwork = [bool]$Network }; if ($Icon) { $p.IconBase64 = $Icon }; if ($Folder) { $p.InstallerFolder = $Folder }; if ($Entry) { $p.EntryPoint = $Entry }; if ($Args) { $p.Arguments = $Args }; Update-PackTuneCustomOtherApp @p'
             [void](Start-UiTask -Kind 'custom' -Title "Capturing version $version of $($old.DisplayName) in Windows Sandbox (a few minutes)" -Display "$($old.DisplayName) $version" -NeedsAuth -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
                 param($Result, $Job)
                 if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] published: devices with the old version get it through supersedence." 'Success'; Show-Toast "$($Job.Display) was published." 'ok' }
@@ -1637,8 +1773,9 @@ Add-Click $ui.BtnCustomDeploy {
             $assign = $script:AssignValues[[Math]::Max(0, $ui.CmbOtherAssign.SelectedIndex)]
             Close-Dialog
             Update-UiToken
-            $arguments = @{ Folder = $folder; Entry = $entry; Args = $ui.TxtOtherArgs.Text.Trim(); Name = $name; Version = $version; Publisher = $ui.TxtOtherPublisher.Text.Trim(); Assignment = $assign; Network = [bool]$ui.ChkOtherNetwork.IsChecked }
-            $work = 'param($Folder, $Entry, $Args, $Name, $Version, $Publisher, $Assignment, $Network) New-PackTuneCustomOtherApp -Folder $Folder -EntryPoint $Entry -Arguments $Args -Name $Name -Version $Version -Publisher $Publisher -Assignment $Assignment -AllowNetwork:([bool]$Network)'
+            $iconFile = if ($script:CustomIconFile) { $script:CustomIconFile } else { $script:CustomIconAuto }
+            $arguments = @{ Folder = $folder; Entry = $entry; Args = $ui.TxtOtherArgs.Text.Trim(); Name = $name; Version = $version; Publisher = $ui.TxtOtherPublisher.Text.Trim(); Assignment = $assign; Network = [bool]$ui.ChkOtherNetwork.IsChecked; Icon = $(if ($iconFile) { try { Get-ChocoIconBase64 -ChocoName 'custom-other' -IconFile $iconFile -NoIconPrompt -NoFeedLookup } catch { '' } } else { '' }) }
+            $work = 'param($Folder, $Entry, $Args, $Name, $Version, $Publisher, $Assignment, $Network, $Icon) $p = @{ Folder = $Folder; EntryPoint = $Entry; Arguments = $Args; Name = $Name; Version = $Version; Publisher = $Publisher; Assignment = $Assignment; AllowNetwork = [bool]$Network }; if ($Icon) { $p.IconBase64 = $Icon }; New-PackTuneCustomOtherApp @p'
             [void](Start-UiTask -Kind 'custom' -Title "Capturing $name in Windows Sandbox (a few minutes), then deploying" -Display "$name $version" -NeedsAuth -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
                 param($Result, $Job)
                 if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] captured, stored and created in Intune." 'Success'; Show-Toast "$($Job.Display) is in Intune." 'ok' }
@@ -1656,8 +1793,8 @@ Add-Click $ui.BtnCustomDeploy {
         $old = $script:CustomUpdateApp
         Close-Dialog
         Update-UiToken
-        [void](Start-UiTask -Kind 'custom' -Title "New version $($script:CustomInfo.Version) of $($old.DisplayName)" -Display "$name $($script:CustomInfo.Version)" -NeedsAuth -Arguments @{ Id = $old.Id; Msi = $msi; Props = $props } `
-            -Work 'param($Id, $Msi, $Props) Publish-PackTuneCustomVersion -AppId $Id -MsiPath $Msi -Properties $Props' -OnDone {
+        [void](Start-UiTask -Kind 'custom' -Title "New version $($script:CustomInfo.Version) of $($old.DisplayName)" -Display "$name $($script:CustomInfo.Version)" -NeedsAuth -Arguments @{ Id = $old.Id; Msi = $msi; Props = $props; Icon = $script:CustomIconFile } `
+            -Work 'param($Id, $Msi, $Props, $Icon) $p = @{ AppId = $Id; MsiPath = $Msi; Properties = $Props }; if ($Icon) { $p.IconFile = $Icon }; Publish-PackTuneCustomVersion @p' -OnDone {
             param($Result, $Job)
             if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] published: devices with the old version get it through supersedence." 'Success'; Show-Toast "$($Job.Display) was published." 'ok' }
             $script:CustomApps = $null; Start-CustomRefresh
@@ -1667,8 +1804,8 @@ Add-Click $ui.BtnCustomDeploy {
         $assign = $script:AssignValues[[Math]::Max(0, $ui.CmbCustomAssign.SelectedIndex)]
         Close-Dialog
         Update-UiToken
-        [void](Start-UiTask -Kind 'custom' -Title "Deploying $name ($($script:CustomInfo.Version)) from the MSI" -Display "$name $($script:CustomInfo.Version)" -NeedsAuth -Arguments @{ Msi = $msi; Assignment = $assign; Props = $props } `
-            -Work 'param($Msi, $Assignment, $Props) New-PackTuneCustomMsiApp -MsiPath $Msi -Assignment $Assignment -Properties $Props' -OnDone {
+        [void](Start-UiTask -Kind 'custom' -Title "Deploying $name ($($script:CustomInfo.Version)) from the MSI" -Display "$name $($script:CustomInfo.Version)" -NeedsAuth -Arguments @{ Msi = $msi; Assignment = $assign; Props = $props; Icon = $script:CustomIconFile } `
+            -Work 'param($Msi, $Assignment, $Props, $Icon) $p = @{ MsiPath = $Msi; Assignment = $Assignment; Properties = $Props }; if ($Icon) { $p.IconFile = $Icon }; New-PackTuneCustomMsiApp @p' -OnDone {
             param($Result, $Job)
             if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] created in Intune." 'Success'; Show-Toast "$($Job.Display) is in Intune." 'ok' }
             $script:CustomApps = $null; Start-CustomRefresh
@@ -1678,17 +1815,19 @@ Add-Click $ui.BtnCustomDeploy {
 }
 Add-Click $ui.BtnCustomTest {
     if (-not $script:CustomInfo) { return }
-    if (Test-TaskRunning 'test') { throw 'A sandbox test is already running (Windows Sandbox runs one at a time).' }
+    if (Block-SandboxStart) { return }
     $props = ConvertFrom-CustomProps $ui.TxtCustomProps.Text
     $name = $script:CustomInfo.Name
     [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: run Install, Detect and Uninstall in the sandbox, then report the result there" -Display "Sandbox: $name" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props } `
         -Work 'param($Msi, $Props) Test-PackTuneCustomApp -MsiPath $Msi -Properties $Props' -OnDone {
         param($Result, $Job)
         $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
-        if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Display)] the sandbox test could not run, see above." 'Error' }
+        if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Display)] the sandbox test could not run, see above." 'Error'; Show-Toast "Sandbox test of $($Job.Display) could not run: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" 'bad' 'Details' { Show-Page 'Activity' } }
         elseif ($outcome.Verdict -eq 'Passed') { Write-UiLog "[$($Job.Display)] sandbox test passed." 'Success'; Show-Toast "$($Job.Display) passed." 'ok' }
         else { Write-UiLog "[$($Job.Display)] sandbox test failed: $($outcome.Message)" 'Warning'; Show-Toast "Sandbox test failed: $($outcome.Message)" 'warn' }
+        Update-SandboxButtons
     })
+    Show-SandboxStarted
 }
 Add-Click $ui.BtnCustomOpen {
     $app = Get-SelectedCustomApp
@@ -1697,10 +1836,10 @@ Add-Click $ui.BtnCustomOpen {
 Add-Click $ui.BtnCustomRemove {
     $app = Get-SelectedCustomApp
     if (-not $app) { return }
-    if (-not (Confirm-Action "Remove '$($app.DisplayName) $($app.Version)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software.")) { return }
+    if (-not (Confirm-Action "Remove '$($app.DisplayName) $($app.Version)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software." 'Remove from Intune' 'Remove' 'Cancel')) { return }
     $deleteStore = $false
     if ($script:Settings.StoreSiteUrl -and $app.AppId -and @($script:CustomApps | Where-Object { $_.AppId -eq $app.AppId }).Count -le 1) {
-        $deleteStore = Confirm-Action "This is the last Intune app of '$($app.DisplayName)'.`n`nAlso delete its stored files (packages, original installer files, certificates) from the package store?`n`nYes: delete them (SharePoint keeps them in its recycle bin).`nNo: keep them, so the application can still be exported."
+        $deleteStore = Confirm-Action "This is the last Intune app of '$($app.DisplayName)'.`n`nAlso delete its stored files (packages, original installer files, certificates) from the package store?`n`nDelete files: delete them (SharePoint keeps them in its recycle bin).`nKeep files: keep them, so the application can still be exported." 'Delete stored files' 'Delete files' 'Keep files'
     }
     Update-UiToken
     $work = if ($deleteStore) { 'param($Id) Remove-PackTuneCustomApp -Id $Id -DeleteStore' } else { 'param($Id) Remove-PackTuneCustomApp -Id $Id' }
@@ -1794,10 +1933,10 @@ Add-Click $ui.BtnStoreCreate {
 }
 Add-Click $ui.BtnStoreGrant {
     if (-not $script:Settings.StoreSiteUrl) { throw 'Save the address of the site first.' }
-    if (-not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permission Sites.FullControl.All, which PackTune uses for this one grant only.`n`n$($script:StoreGrantConsentNote)`n`nContinue?" 'Grant access to the SharePoint site')) { return }
+    if (-not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permission Sites.FullControl.All, which PackTune uses for this one grant only.`n`n$($script:StoreGrantConsentNote)`n`nContinue?" 'Grant access to the SharePoint site' 'Continue' 'Cancel')) { return }
     $token = $null
     try { $token = Get-EmbeddedToken -TenantID $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'organizations' }) -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Sites.FullControl.All') -Hint 'Sign in with an administrator account: it grants PackTune access to this one SharePoint site.' }
-    catch { if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Write-UiLog 'Sign-in cancelled.' }; return }
+    catch { if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Show-SignInCancelled }; return }
     $role = if ($script:StoreState -and $script:StoreState.State -eq 'NoLibrary') { 'manage' } else { 'write' }
     $access = if ($token) { [string]$token.access_token } else { '' }
     [void](Start-UiTask -Kind 'store' -Title "Granting PackTune access to the SharePoint site (role $role)" -Display 'Package store' -Pool $script:UserPool -Arguments @{ Site = $script:Settings.StoreSiteUrl; Client = $script:Settings.ClientID; Token = $access; Role = $role } `
@@ -2268,9 +2407,9 @@ function Start-Deploy {
     $licensed = @($todo | Where-Object LicenseNote)
     if ($licensed.Count -gt 0) {
         $text = ($licensed | ForEach-Object { "- $($_.Title): $($_.LicenseNote)" }) -join "`n"
-        if (-not (Confirm-Action "These packages carry a license note:`n`n$text`n`nDeploy them anyway?" 'License notes')) { return }
+        if (-not (Confirm-Action "These packages carry a license note:`n`n$text`n`nDeploy them anyway?" 'License notes' 'Deploy anyway' 'Cancel')) { return }
     }
-    if ($assignment -eq 'Required' -and -not (Confirm-Action "Required installs the $($todo.Count) app(s) automatically on every device of all users. Continue?" 'Required assignment')) { return }
+    if ($assignment -eq 'Required' -and -not (Confirm-Action "Required installs the $($todo.Count) app(s) automatically on every device of all users. Continue?" 'Required assignment' 'Continue' 'Cancel')) { return }
     if (@($todo | Where-Object { $_.Source -eq 'Winget' }).Count -and -not $script:ModuleState.Winget) { throw 'winget packages need the Microsoft.WinGet.Client module: install it under Settings > Components.' }
     $schedule = if ($script:DeploySchedule) { (New-ChocoSchedule -Values $script:DeploySchedule -Base (Get-ChocoScheduleDefaults)) } else { $null }
     Update-UiToken
@@ -2737,7 +2876,7 @@ Add-Click $ui.BtnBannerCleanup {
     $old = @($script:SupersededOld)
     if ($old.Count -eq 0) { return }
     $list = ($old | ForEach-Object { "- $($_.OldName) $($_.OldVersion) (replaced by $($_.NewVersion))" }) -join "`n"
-    if (-not (Confirm-Action "Remove these old app versions from Intune?`n`n$list`n`nNo device reports them installed any more. Apps that are still installed somewhere stay." 'Clean up')) { return }
+    if (-not (Confirm-Action "Remove these old app versions from Intune?`n`n$list`n`nNo device reports them installed any more. Apps that are still installed somewhere stay." 'Clean up' 'Remove' 'Cancel')) { return }
     Update-UiToken
     $work = 'param($Ids, $CountFake) $P = @{ AppId = $Ids }; if ($CountFake) { $P.InstallCount = [scriptblock]::Create($CountFake) }; Remove-PackTuneSupersededApps @P'
     [void](Start-UiTask -Kind 'cleanup' -Title "Removing $($old.Count) old app version(s)" -Display 'Clean up old versions' -NeedsAuth -Arguments @{ Ids = @($old | ForEach-Object { $_.OldId }); CountFake = $script:InstallCountFake } -Work $work -OnDone {
@@ -2755,7 +2894,7 @@ function Start-RuntimeSwitch {
     if ($apps.Count -eq 0) { return }
     $list = ($apps | Select-Object -First 12 | ForEach-Object { "- $($_.DisplayName)" }) -join "`n"
     if ($apps.Count -gt 12) { $list += "`n- and $($apps.Count - 12) more" }
-    if (-not (Confirm-Action "Switch $($apps.Count) app(s) to PackTune Runtime?`n`n$list`n`nEach app depends on PackTune Runtime instead of the old dependency apps. Nothing is removed, and nothing changes on the devices now." 'Switch to PackTune Runtime')) { return }
+    if (-not (Confirm-Action "Switch $($apps.Count) app(s) to PackTune Runtime?`n`n$list`n`nEach app depends on PackTune Runtime instead of the old dependency apps. Nothing is removed, and nothing changes on the devices now." 'Switch to PackTune Runtime' 'Switch' 'Cancel')) { return }
     Update-UiToken
     [void](Start-UiTask -Kind 'runtime' -Title 'Switching the apps to PackTune Runtime' -Display 'Switch to PackTune Runtime' -NeedsAuth -Arguments @{ Ids = @($apps | ForEach-Object { $_.Id }) } -Work 'param($Ids) Switch-PackTuneAppsToRuntime -AppId $Ids' -OnDone {
         param($Result, $Job)
@@ -2773,7 +2912,7 @@ function Start-OldDependencyCleanup {
     $old = @($script:RuntimeInfo.UnusedOld)
     if ($old.Count -eq 0) { return }
     $list = ($old | ForEach-Object { "- $($_.DisplayName)" }) -join "`n"
-    if (-not (Confirm-Action "Remove these old dependency apps from Intune?`n`n$list`n`nNo app depends on them any more. Devices keep what they installed." 'Remove old dependency apps')) { return }
+    if (-not (Confirm-Action "Remove these old dependency apps from Intune?`n`n$list`n`nNo app depends on them any more. Devices keep what they installed." 'Remove old dependency apps' 'Remove' 'Cancel')) { return }
     Update-UiToken
     [void](Start-UiTask -Kind 'cleanupdeps' -Title "Removing $($old.Count) old dependency app(s)" -Display 'Remove old dependency apps' -NeedsAuth -Work 'Remove-PackTuneUnusedDependencyApps' -OnDone {
         param($Result, $Job)
@@ -2903,12 +3042,12 @@ Add-Click $ui.BtnTenantApply {
     $policy = Read-TenantPolicy
     $version = Get-TenantVersion
     $text = "Change '$($app.DisplayName)' in Intune?`n`nVersion: $(if ($version -eq 'latest') { 'always the newest' } else { $version })`nUpdates: $(Format-UpdateText $policy.UpdateMode $policy.GraceHours)`n`nThe package is rebuilt and uploaded. Apps that are only Available are replaced by a new app that supersedes the old one."
-    if (-not (Confirm-Action $text 'Apply in Intune')) { return }
+    if (-not (Confirm-Action $text 'Apply in Intune' 'Apply' 'Cancel')) { return }
     Start-AppApply -App $app -Version $version -Policy $policy -Schedule $script:TenantSchedule
 }
 function Start-ReleaseApp($App) {
     if (-not $App -or -not $App.UpdateAvailable) { return }
-    if (-not (Confirm-Action "Release version $($App.LatestVersion) of '$($App.DisplayName)'?`n`nIt goes from $($App.Version) to $($App.LatestVersion). Devices install it according to the update mode of the app: $(Format-UpdateText $App.UpdateMode $App.GraceHours).`n`nApps that are only Available are updated through a new app that supersedes the old one." 'Release update')) { return }
+    if (-not (Confirm-Action "Release version $($App.LatestVersion) of '$($App.DisplayName)'?`n`nIt goes from $($App.Version) to $($App.LatestVersion). Devices install it according to the update mode of the app: $(Format-UpdateText $App.UpdateMode $App.GraceHours).`n`nApps that are only Available are updated through a new app that supersedes the old one." 'Release update' 'Release' 'Cancel')) { return }
     Start-AppApply -App $App -Version $App.LatestVersion -Policy @{ UpdateMode = $App.UpdateMode; GraceHours = $App.GraceHours }
 }
 Add-Click $ui.BtnTenantRelease { Start-ReleaseApp (Get-SelectedTenantApp) }
@@ -2930,7 +3069,7 @@ Add-Click $ui.BtnTenantRemove {
     if (-not $app) { return }
     $others = @($script:TenantApps | Where-Object { -not $_.IsChocolatey -and $_.Source -eq 'Chocolatey' }).Count
     if ($app.IsChocolatey -and $others -gt 0) { throw "Chocolatey is the dependency of the $others app(s) created by this tool. Remove those first." }
-    if (-not (Confirm-Action "Remove '$($app.DisplayName)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software and its update task; nothing is uninstalled." 'Remove from Intune')) { return }
+    if (-not (Confirm-Action "Remove '$($app.DisplayName)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software and its update task; nothing is uninstalled." 'Remove from Intune' 'Remove' 'Cancel')) { return }
     Update-UiToken
     [void](Start-UiTask -Kind 'remove' -Title "Removing $($app.DisplayName) from Intune" -Display $app.DisplayName -Package $app.Package -NeedsAuth -Arguments @{ Id = $app.Id; Source = $app.Source } -Work 'param($Id, $Source) Remove-PackTuneApp -Id $Id' -OnDone {
         param($Result, $Job)
@@ -2984,7 +3123,7 @@ function Update-StatusBanner {
     $ui.BoxStatusScript.Visibility = ConvertTo-Vis ([bool]$show)
     if (-not $show) { return }
     if ($st.State -eq 'Missing') { $ui.TxtStatusScript.Text = 'The status script is not set up. Without it you see the Intune install status, but not the log the device reports. It runs as a Remediations detection script on all devices, once an hour.'; $ui.BtnStatusScript.Visibility = 'Visible' }
-    else { $ui.TxtStatusScript.Text = "The device log is not available in this tenant: Remediations need a Windows Enterprise E3/E5 (or A3/A5, VDA) license. The install status above still works. $($st.Reason)"; $ui.BtnStatusScript.Visibility = 'Collapsed' }
+    else { $ui.TxtStatusScript.Text = "The device log is not available in this tenant: Remediations need a Windows Enterprise E3/E5 (or A3/A5, VDA) license. The install status above still works. $(Get-FriendlyCause $st.Reason)"; $ui.BtnStatusScript.Visibility = 'Collapsed' }
 }
 Add-Click $ui.BtnStatusScript { Start-StatusScriptSetup }
 Add-Click $ui.BtnStatusBack { Show-Page 'Tenant' }
@@ -3219,7 +3358,7 @@ Set-InsightAppTakeOver -Context $Ctx -Apps $Apps
             $src = [string]$a.PackageSource
             if ($a.Source -eq 'Chocolatey' -and $src -and $src -ne [string]$script:Settings.PackageSource) {
                 if (Test-InsightFeedUrl $src) {
-                    $use = Confirm-Action "'$($a.DisplayName)' comes with its own Chocolatey package source:`n`n$src`n`nDevices would install it from there. Your package source: $own.`n`nUse the package source of the import for this app? (No = your package source)" 'Package source of the import'
+                    $use = Confirm-Action "'$($a.DisplayName)' comes with its own Chocolatey package source:`n`n$src`n`nDevices would install it from there. Your package source: $own.`n`nUse the package source of the import for this app? (Use mine = your package source)" 'Package source of the import' 'Use import source' 'Use mine'
                 }
                 else { Write-UiLog "$($a.DisplayName): the offered package source is refused (only https without user, password or query), your package source is used." 'Warning' }
             }
@@ -3300,18 +3439,39 @@ function Get-SandboxBlocker {
     $null
 }
 
+$script:SandboxBtnLook = @{}
+function Set-SandboxButtonBusy($Button, [bool]$Busy, [bool]$Enabled, $Tip) {
+    # A running test: the button says so at once (icon + "Starting sandbox ...") and is disabled
+    if (-not $script:SandboxBtnLook.ContainsKey($Button.Name)) { $script:SandboxBtnLook[$Button.Name] = @($Button.Content, $Button.Uid, $Button.Tag) }
+    $look = $script:SandboxBtnLook[$Button.Name]
+    if ($Busy) { $Button.Content = 'Starting sandbox ...'; $Button.Tag = [string][char]0xE895 } else { $Button.Content = $look[0]; $Button.Tag = $look[2] }
+    $Button.IsEnabled = $Enabled -and -not $Busy
+    $Button.ToolTip = $Tip
+}
+function Block-SandboxStart {
+    # $true (with a message) when no sandbox test can start now: one is running, or Windows Sandbox is open
+    $msg = ''
+    if (Test-TaskRunning 'test') { $msg = 'A sandbox test is already running (Windows Sandbox runs one at a time). It is in Activity.' }
+    elseif (-not $script:SandboxOverride) { try { if (Test-PackTuneSandboxRunning) { $msg = 'Windows Sandbox is already open. Close it first (Windows Sandbox runs one at a time).' } } catch { } }
+    if ($msg) { Show-Toast $msg 'warn'; Write-UiLog $msg 'Warning' }
+    [bool]$msg
+}
+function Show-SandboxStarted {
+    Show-Toast 'Sandbox test started - Windows Sandbox opens in a moment' 'info'
+    Update-SandboxButtons
+}
 function Update-SandboxButtons {
     $blocker = Get-SandboxBlocker
     $busy = Test-TaskRunning 'test'
+    $busyTip = 'A sandbox test is running (Windows Sandbox runs one at a time).'
+    $tip = if ($blocker) { $blocker } elseif ($busy) { $busyTip } else { $null }
     $detail = [bool]$script:DetailRow
-    $ui.BtnDetailTest.IsEnabled = $detail -and -not $busy -and -not $blocker
-    $ui.BtnDetailTest.ToolTip = if ($blocker) { $blocker } elseif ($busy) { 'A sandbox test is running (Windows Sandbox runs one at a time).' } else { $null }
+    Set-SandboxButtonBusy $ui.BtnDetailTest $busy ($detail -and -not $blocker) $tip
     $app = Get-SelectedTenantApp
     $isDep = $app -and ($app.IsChocolatey -or $app.IsDependency)
-    $ui.BtnTenantTest.IsEnabled = [bool]$app -and -not $isDep -and -not $busy -and -not $blocker
-    $ui.BtnTenantTest.ToolTip = if ($blocker) { $blocker } elseif ($busy) { 'A sandbox test is running (Windows Sandbox runs one at a time).' } else { $null }
+    Set-SandboxButtonBusy $ui.BtnTenantTest $busy ([bool]$app -and -not $isDep -and -not $blocker) $tip
+    Set-SandboxButtonBusy $ui.BtnCustomTest $busy ([bool]$script:CustomInfo) $tip
 }
-
 function Get-SandboxInstallCommand {
     # The elevated command: only the optional feature, no restart (the user restarts when it suits)
     $script = '$ErrorActionPreference = ''Stop''; try { $r = Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All -NoRestart; if ($r.RestartNeeded) { exit 3010 } else { exit 0 } } catch { Write-Error $_.Exception.Message; exit 1 }'
@@ -3363,7 +3523,7 @@ catch { [pscustomobject]@{ Exit = -1; Declined = ($_.Exception.Message -match 'c
 
 function Start-PackageTest {
     param([Parameter(Mandatory)][string]$Package, [Parameter(Mandatory)][string]$Source, [string]$Title, [string]$Version, [hashtable]$Policy)
-    if (Test-TaskRunning 'test') { throw 'A sandbox test is already running (Windows Sandbox runs one at a time).' }
+    if (Block-SandboxStart) { return }
     if ($Source -eq 'Winget' -and -not $script:ModuleState.Winget) { throw 'winget packages need the Microsoft.WinGet.Client module: install it under Settings > Components.' }
     $name = if ($Title) { $Title } else { $Package }
     $arguments = @{ Package = $Package; Source = $Source; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours }
@@ -3371,12 +3531,13 @@ function Start-PackageTest {
     [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: run Install, Detect and Uninstall in the sandbox, then report the result there" -Display "Sandbox: $name" -Package $Package -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
         param($Result, $Job)
         $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
-        if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Package)] the sandbox test could not run, see above." 'Error' }
+        if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Package)] the sandbox test could not run, see above." 'Error'; Show-Toast "Sandbox test of $($Job.Display) could not run: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" 'bad' 'Details' { Show-Page 'Activity' } }
         elseif ($outcome.Verdict -eq 'Passed') { Write-UiLog "[$($Job.Package)] sandbox test passed." 'Success'; Show-Toast "$($Job.Display) passed." 'ok' }
         else { Write-UiLog "[$($Job.Package)] sandbox test failed: $($outcome.Message)" 'Warning'; Show-Toast "Sandbox test failed: $($outcome.Message)" 'warn' }
         Update-SelectionBar
         Update-TenantButtons
     })
+    Show-SandboxStarted
     Update-SelectionBar
     Update-TenantButtons
 }
@@ -3534,7 +3695,7 @@ function Connect-Intune {
         }
         catch {
             if (Test-AdminConsentRefusal $_) { Show-AdminConsentRefusal; Complete-SetupStep $false 'the sign-in'; return }
-            if ($_.Exception.Message -eq 'Sign-in cancelled.') { Write-UiLog 'Sign-in cancelled.'; Complete-SetupStep $false 'the sign-in'; return }
+            if ($_.Exception.Message -eq 'Sign-in cancelled.') { Show-SignInCancelled; Complete-SetupStep $false 'the sign-in'; return }
             Complete-SetupStep $false 'the sign-in'
             throw
         }
@@ -3794,7 +3955,7 @@ $window.Add_Closing({
     param($s, $e)
     $running = @($script:Tasks | Where-Object { -not $_.Hidden -and $_.Job.Kind -in 'deploy', 'policy' })
     if ($running.Count -gt 0 -and -not $env:PACKTUNE_SMOKE) {
-        $answer = [System.Windows.MessageBox]::Show($window, "$($running.Count) change(s) in Intune are still running. Close anyway? Apps that are half created need to be removed in Intune.", 'PackTune', 'YesNo', 'Warning')
+        $answer = if (Confirm-Action "$($running.Count) change(s) in Intune are still running. Close anyway? Apps that are half created need to be removed in Intune." 'Close PackTune' 'Close anyway' 'Keep open') { 'Yes' } else { 'No' }
         if ($answer -ne 'Yes') { $e.Cancel = $true }
     }
 })

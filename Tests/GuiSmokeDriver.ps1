@@ -1153,8 +1153,12 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'settings show the update defaults' ($ui.CmbDefaultUpdate.SelectedIndex -eq 1 -and $ui.CmbDefaultVersion.SelectedIndex -eq 0)
                 Test-Smoke 'the old Sandbox Studio setting is gone from the settings' (-not (Get-PackTuneSettings).PSObject.Properties['SandboxStudioPath'] -and -not $ui.ContainsKey('TxtSandboxStudioPath'))
                 Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Title 'PuTTY' -Version 'latest' -Policy @{ UpdateMode = 'Custom'; GraceHours = 24 }
-                try { Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Version 'latest' -Policy @{ UpdateMode = 'Off'; GraceHours = 24 }; Test-Smoke 'only one sandbox test at a time' $false }
-                catch { Test-Smoke 'only one sandbox test at a time' ($_.Exception.Message -like '*already running*') $_.Exception.Message }
+                Test-Smoke 'sandbox test started: toast says Windows Sandbox opens in a moment' (@($script:Toasts | Where-Object { $_.Text -like 'Sandbox test started*Windows Sandbox opens in a moment' }).Count -eq 1)
+                Test-Smoke 'sandbox buttons turn busy at once (Starting sandbox ..., disabled), everywhere' (($ui.BtnDetailTest, $ui.BtnTenantTest, $ui.BtnCustomTest | Where-Object { $_.Content -eq 'Starting sandbox ...' -and -not $_.IsEnabled }).Count -eq 3) (($ui.BtnDetailTest, $ui.BtnTenantTest, $ui.BtnCustomTest | ForEach-Object { "$($_.Content)/$($_.IsEnabled)" }) -join ' ')
+                Test-Smoke 'the job is in Activity and the badge counts it' ((@($script:Tasks | Where-Object { $_.Job.Kind -eq 'test' -and -not $_.Hidden }).Count -eq 1) -and $ui.BadgeActivity.Visibility -eq 'Visible')
+                $script:Toasts.Clear()
+                Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Version 'latest' -Policy @{ UpdateMode = 'Off'; GraceHours = 24 }
+                Test-Smoke 'a second test says why instead of doing nothing (already running)' (@($script:Toasts | Where-Object { $_.Kind -eq 'warn' -and $_.Text -like '*already running*' }).Count -eq 1 -and @($script:Tasks | Where-Object { $_.Job.Kind -eq 'test' }).Count -eq 1)
                 $s.Phase = 1
                 return $false
             }
@@ -1163,6 +1167,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $first = Join-Path $lab '01-Lab'
                 Test-Smoke 'Chocolatey test ran in the lab' ((Test-Path (Join-Path $first 'started.txt')) -and ((Get-Content (Join-Path $first 'job.json') -Raw | ConvertFrom-Json).DisplayName -like '*(Chocolatey)') -and (Test-Path (Join-Path $first 'source\choco-app.ps1')))
                 Test-Smoke 'result in a toast and the log' ((Get-SmokeLog) -match 'sandbox test passed' -and @($script:Toasts | Where-Object { $_.Text -like '*passed*' }).Count -ge 1)
+                Test-Smoke 'live steps on the job (preparing, starting Windows Sandbox, waiting / installing, result)' ((Get-JobLog) -match 'Step 1 of 4: preparing' -and (Get-JobLog) -match 'Step 2 of 4: starting Windows Sandbox' -and (Get-JobLog) -match 'Step 3 of 4' -and (Get-JobLog) -match 'Step 4 of 4: result received') (Get-JobLog)
+                Test-Smoke 'buttons back to Test in sandbox after the result' (($ui.BtnDetailTest, $ui.BtnTenantTest, $ui.BtnCustomTest | Where-Object { $_.Content -eq 'Test in sandbox' }).Count -eq 3)
                 # From the details panel of the apps list (winget source)
                 Show-Page 'Apps'
                 $vlc = $script:SourceRows | Where-Object { $_.WingetId -eq 'VideoLAN.VLC' } | Select-Object -First 1
@@ -1217,18 +1223,21 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $true } }
     @{ Name = 'buttons are not clipped (100%, 125%, 150%)'; Do = {
         function Find-Clipped($e, $list) {
-            if ($e -is [System.Windows.Controls.Button] -and $e.IsVisible -and $e.ActualWidth -gt 0 -and ($e.ActualHeight + 0.5) -lt ($e.DesiredSize.Height - $e.Margin.Top - $e.Margin.Bottom)) { [void]$list.Add("$($e.Name)|$($e.Content)") }
+            if ($e -is [System.Windows.Controls.Primitives.ButtonBase] -and $e.IsVisible -and $e.ActualWidth -gt 0 -and ((($e.ActualHeight + 0.5) -lt ($e.DesiredSize.Height - $e.Margin.Top - $e.Margin.Bottom)) -or (($e.ActualWidth + 0.5) -lt ($e.DesiredSize.Width - $e.Margin.Left - $e.Margin.Right)))) { [void]$list.Add("$($e.Name)|$($e.Content)|$([int]$e.ActualWidth)<$([int]$e.DesiredSize.Width)") }
             for ($i = 0; $i -lt [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($e); $i++) { Find-Clipped ([System.Windows.Media.VisualTreeHelper]::GetChild($e, $i)) $list }
         }
         $all = New-Object System.Collections.ArrayList
         foreach ($scale in 1.0, 1.25, 1.5) {
             $ui.RootGrid.LayoutTransform = New-Object System.Windows.Media.ScaleTransform $scale, $scale
             foreach ($p in 'Start', 'Apps', 'Tenant', 'Activity', 'Settings') { Show-Page $p; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("$p@$scale $x") } }
+            foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgHelp') { Show-Dialog $d; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("$d@$scale $x") } }
+            Close-Dialog
+            $ui.ConfirmTitle.Text = 'Switch'; $ui.ConfirmText.Text = 'Text'; $ui.BtnConfirmYes.Content = 'Switch to PackTune Runtime'; $ui.ConfirmLayer.Visibility = 'Visible'; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("Confirm@$scale $x") }; $ui.ConfirmLayer.Visibility = 'Collapsed'
             if ($scale -eq 1.5) { Show-Page 'Settings'; Save-SmokeShot '30-settings-150' }
         }
         $ui.RootGrid.LayoutTransform = [System.Windows.Media.Transform]::Identity
         Show-Page 'Start'
-        Test-Smoke 'no button is taller than its box (ActualHeight >= DesiredSize.Height) on any page at 100/125/150%' ($all.Count -eq 0) ($all -join '; ')
+        Test-Smoke 'no button or toggle is clipped (ActualHeight >= DesiredSize.Height and ActualWidth >= DesiredSize.Width) on any page, dialog and the confirmation at 100/125/150%' ($all.Count -eq 0) ($all -join '; ')
         $true } }
     @{ Name = 'sign out'; Do = {
         Test-Smoke 'account menu offers sign out and the other tenants' ($true)
@@ -1355,10 +1364,127 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $before = @($script:Toasts | Where-Object { $_.Kind -eq 'bad' }).Count
                 Connect-Intune
                 Test-Smoke 'cancelled embedded window: not signed in, no error toast' ((-not (Test-SignedIn)) -and @($script:Toasts | Where-Object { $_.Kind -eq 'bad' }).Count -eq $before)
+                Test-Smoke 'cancelled embedded window: quiet info toast Sign-in cancelled' (@($script:Toasts | Where-Object { $_.Kind -eq 'info' -and $_.Text -eq 'Sign-in cancelled' }).Count -ge 1)
                 $script:EmbeddedSignInOverride = $null
                 $true
             }
         } } }
+    @{ Name = 'own dialogs instead of message boxes'; Phase = 0; Do = {
+        param($s)
+        if (-not (Test-Idle)) { return $false }
+        # 1. no MessageBox call in the UI code (the device-side prompt script in PackTune-Main.ps1 is not part of the tool's window)
+        $root = Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..'
+        $files = @(Get-ChildItem $root -Recurse -Include *.ps1, *.psm1 | Where-Object { $_.FullName -notmatch '\\Tests\\|\\\.git\\' })
+        $hits = New-Object System.Collections.ArrayList
+        foreach ($f in $files) {
+            $lines = Get-Content $f.FullName
+            $notifyStart = if ($f.Name -eq 'PackTune-Main.ps1') { @(0..($lines.Count - 1) | Where-Object { $lines[$_] -like '# Shows prompts in the session of a signed-in user*' })[0] } else { -1 }
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match 'MessageBox\]::Show|MessageBox\.Show') {
+                    $inNotify = $notifyStart -ge 0 -and $i -gt $notifyStart -and $i -lt $notifyStart + 90
+                    if (-not $inNotify) { [void]$hits.Add("$($f.Name):$($i + 1)") }
+                }
+            }
+        }
+        Test-Smoke 'no MessageBox::Show anywhere in the UI code (device-side notify script excluded)' ($hits.Count -eq 0) ($hits -join ', ')
+        # 2. runtime: errors, cancel and confirmations open no system dialog (window class #32770 on this thread)
+        if (-not ('PackTuneSmoke.Win' -as [type])) {
+            $cs = @(
+                'public delegate bool EnumProc(System.IntPtr h, System.IntPtr l);'
+                '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern bool EnumThreadWindows(uint t, EnumProc p, System.IntPtr l);'
+                '[System.Runtime.InteropServices.DllImport("user32.dll", CharSet = System.Runtime.InteropServices.CharSet.Auto)] public static extern int GetClassName(System.IntPtr h, System.Text.StringBuilder s, int n);'
+                '[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();'
+                'public static int Dialogs() { int n = 0; EnumThreadWindows(GetCurrentThreadId(), (h, l) => { var sb = new System.Text.StringBuilder(64); GetClassName(h, sb, 64); if (sb.ToString() == "#32770") n++; return true; }, System.IntPtr.Zero); return n; }'
+            ) -join "`n"
+            Add-Type -Namespace PackTuneSmoke -Name Win -MemberDefinition $cs
+        }
+        $script:Toasts.Clear()
+        Show-Error 'Sign-in cancelled.'
+        $cancel = @($script:Toasts | Where-Object { $_.Text -eq 'Sign-in cancelled' })
+        Test-Smoke 'cancelled sign-in: quiet info toast, no error toast' ($cancel.Count -eq 1 -and $cancel[0].Kind -eq 'info' -and -not @($script:Toasts | Where-Object { $_.Kind -eq 'bad' }).Count)
+        Test-Smoke 'cancelled sign-in: header shows Sign in' ((-not (Test-SignedIn)) -and $ui.PanelSignedOut.Visibility -eq 'Visible')
+        $script:Toasts.Clear()
+        Show-Error ('Something broke because of a long reason. ' * 8)
+        $bad = @($script:Toasts | Where-Object { $_.Kind -eq 'bad' })
+        $details = if ($bad.Count) { Find-Visual $bad[0].Element ([System.Windows.Controls.Button]) }
+        Test-Smoke 'real error: toast with a short cause and Details' ($bad.Count -eq 1 -and $bad[0].Text.Length -le 160 -and $details -and $details.Content -eq 'Details')
+        if ($details) { $details.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        Test-Smoke 'Details opens the activity page with the log' ($script:CurrentPage -eq 'Activity')
+        # Confirmation card: yes, no, Esc; above an open dialog
+        $script:ConfirmDialogTest = $true
+        $script:SmokeTimer.Stop()
+        $script:ConfirmAnswers = @{}
+        function Invoke-ConfirmCase([string]$Name, [scriptblock]$Act) {
+            $script:ConfirmAct = $Act; $script:ConfirmSeen = $null
+            $script:ConfirmTimer = New-Object System.Windows.Threading.DispatcherTimer; $tm = $script:ConfirmTimer
+            $tm.Interval = [TimeSpan]::FromMilliseconds(150)
+            $tm.Add_Tick({ $script:ConfirmTimer.Stop(); $script:ConfirmSeen = @{ Visible = [string]$ui.ConfirmLayer.Visibility; Title = $ui.ConfirmTitle.Text; Text = $ui.ConfirmText.Text; Yes = [string]$ui.BtnConfirmYes.Content; Focused = [bool]($ui.BtnConfirmYes.IsKeyboardFocusWithin -or $ui.BtnConfirmYes.IsFocused) }; & $script:ConfirmAct })
+            $tm.Start()
+            $script:ConfirmAnswers[$Name] = Confirm-Action 'Remove it from Intune?' 'Remove from Intune' 'Remove' 'Keep'
+            $script:ConfirmAnswers["$Name-seen"] = $script:ConfirmSeen
+        }
+        Show-Dialog 'DlgHelp'
+        Invoke-ConfirmCase 'yes' { $ui.BtnConfirmYes.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        Invoke-ConfirmCase 'no' { $ui.BtnConfirmNo.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent))) }
+        Invoke-ConfirmCase 'esc' {
+            $ev = New-Object System.Windows.Input.KeyEventArgs ([System.Windows.Input.Keyboard]::PrimaryDevice), ([System.Windows.PresentationSource]::FromVisual($window)), 0, ([System.Windows.Input.Key]::Escape)
+            $ev.RoutedEvent = [System.Windows.UIElement]::PreviewKeyDownEvent
+            $window.RaiseEvent($ev)
+        }
+        $script:SmokeTimer.Start()
+        $answers = $script:ConfirmAnswers
+        $seen = $answers['yes-seen']
+        Test-Smoke 'confirmation card: title, text, own button labels, Yes has focus' ($seen.Visible -eq 'Visible' -and $seen.Title -eq 'Remove from Intune' -and $seen.Text -like 'Remove it*' -and $seen.Yes -eq 'Remove' -and $seen.Focused) ($seen | ConvertTo-Json -Compress)
+        Test-Smoke 'confirmation: Yes returns true, No returns false, Esc returns false' ($answers['yes'] -eq $true -and $answers['no'] -eq $false -and $answers['esc'] -eq $false) (($answers.GetEnumerator() | Where-Object { $_.Key -notlike '*-seen' } | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ' ')
+        Test-Smoke 'Esc on the card did not close the dialog below it; card hidden afterwards' ($script:OpenDialog -eq 'DlgHelp' -and $ui.ConfirmLayer.Visibility -eq 'Collapsed')
+        Close-Dialog
+        $script:ConfirmDialogTest = $false
+        Test-Smoke 'no system dialog opened by errors, cancel or confirmations' ([PackTuneSmoke.Win]::Dialogs() -eq 0)
+        # plain English causes instead of raw (localized) exception texts
+        $ue = [string][char]0xFC; $oe = [string][char]0xF6
+        $c403 = Get-FriendlyCause "Der Remoteserver hat einen Fehler zur${ue}ckgegeben: (403) Verboten."
+        $c400 = Get-FriendlyCause "Der Remoteserver hat einen Fehler zur${ue}ckgegeben: (400) Ung${ue}ltige Anforderung."
+        $c404 = Get-FriendlyCause 'Response status code does not indicate success: 404 (Not Found).'
+        $cNet = Get-FriendlyCause "Der Remotename konnte nicht aufgel${oe}st werden: 'graph.microsoft.com'"
+        Test-Smoke 'friendly causes: 403 = no permission, 400/404 = not available in this tenant, network = cannot reach Graph' ($c403 -like 'No permission: confirm the new permissions or check the license*' -and $c400 -like 'Not available in this tenant*E3/E5*' -and $c404 -like 'Not available in this tenant*' -and $cNet -eq "Can't reach Microsoft Graph.") "$c403 | $c400 | $c404 | $cNet"
+        $script:StatusScript = @{ State = 'NotAvailable'; Id = $null; Reason = "Remediations could not be queried (Der Remoteserver hat einen Fehler zur${ue}ckgegeben: (403) Verboten.)" }
+        Update-StatusBanner
+        Test-Smoke 'status banner shows the short cause, not the raw exception' ($ui.TxtStatusScript.Text -like '*No permission: confirm the new permissions*' -and $ui.TxtStatusScript.Text -notmatch 'Remoteserver|Verboten|403')
+        $raw = @(Get-ReadinessItems | Where-Object { $_.Text -match 'Remoteserver|Verboten|System\.|Exception|Der Remote' })
+        Test-Smoke 'no readiness item shows a raw exception text' ($raw.Count -eq 0) (($raw | ForEach-Object { $_.Title }) -join ', ')
+        $script:StatusScript = $null
+        $script:Toasts.Clear()
+        Show-Error "Der Remoteserver hat einen Fehler zur${ue}ckgegeben: (403) Verboten."
+        Test-Smoke 'toast shows the short cause; the raw text is only in the log' (@($script:Toasts | Where-Object { $_.Kind -eq 'bad' -and $_.Text -like 'No permission*' }).Count -eq 1 -and (Get-SmokeLog) -match 'Verboten')
+        # icon of a custom application: placeholder and hint, choose, reset
+        Show-CustomDialog 'New' $null
+        Test-Smoke 'no icon in the package: neutral placeholder and the hint' ($ui.TxtCustomAppIconPlaceholder.Visibility -eq 'Visible' -and $ui.ImgCustomAppIcon.Visibility -eq 'Collapsed' -and $ui.TxtCustomAppIconHint.Text -like 'No icon in the package*Company Portal shows a default icon*' -and -not $ui.BtnCustomAppIconReset.IsEnabled)
+        Set-CustomAppIcon (Join-Path $script:SmokeOut 'custom.bmp')
+        Test-Smoke 'Choose icon: preview shows the image, Reset is enabled' ($ui.ImgCustomAppIcon.Visibility -eq 'Visible' -and $ui.ImgCustomAppIcon.Source -and $ui.BtnCustomAppIconReset.IsEnabled -and (Test-Path $script:CustomIconFile))
+        & $script:ClickActions[$ui.BtnCustomAppIconReset]
+        Test-Smoke 'Reset: placeholder again, no chosen icon' ($ui.TxtCustomAppIconPlaceholder.Visibility -eq 'Visible' -and -not $script:CustomIconFile)
+        Close-Dialog
+        # dialogs fit the window at 150% and no text runs out of it
+        function Find-OutsideText($e, $list, $limit) {
+            if ($e -is [System.Windows.Controls.TextBlock] -and $e.IsVisible -and $e.ActualWidth -gt 0) {
+                $right = $e.TransformToAncestor($ui.RootGrid).Transform((New-Object System.Windows.Point $e.ActualWidth, 0)).X
+                if ($right -gt $limit + 1 -or (($e.ActualWidth + 0.5) -lt ($e.DesiredSize.Width - $e.Margin.Left - $e.Margin.Right))) { [void]$list.Add("$($e.Name)|$(([string]$e.Text).Substring(0, [Math]::Min(40, ([string]$e.Text).Length)))") }
+            }
+            for ($i = 0; $i -lt [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($e); $i++) { Find-OutsideText ([System.Windows.Media.VisualTreeHelper]::GetChild($e, $i)) $list $limit }
+        }
+        $bad = New-Object System.Collections.ArrayList
+        foreach ($scale in 1.0, 1.5) {
+            $ui.RootGrid.LayoutTransform = New-Object System.Windows.Media.ScaleTransform $scale, $scale
+            foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgHelp') {
+                Show-Dialog $d; $window.UpdateLayout()
+                if ($ui[$d].ActualWidth -gt $ui.RootGrid.ActualWidth) { [void]$bad.Add("$d@$scale wider than the window") }
+                $l = New-Object System.Collections.ArrayList; Find-OutsideText $ui[$d] $l $ui.RootGrid.ActualWidth; foreach ($x in $l) { [void]$bad.Add("$d@$scale $x") }
+            }
+            Close-Dialog
+        }
+        $ui.RootGrid.LayoutTransform = [System.Windows.Media.Transform]::Identity
+        Test-Smoke 'dialogs fit the window (also at 150%) and no text in them is trimmed or runs out of the dialog' ($bad.Count -eq 0) ($bad -join '; ')
+        $true } }
 )
 
 $script:SmokeTimer = New-Object System.Windows.Threading.DispatcherTimer

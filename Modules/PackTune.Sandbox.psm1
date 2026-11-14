@@ -727,6 +727,7 @@ function Start-PackTuneWin32Lab {
     foreach ($Required in 'Install.ps1', 'Uninstall.ps1', 'Detect.ps1') { if (-not $Scripts.ContainsKey($Required)) { throw "The lab needs the script $Required." } }
     if (-not $TimeoutMinutes) { $TimeoutMinutes = if ($AutoRun) { [int]$script:Options.JobTimeoutMinutes } else { 480 } }
     if ($null -eq $Networking) { $Networking = [bool]$script:Options.Networking }
+    Write-SandboxLog 'Step 1 of 4: preparing the test (creating the sandbox files).'
     $Job = New-SandboxJob -Mode Lab -Name $DisplayName -Data @{ AutoClose = $false; AutoRun = [bool]$AutoRun; DisplayName = $DisplayName; Version = $Version }
     $Source = Join-Path $Job 'input\source'
     New-Item -ItemType Directory -Path $Source -Force | Out-Null
@@ -734,8 +735,11 @@ function Start-PackTuneWin32Lab {
     foreach ($Name in $Scripts.Keys) { Set-Content -Path (Join-Path $Source $Name) -Value $Scripts[$Name] -Encoding UTF8 }
     Write-SandboxLog "Opening the test lab in Windows Sandbox for $DisplayName$(if ($Version) { " $Version" }): Install, Detect, Uninstall$(if (-not $AutoRun) { ', then report the result there' })."
     $Wsb = New-SandboxConfig -JobPath $Job -Networking ([bool]$Networking) -NoToolchain
+    Write-SandboxLog 'Step 2 of 4: starting Windows Sandbox (the window opens in a moment).'
     Start-SandboxProcess -WsbPath $Wsb
+    Write-SandboxLog "Step 3 of 4: $(if ($AutoRun) { 'installing as SYSTEM, detecting and uninstalling in the sandbox' } else { 'waiting for your result in the sandbox window (Install, Detect, Uninstall run there as SYSTEM)' })"
     $Status = Wait-SandboxJob -JobPath $Job -TimeoutMinutes $TimeoutMinutes
+    Write-SandboxLog 'Step 4 of 4: result received.'
     $Verdict = if ($Status.State -eq 'Succeeded') { 'Passed' } else { 'Failed' }
     Write-SandboxLog "Test lab result: $Verdict. $($Status.Message)" $(if ($Verdict -eq 'Passed') { 'Success' } else { 'Error' })
     [pscustomobject]@{ State = $Status.State; Verdict = $Verdict; Message = $Status.Message; Result = $Status.Result; JobPath = $Job }

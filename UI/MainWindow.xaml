@@ -1073,8 +1073,25 @@
                             </StackPanel>
                             <TextBlock Text="Extra MSI properties (optional)" Style="{StaticResource FieldLabel}" Margin="0,14,0,4"/>
                             <TextBox x:Name="TxtCustomProps" AutomationProperties.Name="Extra MSI properties" ToolTip="NAME=value pairs separated by spaces, e.g. ALLUSERS=1 INSTALLDIR=C:\Tools\App"/>
-                            <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,0" Text="Installs silently with msiexec /i /qn /norestart as SYSTEM; removed by product code. Detected by product code and version."/>
+                            <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,0" TextWrapping="Wrap" Text="Installs silently with msiexec /i /qn /norestart as SYSTEM; removed by product code. Detected by product code and version."/>
                         </StackPanel>
+                        <Grid x:Name="BoxCustomAppIcon" Margin="28,12,28,8">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <Border Width="56" Height="56" CornerRadius="8" Background="#F0F0F0" BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="1" VerticalAlignment="Top">
+                                <Grid>
+                                    <TextBlock x:Name="TxtCustomAppIconPlaceholder" FontFamily="{StaticResource IconFont}" Text="&#xE71D;" FontSize="24" Foreground="{StaticResource MutedText}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    <Image x:Name="ImgCustomAppIcon" Stretch="Uniform" Margin="6"/>
+                                </Grid>
+                            </Border>
+                            <StackPanel Grid.Column="1" Margin="14,0,14,0" VerticalAlignment="Center">
+                                <TextBlock Text="Icon in the Company Portal" Style="{StaticResource FieldLabel}"/>
+                                <TextBlock x:Name="TxtCustomAppIconHint" Style="{StaticResource Hint}" TextWrapping="Wrap"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button x:Name="BtnCustomAppIconPick" Content="Choose icon ..." Padding="16,6" Margin="0,0,8,0"/>
+                                <Button x:Name="BtnCustomAppIconReset" Content="Reset" Padding="16,6"/>
+                            </StackPanel>
+                        </Grid>
                         </StackPanel>
                     </ScrollViewer>
                     <Border Grid.Row="2" Style="{StaticResource DialogFooter}" Padding="28,14">
@@ -1218,6 +1235,24 @@
                     <TextBlock x:Name="HelpTitle" Margin="28,24,28,8" FontSize="20" FontWeight="SemiBold"/>
                     <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="430"><StackPanel x:Name="HelpBody" Margin="28,0,28,12"/></ScrollViewer>
                     <Border Grid.Row="2" Style="{StaticResource DialogFooter}"><Button x:Name="BtnHelpClose" Content="Close" HorizontalAlignment="Right" Padding="18,8"/></Border>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- Confirmation (above the dialogs): Confirm-Action waits for the answer -->
+        <Grid x:Name="ConfirmLayer" Visibility="Collapsed">
+            <Border Background="{StaticResource Scrim}"/>
+            <Border x:Name="DlgConfirm" Style="{StaticResource Dialog}" Width="480">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <TextBlock x:Name="ConfirmTitle" Margin="28,24,28,8" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="360"><TextBlock x:Name="ConfirmText" Margin="28,0,28,20" TextWrapping="Wrap" Foreground="{StaticResource Text2}"/></ScrollViewer>
+                    <Border Grid.Row="2" Style="{StaticResource DialogFooter}">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button x:Name="BtnConfirmNo" Content="No" Padding="18,8" Margin="0,0,10,0"/>
+                            <Button x:Name="BtnConfirmYes" Style="{StaticResource PrimaryButton}" Content="Yes" Padding="22,8"/>
+                        </StackPanel>
+                    </Border>
                 </Grid>
             </Border>
         </Grid>

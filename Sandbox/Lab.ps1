@@ -213,11 +213,11 @@ $timer.Add_Tick({
 foreach ($s in $steps) { $idx = $s.Index; $rows[$idx].Run.Add_Click({ Start-LabStep $idx }.GetNewClosure()) }
 $btnAll.Add_Click({ if (-not $script:Running) { $script:Queue.Clear(); 1..$steps.Count | ForEach-Object { [void]$script:Queue.Add($_) } } })
 $btnOk.Add_Click({
-    if ($script:Running) { [void][System.Windows.Forms.MessageBox]::Show($form, 'A step is still running.', 'PackTune test lab'); return }
+    if ($script:Running) { $info.Text = 'A step is still running: wait for it or cancel it first.'; return }
     Close-Lab 'Passed' 'Reported as successful in the test lab.'
 })
 $btnFail.Add_Click({
-    if ($script:Running) { [void][System.Windows.Forms.MessageBox]::Show($form, 'A step is still running.', 'PackTune test lab'); return }
+    if ($script:Running) { $info.Text = 'A step is still running: wait for it or cancel it first.'; return }
     $reason = [Microsoft.VisualBasic.Interaction]::InputBox('What went wrong?', 'Report failure', '')
     Close-Lab 'Failed' $(if ($reason) { "Reported as failed: $reason" } else { 'Reported as failed in the test lab.' })
 })
