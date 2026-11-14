@@ -242,6 +242,10 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if (-not (Test-Idle)) { return $false }
         Test-Smoke 'status script created and assigned' ($script:StatusScript.State -eq 'Present' -and (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-health.json')) -and (Get-JobLog) -match 'created|assigned') ($script:StatusScript | ConvertTo-Json -Compress)
         $true } }
+    @{ Name = 'graph outage text'; Do = {
+        Test-Smoke 'a 403 "Remediations not available" is no Graph outage (the .NET text mentions the remote server)' (-not (Test-GraphReadFailureText 'The remote server returned an error: (403) Forbidden.') -and -not (Test-GraphReadFailureText 'Der Remoteserver hat einen Fehler zur?ckgegeben: (403) Unzul?ssig') -and -not (Test-GraphReadFailureText 'Authorization_RequestDenied: Insufficient privileges') -and -not (Test-GraphReadFailureText 'The remote server returned an error: (400) Bad Request'))
+        Test-Smoke 'network and server errors still are' ((Test-GraphReadFailureText 'The remote name could not be resolved: graph.microsoft.com') -and (Test-GraphReadFailureText 'The remote server returned an error: (503) Server Unavailable') -and (Test-GraphReadFailureText 'Der Remotename konnte nicht aufgel?st werden') -and (Test-GraphReadFailureText 'The operation has timed out'))
+        $true } }
     @{ Name = 'apps page timing'; Phase = 0; Waited = 0; Do = {
         param($s)
         # The page switch must not wait for the list: loading state at once, lines fill in the background, the second visit is instant.

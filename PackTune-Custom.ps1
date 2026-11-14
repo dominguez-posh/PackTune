@@ -458,9 +458,8 @@ function Remove-PackTuneCustomApp {
     param([Parameter(Mandatory = $true)][string]$Id, [switch]$DeleteStore)
     $App = @(Get-PackTuneCustomApps | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
     if (-not $App) { throw "App $Id is not a custom application of this tool or does not exist any more, nothing was removed" }
-    Write-Host "Removing $($App.DisplayName) from Intune"
-    Invoke-IntuneModule { Remove-IntuneWin32App -ID $Id } | Out-Null
-    if (@(Invoke-IntuneModule { Get-IntuneWin32App } | Where-Object { $_.id -eq $Id }).Count -gt 0) { throw "Intune still lists $($App.DisplayName), it was not removed" }
+    Write-Host "Removing $($App.DisplayName) ($Id) from Intune"
+    Remove-PackTuneIntuneApp -Id $Id -Name $App.DisplayName
     Write-Host "$($App.DisplayName) was removed from Intune. Devices keep the installed software."
     if ($DeleteStore -and $App.AppId -and @(Get-PackTuneCustomApps | Where-Object { $_.AppId -eq $App.AppId }).Count -eq 0) {
         Remove-PackTuneCustomStore -AppId $App.AppId

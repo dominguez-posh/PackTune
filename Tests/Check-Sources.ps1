@@ -239,7 +239,15 @@ Test-Check 'old apps in use are not offered for removal' ($unusedBefore.Count -e
 $choco2 = $false
 try { Remove-PackTuneApp -Id 'old-choco' } catch { $choco2 = $_.Exception.Message -like '*Switch them to the PackTune Runtime*' }
 Test-Check 'old Chocolatey app in use cannot be removed' ($choco2 -and @(Get-Store | Where-Object id -eq 'old-choco').Count -eq 1)
+# the app being switched also supersedes another app: the switch must keep that (updateRelationships replaces the whole set)
+$stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+foreach ($s in $stored) { if ($s.id -eq $id1) { $s.supersedence = @([pscustomobject]@{ targetId = $id2; supersedenceType = 'update' }) } }
+ConvertTo-Json -InputObject @($stored) -Depth 6 | Set-Content $Store
 $moved = @(Switch-PackTuneAppsToRuntime)
+Test-Check 'switch: the supersedence of the app survives the change of its dependencies' (@((Get-Store | Where-Object id -eq $id1).supersedence).targetId -eq $id2)
+$stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+foreach ($s in $stored) { if ($s.id -eq $id1) { $s.supersedence = @() } }
+ConvertTo-Json -InputObject @($stored) -Depth 6 | Set-Content $Store
 $after1 = Get-Store | Where-Object id -eq $id1; $after2 = Get-Store | Where-Object id -eq $id2
 Test-Check 'switch: apps get the runtime, the old dependency is taken away' (@($after1.dependencies).Count -eq 1 -and @($after1.dependencies).targetId -eq $runtimeId -and @($after2.dependencies).Count -eq 1 -and @($after2.dependencies).targetId -eq $runtimeId -and $moved.Count -ge 2 -and (@($moved | Where-Object OldRemoved).Count -ge 2))
 Test-Check 'switch again changes nothing' (@(Switch-PackTuneAppsToRuntime).Count -eq 0)
@@ -255,6 +263,45 @@ $stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
 ConvertTo-Json -InputObject @($stored + [pscustomobject]@{ id = 'old-choco'; displayName = 'Chocolatey'; notes = 'FiredWithPowershell'; dependencies = @(); supersedence = @(); assignments = @() } + [pscustomobject]@{ id = 'foreign'; displayName = 'Other app'; notes = ''; dependencies = @([pscustomobject]@{ targetId = 'old-choco'; dependencyType = 'autoInstall' }); supersedence = @(); assignments = @() }) -Depth 6 | Set-Content $Store
 Test-Check 'old app used by any app in the tenant is not offered for removal' (@(Get-PackTuneUnusedDependencyApps).Count -eq 0)
 ConvertTo-Json -InputObject @(@(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ }) | Where-Object { $_.id -notin 'old-choco', 'foreign' }) -Depth 6 | Set-Content $Store
+# the job fails when the change does not hold in the tenant: Graph accepts the call but the dependencies stay (what the user saw as Done)
+$stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+foreach ($s in $stored) { if ($s.id -eq $id2) { $s.dependencies = @([pscustomobject]@{ targetId = 'old-choco'; dependencyType = 'autoInstall' }) } }
+ConvertTo-Json -InputObject @($stored + [pscustomobject]@{ id = 'old-choco'; displayName = 'Chocolatey'; notes = 'FiredWithPowershell'; dependencies = @(); supersedence = @(); assignments = @() }) -Depth 6 | Set-Content $Store
+$origSetRel = ${function:Set-PackTuneAppRelationships}
+function Set-PackTuneAppRelationships { param($AppId, $Own) }
+$failMsg = ''; $log = @()
+try { $log = @(Switch-PackTuneAppsToRuntime 6>&1 2>&1 | ForEach-Object { "$_" }) } catch { $failMsg = $_.Exception.Message }
+Test-Check 'switch: a change that does not hold in the tenant fails the job with the cause per app (never Done)' ($failMsg -like '*could not be switched*' -and $failMsg -like '*still depends on the old dependency app*' -and $failMsg -like "*$id2*") $failMsg
+Set-Item function:Set-PackTuneAppRelationships $origSetRel
+# the job writes per app what it found and did, then a summary
+$log = @(Switch-PackTuneAppsToRuntime 6>&1 | ForEach-Object { "$_" })
+Test-Check 'switch: the log names the app, the old dependency found, what was added/removed, and a summary' (($log -join "`n") -match 'old dependencies found: Chocolatey \(old-choco\)' -and ($log -join "`n") -match 'old dependency\(ies\) removed, confirmed in the tenant' -and ($log -join "`n") -match 'Summary: 1 app\(s\) switched')
+ConvertTo-Json -InputObject @(@(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ }) | Where-Object { $_.id -ne 'old-choco' }) -Depth 6 | Set-Content $Store
+
+# removal and relationships (the service refuses to delete a parent of another app)
+$stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+$mk = { param($i, $n, $deps, $sup) [pscustomobject]@{ id = $i; displayName = $n; notes = ''; dependencies = @($deps); supersedence = @($sup); assignments = @() } }
+ConvertTo-Json -InputObject @($stored + (& $mk 'rel-a' 'App A' @([pscustomobject]@{ targetId = 'rel-b'; dependencyType = 'autoInstall' }) @([pscustomobject]@{ targetId = 'rel-c'; supersedenceType = 'update' })) + (& $mk 'rel-b' 'App B' @() @()) + (& $mk 'rel-c' 'App C' @() @())) -Depth 6 | Set-Content $Store
+$direct = ''; try { Invoke-IntuneModule { Remove-IntuneWin32App -ID 'rel-a' } } catch { $direct = $_.Exception.Message }
+Test-Check 'fake service: a plain delete of an app with relationships fails like the real one (parent of another app)' ($direct -like '*parent of another app*')
+$info = Get-PackTuneAppRemovalInfo -AppId 'rel-a'
+Test-Check 'removal info: what the app depends on / supersedes, nothing depends on it' (@($info.Own).Count -eq 2 -and @($info.Dependents).Count -eq 0)
+$infoB = Get-PackTuneAppRemovalInfo -AppId 'rel-b'
+Test-Check 'removal info: who depends on an app' (@($infoB.Dependents).Count -eq 1 -and $infoB.Dependents[0].TargetId -eq 'rel-a' -and $infoB.Dependents[0].TargetName -eq 'App A')
+$refused = ''; try { Remove-PackTuneIntuneApp -Id 'rel-b' -Name 'App B' } catch { $refused = $_.Exception.Message }
+Test-Check 'an app that another app depends on is never deleted, the dependents are named' ($refused -like '*App A (rel-a)*' -and @(Get-Store | Where-Object id -eq 'rel-b').Count -eq 1) $refused
+$log = @(Remove-PackTuneIntuneApp -Id 'rel-c' -Name 'App C' 6>&1 | ForEach-Object { "$_" })
+Test-Check 'a superseded app: the supersedence on the superseding app is taken off, then it is deleted' (@(Get-Store | Where-Object id -eq 'rel-c').Count -eq 0 -and @((Get-Store | Where-Object id -eq 'rel-a').supersedence).Count -eq 0 -and @((Get-Store | Where-Object id -eq 'rel-a').dependencies).Count -eq 1 -and ($log -join "`n") -match 'taking that supersedence off')
+$log = @(Remove-PackTuneIntuneApp -Id 'rel-a' -Name 'App A' 6>&1 | ForEach-Object { "$_" })
+Test-Check 'an app with relationships of its own: they are cleared (and logged) first, then it is deleted and read back' (@(Get-Store | Where-Object id -eq 'rel-a').Count -eq 0 -and ($log -join "`n") -match 'has 1 relationship\(s\) of its own' -and ($log -join "`n") -match 'Deleted App A \(rel-a\)')
+$null = Remove-PackTuneIntuneApp -Id 'rel-b' -Name 'App B'
+Test-Check 'after its dependent is gone the dependency app can be deleted' (@(Get-Store | Where-Object id -eq 'rel-b').Count -eq 0)
+# unused old apps: kept ones are logged with their users
+$stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+ConvertTo-Json -InputObject @($stored + ([pscustomobject]@{ id = 'old-choco'; displayName = 'Chocolatey'; notes = 'FiredWithPowershell'; dependencies = @(); supersedence = @(); assignments = @() }) + (& $mk 'foreign2' 'Other app' @([pscustomobject]@{ targetId = 'old-choco'; dependencyType = 'autoInstall' }) @())) -Depth 6 | Set-Content $Store
+$log = @(Remove-PackTuneUnusedDependencyApps 6>&1 | ForEach-Object { "$_" })
+Test-Check 'removing old dependency apps: an app still used is kept and the log says by which app' (($log -join "`n") -match 'Kept Chocolatey \(old-choco\): still used by Other app \(foreign2\)' -and @(Get-Store | Where-Object id -eq 'old-choco').Count -eq 1)
+ConvertTo-Json -InputObject @(@(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ }) | Where-Object { $_.id -notin 'old-choco', 'foreign2' }) -Depth 6 | Set-Content $Store
 # no runtime yet: state Missing
 $none = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
 ConvertTo-Json -InputObject @($none | Where-Object { $_.notes -notlike '*PackTuneRuntimeApp*' }) -Depth 6 | Set-Content $Store
