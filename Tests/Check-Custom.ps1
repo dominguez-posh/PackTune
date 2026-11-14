@@ -188,6 +188,36 @@ Test-Check 'remove: only custom apps, anything else is refused' $threw
 Remove-PackTuneCustomApp -Id $id2
 Test-Check 'remove: the custom app is gone from the tenant' (@(Get-Store).Count -eq 0)
 
+# --- packaging: a separate copy, access denied is retried and explained, an open Windows Sandbox is waited for
+$script:Waits = New-Object System.Collections.ArrayList
+function Wait-PackTunePackaging([int]$Seconds) { [void]$script:Waits.Add($Seconds) }
+$denyFile = Join-Path $env:LOCALAPPDATA 'fake-package-deny.txt'; $lastFile = Join-Path $env:LOCALAPPDATA 'fake-package-last.json'
+$wp = New-PackTuneWorkFolder -Name 'pack-check'
+'Write-Output ok' | Set-Content (Join-Path $wp 'source\install.ps1'); 'payload' | Set-Content (Join-Path $wp 'source\app.msi')
+$pk = New-PackTunePackage -WorkPath $wp
+$last = Get-Content $lastFile -Raw | ConvertFrom-Json
+Test-Check 'packaging: IntuneWinAppUtil works on a separate copy in a short folder of its own, the package is copied back to the work folder' ($last.SourceExists -and $last.Source -notlike "$wp*" -and $last.Source -like "$(Join-Path $env:LOCALAPPDATA 'PackTune\pack')\*" -and $pk.Path -like "$wp*" -and (Test-Path $pk.Path)) "$($last.Source) -> $($pk.Path)"
+Test-Check 'packaging: the copy is removed afterwards' (@(Get-ChildItem (Join-Path $env:LOCALAPPDATA 'PackTune\pack') -Directory -ErrorAction SilentlyContinue).Count -eq 0)
+'1' | Set-Content $denyFile; $script:Waits.Clear()
+$pk = New-PackTunePackage -WorkPath $wp
+Test-Check 'packaging: one "access denied" (0x80070005) is waited out and retried' ((Test-Path $pk.Path) -and @($script:Waits).Count -eq 1 -and $script:Waits[0] -ge 5)
+'9' | Set-Content $denyFile; $script:Waits.Clear()
+$m = ''; try { $null = New-PackTunePackage -WorkPath $wp } catch { $m = $_.Exception.Message }
+Test-Check 'packaging: access denied that stays says so in plain words (retried three times, nothing half done)' ($m -like 'Windows denied access to the package folder*' -and $m -like '*Windows Sandbox*' -and $m -like '*virus scanner*' -and (([int](Get-Content $denyFile -Raw)) -eq 6)) $m
+Remove-Item $denyFile -Force
+# an open Windows Sandbox: waited for ("Waiting for Windows Sandbox to close ..."), then "Close Windows Sandbox to continue" instead of access denied
+$script:SbOpen = $true
+function Test-PackTuneSandboxRunning { $script:SbOpen }
+$script:Waits.Clear()
+$m = ''; $out = & { try { $null = New-PackTunePackage -WorkPath $wp } catch { $script:m = $_.Exception.Message } } 6>&1 | ForEach-Object { "$_" }
+Test-Check 'packaging: with a sandbox still open it says it is waiting, waits and then asks to close it (Retry), no access denied' (($out -join ' ') -like '*Waiting for Windows Sandbox to close ...*' -and $m -like 'Close Windows Sandbox to continue*Retry*' -and @($script:Waits).Count -ge 10) "$m / $($script:Waits.Count)"
+$script:SbOpen = $false; $script:Waits.Clear()
+$pk = New-PackTunePackage -WorkPath $wp
+Test-Check 'packaging: once the sandbox is closed it goes on at once' ((Test-Path $pk.Path) -and @($script:Waits).Count -eq 0)
+Remove-Item Function:\Test-PackTuneSandboxRunning
+$gui = Get-Content (Join-Path $repo 'Start-PackTune.ps1') -Raw
+Test-Check 'friendly cause: E_ACCESSDENIED / 0x80070005 and "Close Windows Sandbox" are explained in plain words' ($gui -match '2147024891\|0x80070005\|E_ACCESSDENIED' -and $gui -match 'Windows denied access to the package folder - close Windows Sandbox' -and $gui -match 'Close Windows Sandbox to continue, then press Retry')
+Remove-Item Function:\Wait-PackTunePackaging
 # --- other parts keep working
 $insight = Import-Module (Join-Path $repo 'Modules\TenantInsight.psm1') -Force -PassThru
 Set-TenantInsightHooks -Markers @{ Tool = $script:AppMarker; Winget = $script:WingetMarker; ChocolateyApp = $script:ChocoAppMarker; PackTune = $script:ToolMarker } -ConvertFromNotes ${function:ConvertFrom-PackTuneAppNotes} -ConvertToNotes ${function:ConvertTo-PackTuneAppNotes} -NewPolicy ${function:New-PackTuneAppPolicy} -NewChocoApp { } -NewWingetApp { } -SignIn { }

@@ -1,0 +1,2406 @@
+{
+    "schema":  1,
+    "generated":  "2026-11-14",
+    "source":  "winget source index, 16395 packages",
+    "apps":  {
+                 "1password":  {
+                                   "winget":  "AgileBits.1Password",
+                                   "confidence":  "high",
+                                   "score":  80,
+                                   "signals":  [
+                                                   "url-host",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "7zip.install":  {
+                                      "winget":  "7zip.7zip",
+                                      "confidence":  "high",
+                                      "score":  80,
+                                      "signals":  [
+                                                      "url-host",
+                                                      "name-exact",
+                                                      "publisher"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  ""
+                                  },
+                 "7zip-zstd":  {
+                                   "winget":  "mcmilk.7zip-zstd",
+                                   "confidence":  "high",
+                                   "score":  95,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-alias",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "adobereader":  {
+                                     "winget":  "Adobe.Acrobat.Reader.64-bit",
+                                     "confidence":  "reviewed",
+                                     "score":  0,
+                                     "signals":  [
+                                                     "review"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  "same as the catalog entry"
+                                 },
+                 "advanced-ip-scanner":  {
+                                             "winget":  "Famatech.AdvancedIPScanner",
+                                             "confidence":  "high",
+                                             "score":  105,
+                                             "signals":  [
+                                                             "url-exact",
+                                                             "name-exact",
+                                                             "publisher"
+                                                         ],
+                                             "checked":  "2026-11-14",
+                                             "note":  ""
+                                         },
+                 "anaconda3":  {
+                                   "winget":  "Anaconda.Anaconda3",
+                                   "confidence":  "high",
+                                   "score":  80,
+                                   "signals":  [
+                                                   "url-host",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "anydesk":  {
+                                 "winget":  "AnyDesk.AnyDesk",
+                                 "confidence":  "high",
+                                 "score":  55,
+                                 "signals":  [
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "audacity":  {
+                                  "winget":  "Audacity.Audacity",
+                                  "confidence":  "high",
+                                  "score":  105,
+                                  "signals":  [
+                                                  "url-exact",
+                                                  "name-exact",
+                                                  "publisher"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "autohotkey":  {
+                                    "winget":  "AutoHotkey.AutoHotkey",
+                                    "confidence":  "high",
+                                    "score":  55,
+                                    "signals":  [
+                                                    "name-exact",
+                                                    "publisher"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  ""
+                                },
+                 "autoruns":  {
+                                  "winget":  "Microsoft.Sysinternals.Autoruns",
+                                  "confidence":  "high",
+                                  "score":  80,
+                                  "signals":  [
+                                                  "url-host",
+                                                  "name-exact",
+                                                  "publisher"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "awscli":  {
+                                "winget":  "Amazon.AWSCLI",
+                                "confidence":  "high",
+                                "score":  95,
+                                "signals":  [
+                                                "url-exact",
+                                                "name-alias",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "azcopy10":  {
+                                  "winget":  "Microsoft.Azure.AZCopy.10",
+                                  "confidence":  "reviewed",
+                                  "score":  0,
+                                  "signals":  [
+                                                  "review"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "azure-cli":  {
+                                   "winget":  "Microsoft.AzureCLI",
+                                   "confidence":  "reviewed",
+                                   "score":  0,
+                                   "signals":  [
+                                                   "review"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "bginfo":  {
+                                "winget":  "Microsoft.Sysinternals.BGInfo",
+                                "confidence":  "high",
+                                "score":  80,
+                                "signals":  [
+                                                "url-host",
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "bitwarden":  {
+                                   "winget":  "Bitwarden.Bitwarden",
+                                   "confidence":  "high",
+                                   "score":  105,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "blender":  {
+                                 "winget":  "BlenderFoundation.Blender",
+                                 "confidence":  "high",
+                                 "score":  55,
+                                 "signals":  [
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "brackets":  {
+                                  "winget":  "Adobe.Brackets",
+                                  "confidence":  "reviewed",
+                                  "score":  0,
+                                  "signals":  [
+                                                  "review"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  "original project; brackets-cont.brackets is the community fork"
+                              },
+                 "brave":  {
+                               "winget":  "Brave.Brave",
+                               "confidence":  "high",
+                               "score":  80,
+                               "signals":  [
+                                               "url-host",
+                                               "name-exact",
+                                               "publisher"
+                                           ],
+                               "checked":  "2026-11-14",
+                               "note":  ""
+                           },
+                 "calibre":  {
+                                 "winget":  "calibre.calibre",
+                                 "confidence":  "high",
+                                 "score":  105,
+                                 "signals":  [
+                                                 "url-exact",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "ccache":  {
+                                "winget":  "Ccache.Ccache",
+                                "confidence":  "high",
+                                "score":  80,
+                                "signals":  [
+                                                "url-host",
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "ccleaner":  {
+                                  "winget":  "Piriform.CCleaner",
+                                  "confidence":  "reviewed",
+                                  "score":  0,
+                                  "signals":  [
+                                                  "review"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "chef-client":  {
+                                     "winget":  "ChefSoftware.InfraClient",
+                                     "confidence":  "high",
+                                     "score":  80,
+                                     "signals":  [
+                                                     "url-host",
+                                                     "name-exact",
+                                                     "publisher"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  ""
+                                 },
+                 "chromedriver":  {
+                                      "winget":  "Chromium.ChromeDriver",
+                                      "confidence":  "high",
+                                      "score":  80,
+                                      "signals":  [
+                                                      "url-host",
+                                                      "name-exact",
+                                                      "publisher"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  ""
+                                  },
+                 "chromium":  {
+                                  "winget":  "Hibbiki.Chromium",
+                                  "confidence":  "reviewed",
+                                  "score":  0,
+                                  "signals":  [
+                                                  "review"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  "the Chocolatey package ships the same community builds"
+                              },
+                 "citrix-workspace":  {
+                                          "winget":  "Citrix.Workspace",
+                                          "confidence":  "high",
+                                          "score":  80,
+                                          "signals":  [
+                                                          "url-host",
+                                                          "name-exact",
+                                                          "publisher"
+                                                      ],
+                                          "checked":  "2026-11-14",
+                                          "note":  ""
+                                      },
+                 "cmake":  {
+                               "winget":  "Kitware.CMake",
+                               "confidence":  "high",
+                               "score":  85,
+                               "signals":  [
+                                               "url-exact",
+                                               "name-exact"
+                                           ],
+                               "checked":  "2026-11-14",
+                               "note":  ""
+                           },
+                 "crystaldiskinfo":  {
+                                         "winget":  "CrystalDewWorld.CrystalDiskInfo",
+                                         "confidence":  "high",
+                                         "score":  85,
+                                         "signals":  [
+                                                         "url-exact",
+                                                         "name-exact"
+                                                     ],
+                                         "checked":  "2026-11-14",
+                                         "note":  ""
+                                     },
+                 "curl":  {
+                              "winget":  "cURL.cURL",
+                              "confidence":  "high",
+                              "score":  105,
+                              "signals":  [
+                                              "url-exact",
+                                              "name-exact",
+                                              "publisher"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  ""
+                          },
+                 "cutepdf":  {
+                                 "winget":  "AcroSoftware.CutePDFWriter",
+                                 "confidence":  "high",
+                                 "score":  105,
+                                 "signals":  [
+                                                 "url-exact",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "cygwin":  {
+                                "winget":  "Cygwin.Cygwin",
+                                "confidence":  "high",
+                                "score":  105,
+                                "signals":  [
+                                                "url-exact",
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "dart-sdk":  {
+                                  "winget":  "Google.DartSDK",
+                                  "confidence":  "high",
+                                  "score":  85,
+                                  "signals":  [
+                                                  "url-exact",
+                                                  "name-exact"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "dbeaver":  {
+                                 "winget":  "DBeaver.DBeaver.Community",
+                                 "confidence":  "high",
+                                 "score":  80,
+                                 "signals":  [
+                                                 "url-host",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "dellcommandupdate":  {
+                                           "winget":  "Dell.CommandUpdate",
+                                           "confidence":  "high",
+                                           "score":  80,
+                                           "signals":  [
+                                                           "url-host",
+                                                           "name-exact",
+                                                           "publisher"
+                                                       ],
+                                           "checked":  "2026-11-14",
+                                           "note":  ""
+                                       },
+                 "dellcommandupdate-uwp":  {
+                                               "winget":  "Dell.CommandUpdate.Universal",
+                                               "confidence":  "reviewed",
+                                               "score":  0,
+                                               "signals":  [
+                                                               "review"
+                                                           ],
+                                               "checked":  "2026-11-14",
+                                               "note":  ""
+                                           },
+                 "dell-update":  {
+                                     "winget":  "Dell.CommandUpdate.Universal",
+                                     "confidence":  "reviewed",
+                                     "score":  0,
+                                     "signals":  [
+                                                     "review"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  ""
+                                 },
+                 "docker-desktop":  {
+                                        "winget":  "Docker.DockerDesktop",
+                                        "confidence":  "high",
+                                        "score":  105,
+                                        "signals":  [
+                                                        "url-exact",
+                                                        "name-exact",
+                                                        "publisher"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  ""
+                                    },
+                 "dotnet-6.0-desktopruntime":  {
+                                                   "winget":  "Microsoft.DotNet.DesktopRuntime.6",
+                                                   "confidence":  "reviewed",
+                                                   "score":  0,
+                                                   "signals":  [
+                                                                   "review"
+                                                               ],
+                                                   "checked":  "2026-11-14",
+                                                   "note":  ""
+                                               },
+                 "dotnet-6.0-runtime":  {
+                                            "winget":  "Microsoft.DotNet.Runtime.6",
+                                            "confidence":  "reviewed",
+                                            "score":  0,
+                                            "signals":  [
+                                                            "review"
+                                                        ],
+                                            "checked":  "2026-11-14",
+                                            "note":  ""
+                                        },
+                 "dotnet-6.0-sdk":  {
+                                        "winget":  "Microsoft.DotNet.SDK.6",
+                                        "confidence":  "reviewed",
+                                        "score":  0,
+                                        "signals":  [
+                                                        "review"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  ""
+                                    },
+                 "dotnet-8.0-desktopruntime":  {
+                                                   "winget":  "Microsoft.DotNet.DesktopRuntime.8",
+                                                   "confidence":  "reviewed",
+                                                   "score":  0,
+                                                   "signals":  [
+                                                                   "review"
+                                                               ],
+                                                   "checked":  "2026-11-14",
+                                                   "note":  ""
+                                               },
+                 "dotnet-8.0-runtime":  {
+                                            "winget":  "Microsoft.DotNet.Runtime.8",
+                                            "confidence":  "reviewed",
+                                            "score":  0,
+                                            "signals":  [
+                                                            "review"
+                                                        ],
+                                            "checked":  "2026-11-14",
+                                            "note":  ""
+                                        },
+                 "dotnetcore":  {
+                                    "winget":  "Microsoft.DotNet.Runtime.3_1",
+                                    "confidence":  "reviewed",
+                                    "score":  0,
+                                    "signals":  [
+                                                    "review"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  "line 3.1, as the Chocolatey package"
+                                },
+                 "dotnetcore-sdk":  {
+                                        "winget":  "Microsoft.DotNet.SDK.3_1",
+                                        "confidence":  "reviewed",
+                                        "score":  0,
+                                        "signals":  [
+                                                        "review"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  "line 3.1, as the Chocolatey package"
+                                    },
+                 "dotnetcore-windowshosting":  {
+                                                   "winget":  "Microsoft.DotNet.HostingBundle.3_1",
+                                                   "confidence":  "reviewed",
+                                                   "score":  0,
+                                                   "signals":  [
+                                                                   "review"
+                                                               ],
+                                                   "checked":  "2026-11-14",
+                                                   "note":  "line 3.1, as the Chocolatey package"
+                                               },
+                 "dotnet-desktopruntime":  {
+                                               "winget":  "Microsoft.DotNet.DesktopRuntime.11",
+                                               "confidence":  "reviewed",
+                                               "score":  0,
+                                               "signals":  [
+                                                               "review"
+                                                           ],
+                                               "checked":  "2026-11-14",
+                                               "note":  "latest line, as the Chocolatey package"
+                                           },
+                 "dotnet-runtime":  {
+                                        "winget":  "Microsoft.DotNet.Runtime.11",
+                                        "confidence":  "reviewed",
+                                        "score":  0,
+                                        "signals":  [
+                                                        "review"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  "latest line, as the Chocolatey package"
+                                    },
+                 "dropbox":  {
+                                 "winget":  "Dropbox.Dropbox",
+                                 "confidence":  "high",
+                                 "score":  105,
+                                 "signals":  [
+                                                 "url-exact",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "egnyte-desktop-app":  {
+                                            "winget":  "Egnyte.EgnyteDesktopApp",
+                                            "confidence":  "high",
+                                            "score":  80,
+                                            "signals":  [
+                                                            "url-host",
+                                                            "name-exact",
+                                                            "publisher"
+                                                        ],
+                                            "checked":  "2026-11-14",
+                                            "note":  ""
+                                        },
+                 "eid-belgium":  {
+                                     "winget":  "BelgianGovernment.eIDmiddleware",
+                                     "confidence":  "reviewed",
+                                     "score":  0,
+                                     "signals":  [
+                                                     "review"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  ""
+                                 },
+                 "eid-belgium-viewer":  {
+                                            "winget":  "BelgianGovernment.eIDViewer",
+                                            "confidence":  "high",
+                                            "score":  60,
+                                            "signals":  [
+                                                            "url-host",
+                                                            "name-exact"
+                                                        ],
+                                            "checked":  "2026-11-14",
+                                            "note":  ""
+                                        },
+                 "everything":  {
+                                    "winget":  "voidtools.Everything",
+                                    "confidence":  "high",
+                                    "score":  105,
+                                    "signals":  [
+                                                    "url-exact",
+                                                    "name-exact",
+                                                    "publisher"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  ""
+                                },
+                 "ffmpeg":  {
+                                "winget":  "Gyan.FFmpeg",
+                                "confidence":  "reviewed",
+                                "score":  0,
+                                "signals":  [
+                                                "review"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  "Windows builds of gyan.dev, the same build source as the Chocolatey package"
+                            },
+                 "filebeat":  {
+                                  "winget":  "Elastic.Filebeat",
+                                  "confidence":  "high",
+                                  "score":  95,
+                                  "signals":  [
+                                                  "url-exact",
+                                                  "name-alias",
+                                                  "publisher"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "filius":  {
+                                "winget":  "StefanFreischlad.Filius",
+                                "confidence":  "high",
+                                "score":  80,
+                                "signals":  [
+                                                "url-host",
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "firefox":  {
+                                 "winget":  "Mozilla.Firefox",
+                                 "confidence":  "reviewed",
+                                 "score":  0,
+                                 "signals":  [
+                                                 "review"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "firefoxesr":  {
+                                    "winget":  "Mozilla.Firefox.ESR",
+                                    "confidence":  "reviewed",
+                                    "score":  0,
+                                    "signals":  [
+                                                    "review"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  ""
+                                },
+                 "foxitreader":  {
+                                     "winget":  "Foxit.FoxitReader",
+                                     "confidence":  "high",
+                                     "score":  80,
+                                     "signals":  [
+                                                     "url-host",
+                                                     "name-exact",
+                                                     "publisher"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  ""
+                                 },
+                 "geogebra-classic.install":  {
+                                                  "winget":  "GeoGebra.Classic",
+                                                  "confidence":  "high",
+                                                  "score":  80,
+                                                  "signals":  [
+                                                                  "url-host",
+                                                                  "name-exact",
+                                                                  "publisher"
+                                                              ],
+                                                  "checked":  "2026-11-14",
+                                                  "note":  ""
+                                              },
+                 "gimp":  {
+                              "winget":  "GIMP.GIMP.3",
+                              "confidence":  "reviewed",
+                              "score":  0,
+                              "signals":  [
+                                              "review"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  "versioned id: line 3 is the current one (GIMP.GIMP.2 is the old line)"
+                          },
+                 "git.install":  {
+                                     "winget":  "Git.Git",
+                                     "confidence":  "reviewed",
+                                     "score":  0,
+                                     "signals":  [
+                                                     "review"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  ""
+                                 },
+                 "github-desktop":  {
+                                        "winget":  "GitHub.GitHubDesktop",
+                                        "confidence":  "high",
+                                        "score":  105,
+                                        "signals":  [
+                                                        "url-repo",
+                                                        "name-exact",
+                                                        "publisher"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  ""
+                                    },
+                 "golang":  {
+                                "winget":  "GoLang.Go",
+                                "confidence":  "high",
+                                "score":  55,
+                                "signals":  [
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "googlechrome":  {
+                                      "winget":  "Google.Chrome",
+                                      "confidence":  "reviewed",
+                                      "score":  0,
+                                      "signals":  [
+                                                      "review"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  ""
+                                  },
+                 "googledrive":  {
+                                     "winget":  "Google.GoogleDrive",
+                                     "confidence":  "high",
+                                     "score":  80,
+                                     "signals":  [
+                                                     "url-host",
+                                                     "name-exact",
+                                                     "publisher"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  ""
+                                 },
+                 "googleearthpro":  {
+                                        "winget":  "Google.EarthPro",
+                                        "confidence":  "high",
+                                        "score":  55,
+                                        "signals":  [
+                                                        "name-exact",
+                                                        "publisher"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  ""
+                                    },
+                 "gotomeeting":  {
+                                     "winget":  "GoTo.GoToMeeting",
+                                     "confidence":  "high",
+                                     "score":  105,
+                                     "signals":  [
+                                                     "url-exact",
+                                                     "name-exact",
+                                                     "publisher"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  ""
+                                 },
+                 "gpg4win":  {
+                                 "winget":  "GnuPG.Gpg4win",
+                                 "confidence":  "high",
+                                 "score":  85,
+                                 "signals":  [
+                                                 "url-exact",
+                                                 "name-exact"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "graphviz":  {
+                                  "winget":  "Graphviz.Graphviz",
+                                  "confidence":  "high",
+                                  "score":  80,
+                                  "signals":  [
+                                                  "url-host",
+                                                  "name-exact",
+                                                  "publisher"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "greenshot":  {
+                                   "winget":  "Greenshot.Greenshot",
+                                   "confidence":  "high",
+                                   "score":  105,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "hpsupportassistant":  {
+                                            "winget":  "HP.SupportAssistant",
+                                            "confidence":  "high",
+                                            "score":  85,
+                                            "signals":  [
+                                                            "url-exact",
+                                                            "name-exact"
+                                                        ],
+                                            "checked":  "2026-11-14",
+                                            "note":  ""
+                                        },
+                 "icloud":  {
+                                "winget":  "Apple.iCloud",
+                                "confidence":  "high",
+                                "score":  70,
+                                "signals":  [
+                                                "url-host",
+                                                "name-alias",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "imagemagick.app":  {
+                                         "winget":  "ImageMagick.ImageMagick",
+                                         "confidence":  "high",
+                                         "score":  95,
+                                         "signals":  [
+                                                         "url-exact",
+                                                         "name-alias",
+                                                         "publisher"
+                                                     ],
+                                         "checked":  "2026-11-14",
+                                         "note":  ""
+                                     },
+                 "inkscape":  {
+                                  "winget":  "Inkscape.Inkscape",
+                                  "confidence":  "high",
+                                  "score":  80,
+                                  "signals":  [
+                                                  "url-host",
+                                                  "name-exact",
+                                                  "publisher"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "intel-dsa":  {
+                                   "winget":  "Intel.IntelDriverAndSupportAssistant",
+                                   "confidence":  "high",
+                                   "score":  55,
+                                   "signals":  [
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "irfanview":  {
+                                   "winget":  "IrfanSkiljan.IrfanView",
+                                   "confidence":  "high",
+                                   "score":  105,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "itunes":  {
+                                "winget":  "Apple.iTunes",
+                                "confidence":  "high",
+                                "score":  105,
+                                "signals":  [
+                                                "url-exact",
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "jabra-direct":  {
+                                      "winget":  "Jabra.Direct",
+                                      "confidence":  "high",
+                                      "score":  105,
+                                      "signals":  [
+                                                      "url-exact",
+                                                      "name-exact",
+                                                      "publisher"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  ""
+                                  },
+                 "javaruntime":  {
+                                     "winget":  "Oracle.JavaRuntimeEnvironment",
+                                     "confidence":  "reviewed",
+                                     "score":  0,
+                                     "signals":  [
+                                                     "review"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  "Java 8"
+                                 },
+                 "jfrog-cli":  {
+                                   "winget":  "JFrog.Cli",
+                                   "confidence":  "high",
+                                   "score":  80,
+                                   "signals":  [
+                                                   "url-host",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "jq":  {
+                            "winget":  "jqlang.jq",
+                            "confidence":  "high",
+                            "score":  55,
+                            "signals":  [
+                                            "name-exact",
+                                            "publisher"
+                                        ],
+                            "checked":  "2026-11-14",
+                            "note":  ""
+                        },
+                 "jre8":  {
+                              "winget":  "Oracle.JavaRuntimeEnvironment",
+                              "confidence":  "reviewed",
+                              "score":  0,
+                              "signals":  [
+                                              "review"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  "Java 8"
+                          },
+                 "keepass":  {
+                                 "winget":  "DominikReichl.KeePass",
+                                 "confidence":  "high",
+                                 "score":  105,
+                                 "signals":  [
+                                                 "url-exact",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "keepassxc":  {
+                                   "winget":  "KeePassXCTeam.KeePassXC",
+                                   "confidence":  "high",
+                                   "score":  85,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-exact"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "keeper":  {
+                                "winget":  "KeeperSecurity.KeeperDesktop",
+                                "confidence":  "reviewed",
+                                "score":  0,
+                                "signals":  [
+                                                "review"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "k-litecodecpackfull":  {
+                                             "winget":  "CodecGuide.K-LiteCodecPack.Full",
+                                             "confidence":  "high",
+                                             "score":  80,
+                                             "signals":  [
+                                                             "url-host",
+                                                             "name-exact",
+                                                             "publisher"
+                                                         ],
+                                             "checked":  "2026-11-14",
+                                             "note":  ""
+                                         },
+                 "krita":  {
+                               "winget":  "KDE.Krita",
+                               "confidence":  "high",
+                               "score":  105,
+                               "signals":  [
+                                               "url-exact",
+                                               "name-exact",
+                                               "publisher"
+                                           ],
+                               "checked":  "2026-11-14",
+                               "note":  ""
+                           },
+                 "kubernetes-cli":  {
+                                        "winget":  "Kubernetes.kubectl",
+                                        "confidence":  "high",
+                                        "score":  80,
+                                        "signals":  [
+                                                        "url-host",
+                                                        "name-exact",
+                                                        "publisher"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  ""
+                                    },
+                 "kubernetes-helm":  {
+                                         "winget":  "Helm.Helm",
+                                         "confidence":  "high",
+                                         "score":  105,
+                                         "signals":  [
+                                                         "url-exact",
+                                                         "name-exact",
+                                                         "publisher"
+                                                     ],
+                                         "checked":  "2026-11-14",
+                                         "note":  ""
+                                     },
+                 "lenovo-thinkvantage-system-update":  {
+                                                           "winget":  "Lenovo.SystemUpdate",
+                                                           "confidence":  "high",
+                                                           "score":  55,
+                                                           "signals":  [
+                                                                           "name-exact",
+                                                                           "publisher"
+                                                                       ],
+                                                           "checked":  "2026-11-14",
+                                                           "note":  ""
+                                                       },
+                 "libreoffice-fresh":  {
+                                           "winget":  "TheDocumentFoundation.LibreOffice",
+                                           "confidence":  "reviewed",
+                                           "score":  0,
+                                           "signals":  [
+                                                           "review"
+                                                       ],
+                                           "checked":  "2026-11-14",
+                                           "note":  "winget carries the Fresh line"
+                                       },
+                 "llvm":  {
+                              "winget":  "LLVM.LLVM",
+                              "confidence":  "high",
+                              "score":  105,
+                              "signals":  [
+                                              "url-exact",
+                                              "name-exact",
+                                              "publisher"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  ""
+                          },
+                 "make":  {
+                              "winget":  "ezwinports.make",
+                              "confidence":  "reviewed",
+                              "score":  0,
+                              "signals":  [
+                                              "review"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  "GNU make for Windows (ezwinports), same version line"
+                          },
+                 "malwarebytes":  {
+                                      "winget":  "Malwarebytes.Malwarebytes",
+                                      "confidence":  "high",
+                                      "score":  80,
+                                      "signals":  [
+                                                      "url-host",
+                                                      "name-exact",
+                                                      "publisher"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  ""
+                                  },
+                 "metricbeat":  {
+                                    "winget":  "Elastic.Metricbeat",
+                                    "confidence":  "high",
+                                    "score":  95,
+                                    "signals":  [
+                                                    "url-exact",
+                                                    "name-alias",
+                                                    "publisher"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  ""
+                                },
+                 "microsoftazurestorageexplorer":  {
+                                                       "winget":  "Microsoft.Azure.StorageExplorer",
+                                                       "confidence":  "high",
+                                                       "score":  55,
+                                                       "signals":  [
+                                                                       "name-exact",
+                                                                       "publisher"
+                                                                   ],
+                                                       "checked":  "2026-11-14",
+                                                       "note":  ""
+                                                   },
+                 "microsoft-edge":  {
+                                        "winget":  "Microsoft.Edge",
+                                        "confidence":  "high",
+                                        "score":  55,
+                                        "signals":  [
+                                                        "name-exact",
+                                                        "publisher"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  ""
+                                    },
+                 "microsoft-office-deployment":  {
+                                                     "winget":  "Microsoft.OfficeDeploymentTool",
+                                                     "confidence":  "reviewed",
+                                                     "score":  0,
+                                                     "signals":  [
+                                                                     "review"
+                                                                 ],
+                                                     "checked":  "2026-11-14",
+                                                     "note":  ""
+                                                 },
+                 "microsoft-teams":  {
+                                         "winget":  "Microsoft.Teams.Classic",
+                                         "confidence":  "reviewed",
+                                         "score":  0,
+                                         "signals":  [
+                                                         "review"
+                                                     ],
+                                         "checked":  "2026-11-14",
+                                         "note":  "Teams classic"
+                                     },
+                 "microsoft-teams-new-bootstrapper":  {
+                                                          "winget":  "Microsoft.Teams",
+                                                          "confidence":  "reviewed",
+                                                          "score":  0,
+                                                          "signals":  [
+                                                                          "review"
+                                                                      ],
+                                                          "checked":  "2026-11-14",
+                                                          "note":  "new Teams"
+                                                      },
+                 "microsoft-windows-terminal":  {
+                                                    "winget":  "Microsoft.WindowsTerminal",
+                                                    "confidence":  "high",
+                                                    "score":  80,
+                                                    "signals":  [
+                                                                    "url-repo",
+                                                                    "name-part",
+                                                                    "publisher"
+                                                                ],
+                                                    "checked":  "2026-11-14",
+                                                    "note":  ""
+                                                },
+                 "miktex.install":  {
+                                        "winget":  "MiKTeX.MiKTeX",
+                                        "confidence":  "high",
+                                        "score":  80,
+                                        "signals":  [
+                                                        "url-host",
+                                                        "name-exact",
+                                                        "publisher"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  ""
+                                    },
+                 "musescore":  {
+                                   "winget":  "Musescore.Musescore",
+                                   "confidence":  "high",
+                                   "score":  105,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "nasm":  {
+                              "winget":  "NASM.NASM",
+                              "confidence":  "high",
+                              "score":  105,
+                              "signals":  [
+                                              "url-exact",
+                                              "name-exact",
+                                              "publisher"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  ""
+                          },
+                 "nessus-agent":  {
+                                      "winget":  "Tenable.NessusAgent",
+                                      "confidence":  "high",
+                                      "score":  80,
+                                      "signals":  [
+                                                      "url-host",
+                                                      "name-exact",
+                                                      "publisher"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  ""
+                                  },
+                 "nextcloud-client":  {
+                                          "winget":  "Nextcloud.NextcloudDesktop",
+                                          "confidence":  "reviewed",
+                                          "score":  0,
+                                          "signals":  [
+                                                          "review"
+                                                      ],
+                                          "checked":  "2026-11-14",
+                                          "note":  ""
+                                      },
+                 "ninja":  {
+                               "winget":  "Ninja-build.Ninja",
+                               "confidence":  "high",
+                               "score":  80,
+                               "signals":  [
+                                               "url-host",
+                                               "name-exact",
+                                               "publisher"
+                                           ],
+                               "checked":  "2026-11-14",
+                               "note":  ""
+                           },
+                 "nodejs":  {
+                                "winget":  "OpenJS.NodeJS",
+                                "confidence":  "high",
+                                "score":  105,
+                                "signals":  [
+                                                "url-exact",
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "nodejs-lts":  {
+                                    "winget":  "OpenJS.NodeJS.LTS",
+                                    "confidence":  "high",
+                                    "score":  105,
+                                    "signals":  [
+                                                    "url-exact",
+                                                    "name-exact",
+                                                    "publisher"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  ""
+                                },
+                 "notepadplusplus":  {
+                                         "winget":  "Notepad++.Notepad++",
+                                         "confidence":  "high",
+                                         "score":  105,
+                                         "signals":  [
+                                                         "url-exact",
+                                                         "name-exact",
+                                                         "publisher"
+                                                     ],
+                                         "checked":  "2026-11-14",
+                                         "note":  ""
+                                     },
+                 "nssm":  {
+                              "winget":  "NSSM.NSSM",
+                              "confidence":  "high",
+                              "score":  105,
+                              "signals":  [
+                                              "url-exact",
+                                              "name-exact",
+                                              "publisher"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  ""
+                          },
+                 "obs-studio.install":  {
+                                            "winget":  "OBSProject.OBSStudio",
+                                            "confidence":  "high",
+                                            "score":  105,
+                                            "signals":  [
+                                                            "url-exact",
+                                                            "name-exact",
+                                                            "publisher"
+                                                        ],
+                                            "checked":  "2026-11-14",
+                                            "note":  ""
+                                        },
+                 "octopusdeploy.tentacle":  {
+                                                "winget":  "OctopusDeploy.Tentacle",
+                                                "confidence":  "high",
+                                                "score":  55,
+                                                "signals":  [
+                                                                "name-exact",
+                                                                "publisher"
+                                                            ],
+                                                "checked":  "2026-11-14",
+                                                "note":  ""
+                                            },
+                 "office365business":  {
+                                           "winget":  "Microsoft.Office",
+                                           "confidence":  "reviewed",
+                                           "score":  0,
+                                           "signals":  [
+                                                           "review"
+                                                       ],
+                                           "checked":  "2026-11-14",
+                                           "note":  "Microsoft 365 Apps (Click-to-Run)"
+                                       },
+                 "office365proplus":  {
+                                          "winget":  "Microsoft.Office",
+                                          "confidence":  "reviewed",
+                                          "score":  0,
+                                          "signals":  [
+                                                          "review"
+                                                      ],
+                                          "checked":  "2026-11-14",
+                                          "note":  "Microsoft 365 Apps (Click-to-Run)"
+                                      },
+                 "onedrive":  {
+                                  "winget":  "Microsoft.OneDrive",
+                                  "confidence":  "high",
+                                  "score":  70,
+                                  "signals":  [
+                                                  "url-host",
+                                                  "name-alias",
+                                                  "publisher"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "openboard":  {
+                                   "winget":  "OpenEducationFoundation.OpenBoard",
+                                   "confidence":  "high",
+                                   "score":  80,
+                                   "signals":  [
+                                                   "url-host",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "openssh":  {
+                                 "winget":  "Microsoft.OpenSSH.Preview",
+                                 "confidence":  "high",
+                                 "score":  80,
+                                 "signals":  [
+                                                 "url-repo",
+                                                 "name-part",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "openssl.light":  {
+                                       "winget":  "ShiningLight.OpenSSL.Light",
+                                       "confidence":  "high",
+                                       "score":  105,
+                                       "signals":  [
+                                                       "url-exact",
+                                                       "name-exact",
+                                                       "publisher"
+                                                   ],
+                                       "checked":  "2026-11-14",
+                                       "note":  ""
+                                   },
+                 "openvpn":  {
+                                 "winget":  "OpenVPNTechnologies.OpenVPN",
+                                 "confidence":  "high",
+                                 "score":  105,
+                                 "signals":  [
+                                                 "url-exact",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "openvpn-connect":  {
+                                         "winget":  "OpenVPNTechnologies.OpenVPNConnect",
+                                         "confidence":  "high",
+                                         "score":  80,
+                                         "signals":  [
+                                                         "url-host",
+                                                         "name-exact",
+                                                         "publisher"
+                                                     ],
+                                         "checked":  "2026-11-14",
+                                         "note":  ""
+                                     },
+                 "opera":  {
+                               "winget":  "Opera.Opera",
+                               "confidence":  "high",
+                               "score":  70,
+                               "signals":  [
+                                               "url-host",
+                                               "name-alias",
+                                               "publisher"
+                                           ],
+                               "checked":  "2026-11-14",
+                               "note":  ""
+                           },
+                 "osquery":  {
+                                 "winget":  "osquery.osquery",
+                                 "confidence":  "high",
+                                 "score":  105,
+                                 "signals":  [
+                                                 "url-exact",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "paint.net":  {
+                                   "winget":  "dotPDN.PaintDotNet",
+                                   "confidence":  "high",
+                                   "score":  105,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "pandoc":  {
+                                "winget":  "JohnMacFarlane.Pandoc",
+                                "confidence":  "high",
+                                "score":  105,
+                                "signals":  [
+                                                "url-exact",
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "pdf24":  {
+                               "winget":  "geeksoftwareGmbH.PDF24Creator",
+                               "confidence":  "high",
+                               "score":  80,
+                               "signals":  [
+                                               "url-host",
+                                               "name-exact",
+                                               "publisher"
+                                           ],
+                               "checked":  "2026-11-14",
+                               "note":  ""
+                           },
+                 "pdfsam.install":  {
+                                        "winget":  "PDFsam.PDFsam",
+                                        "confidence":  "high",
+                                        "score":  80,
+                                        "signals":  [
+                                                        "url-host",
+                                                        "name-exact",
+                                                        "publisher"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  ""
+                                    },
+                 "pdfxchangeeditor":  {
+                                          "winget":  "TrackerSoftware.PDF-XChangeEditor",
+                                          "confidence":  "high",
+                                          "score":  105,
+                                          "signals":  [
+                                                          "url-exact",
+                                                          "name-exact",
+                                                          "publisher"
+                                                      ],
+                                          "checked":  "2026-11-14",
+                                          "note":  ""
+                                      },
+                 "postman":  {
+                                 "winget":  "Postman.Postman",
+                                 "confidence":  "high",
+                                 "score":  80,
+                                 "signals":  [
+                                                 "url-host",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "powerbi":  {
+                                 "winget":  "Microsoft.PowerBI",
+                                 "confidence":  "high",
+                                 "score":  70,
+                                 "signals":  [
+                                                 "url-host",
+                                                 "name-alias",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "powershell-core":  {
+                                         "winget":  "Microsoft.PowerShell",
+                                         "confidence":  "reviewed",
+                                         "score":  0,
+                                         "signals":  [
+                                                         "review"
+                                                     ],
+                                         "checked":  "2026-11-14",
+                                         "note":  ""
+                                     },
+                 "powertoys":  {
+                                   "winget":  "Microsoft.PowerToys",
+                                   "confidence":  "high",
+                                   "score":  105,
+                                   "signals":  [
+                                                   "url-repo",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "procexp":  {
+                                 "winget":  "Microsoft.Sysinternals.ProcessExplorer",
+                                 "confidence":  "high",
+                                 "score":  105,
+                                 "signals":  [
+                                                 "url-exact",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "procmon":  {
+                                 "winget":  "Microsoft.Sysinternals.ProcessMonitor",
+                                 "confidence":  "high",
+                                 "score":  105,
+                                 "signals":  [
+                                                 "url-exact",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "psexec":  {
+                                "winget":  "Microsoft.Sysinternals.PsTools",
+                                "confidence":  "reviewed",
+                                "score":  0,
+                                "signals":  [
+                                                "review"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  "the PsTools suite contains PsExec; winget has no PsExec-only package"
+                            },
+                 "puppet-agent":  {
+                                      "winget":  "Puppet.puppet-agent",
+                                      "confidence":  "high",
+                                      "score":  80,
+                                      "signals":  [
+                                                      "url-host",
+                                                      "name-exact",
+                                                      "publisher"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  ""
+                                  },
+                 "putty.install":  {
+                                       "winget":  "PuTTY.PuTTY",
+                                       "confidence":  "high",
+                                       "score":  105,
+                                       "signals":  [
+                                                       "url-exact",
+                                                       "name-exact",
+                                                       "publisher"
+                                                   ],
+                                       "checked":  "2026-11-14",
+                                       "note":  ""
+                                   },
+                 "python":  {
+                                "winget":  "Python.Python.3.15",
+                                "confidence":  "reviewed",
+                                "score":  0,
+                                "signals":  [
+                                                "review"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  "latest 3.x line, same as python3"
+                            },
+                 "python2":  {
+                                 "winget":  "Python.Python.2",
+                                 "confidence":  "high",
+                                 "score":  105,
+                                 "signals":  [
+                                                 "url-exact",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  "versioned ids: Python.Python.2; the highest line is used"
+                             },
+                 "python3":  {
+                                 "winget":  "Python.Python.3.15",
+                                 "confidence":  "high",
+                                 "score":  95,
+                                 "signals":  [
+                                                 "url-exact",
+                                                 "name-alias",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  "versioned ids: Python.Python.3.14, Python.Python.3.15; the highest line is used"
+                             },
+                 "python311":  {
+                                   "winget":  "Python.Python.3.11",
+                                   "confidence":  "high",
+                                   "score":  105,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  "versioned ids: Python.Python.3.11; the highest line is used"
+                               },
+                 "python312":  {
+                                   "winget":  "Python.Python.3.12",
+                                   "confidence":  "high",
+                                   "score":  105,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  "versioned ids: Python.Python.3.12; the highest line is used"
+                               },
+                 "python313":  {
+                                   "winget":  "Python.Python.3.13",
+                                   "confidence":  "high",
+                                   "score":  105,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  "versioned ids: Python.Python.3.13; the highest line is used"
+                               },
+                 "python314":  {
+                                   "winget":  "Python.Python.3.14",
+                                   "confidence":  "high",
+                                   "score":  105,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-exact",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  "versioned ids: Python.Python.3.14; the highest line is used"
+                               },
+                 "qbittorrent":  {
+                                     "winget":  "qBittorrent.qBittorrent",
+                                     "confidence":  "high",
+                                     "score":  80,
+                                     "signals":  [
+                                                     "url-host",
+                                                     "name-exact",
+                                                     "publisher"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  ""
+                                 },
+                 "qpdf":  {
+                              "winget":  "QPDF.QPDF",
+                              "confidence":  "high",
+                              "score":  55,
+                              "signals":  [
+                                              "name-exact",
+                                              "publisher"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  ""
+                          },
+                 "rdcman":  {
+                                "winget":  "Microsoft.Sysinternals.RDCMan",
+                                "confidence":  "high",
+                                "score":  80,
+                                "signals":  [
+                                                "url-host",
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "rufus":  {
+                               "winget":  "Rufus.Rufus",
+                               "confidence":  "high",
+                               "score":  105,
+                               "signals":  [
+                                               "url-exact",
+                                               "name-exact",
+                                               "publisher"
+                                           ],
+                               "checked":  "2026-11-14",
+                               "note":  ""
+                           },
+                 "saltminion":  {
+                                    "winget":  "SaltStack.SaltMinion",
+                                    "confidence":  "high",
+                                    "score":  105,
+                                    "signals":  [
+                                                    "url-exact",
+                                                    "name-exact",
+                                                    "publisher"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  ""
+                                },
+                 "scratch":  {
+                                 "winget":  "MITMediaLab.Scratch.3",
+                                 "confidence":  "reviewed",
+                                 "score":  0,
+                                 "signals":  [
+                                                 "review"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  "Scratch 3 desktop"
+                             },
+                 "shotcut.install":  {
+                                         "winget":  "Meltytech.Shotcut",
+                                         "confidence":  "high",
+                                         "score":  85,
+                                         "signals":  [
+                                                         "url-exact",
+                                                         "name-exact"
+                                                     ],
+                                         "checked":  "2026-11-14",
+                                         "note":  ""
+                                     },
+                 "signal":  {
+                                "winget":  "OpenWhisperSystems.Signal",
+                                "confidence":  "high",
+                                "score":  105,
+                                "signals":  [
+                                                "url-exact",
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "slack":  {
+                               "winget":  "SlackTechnologies.Slack",
+                               "confidence":  "high",
+                               "score":  105,
+                               "signals":  [
+                                               "url-exact",
+                                               "name-exact",
+                                               "publisher"
+                                           ],
+                               "checked":  "2026-11-14",
+                               "note":  ""
+                           },
+                 "sonos-controller":  {
+                                          "winget":  "Sonos.Controller",
+                                          "confidence":  "reviewed",
+                                          "score":  0,
+                                          "signals":  [
+                                                          "review"
+                                                      ],
+                                          "checked":  "2026-11-14",
+                                          "note":  "S2 controller"
+                                      },
+                 "speccy":  {
+                                "winget":  "Piriform.Speccy",
+                                "confidence":  "high",
+                                "score":  105,
+                                "signals":  [
+                                                "url-exact",
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "spotify":  {
+                                 "winget":  "Spotify.Spotify",
+                                 "confidence":  "high",
+                                 "score":  80,
+                                 "signals":  [
+                                                 "url-host",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "sql-server-express":  {
+                                            "winget":  "Microsoft.SQLServer.2022.Express",
+                                            "confidence":  "reviewed",
+                                            "score":  0,
+                                            "signals":  [
+                                                            "review"
+                                                        ],
+                                            "checked":  "2026-11-14",
+                                            "note":  "the title names the 2022 edition"
+                                        },
+                 "sql-server-management-studio":  {
+                                                      "winget":  "Microsoft.SQLServerManagementStudio",
+                                                      "confidence":  "high",
+                                                      "score":  70,
+                                                      "signals":  [
+                                                                      "url-host",
+                                                                      "name-alias",
+                                                                      "publisher"
+                                                                  ],
+                                                      "checked":  "2026-11-14",
+                                                      "note":  ""
+                                                  },
+                 "strawberryperl":  {
+                                        "winget":  "StrawberryPerl.StrawberryPerl",
+                                        "confidence":  "high",
+                                        "score":  105,
+                                        "signals":  [
+                                                        "url-exact",
+                                                        "name-exact",
+                                                        "publisher"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  ""
+                                    },
+                 "sublimetext4":  {
+                                      "winget":  "SublimeHQ.SublimeText.4",
+                                      "confidence":  "high",
+                                      "score":  105,
+                                      "signals":  [
+                                                      "url-exact",
+                                                      "name-exact",
+                                                      "publisher"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  "versioned ids: SublimeHQ.SublimeText.4; the highest line is used"
+                                  },
+                 "sumatrapdf.install":  {
+                                            "winget":  "SumatraPDF.SumatraPDF",
+                                            "confidence":  "high",
+                                            "score":  80,
+                                            "signals":  [
+                                                            "url-host",
+                                                            "name-exact",
+                                                            "publisher"
+                                                        ],
+                                            "checked":  "2026-11-14",
+                                            "note":  ""
+                                        },
+                 "sysinternals":  {
+                                      "winget":  "Microsoft.Sysinternals.Suite",
+                                      "confidence":  "high",
+                                      "score":  70,
+                                      "signals":  [
+                                                      "url-host",
+                                                      "name-alias",
+                                                      "publisher"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  ""
+                                  },
+                 "teamviewer":  {
+                                    "winget":  "TeamViewer.TeamViewer",
+                                    "confidence":  "high",
+                                    "score":  80,
+                                    "signals":  [
+                                                    "url-host",
+                                                    "name-exact",
+                                                    "publisher"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  ""
+                                },
+                 "teamviewer.host":  {
+                                         "winget":  "TeamViewer.TeamViewer.Host",
+                                         "confidence":  "high",
+                                         "score":  80,
+                                         "signals":  [
+                                                         "url-host",
+                                                         "name-exact",
+                                                         "publisher"
+                                                     ],
+                                         "checked":  "2026-11-14",
+                                         "note":  ""
+                                     },
+                 "teamviewer-qs":  {
+                                       "winget":  "TeamViewer.TeamViewer.QuickSupport",
+                                       "confidence":  "high",
+                                       "score":  80,
+                                       "signals":  [
+                                                       "url-host",
+                                                       "name-exact",
+                                                       "publisher"
+                                                   ],
+                                       "checked":  "2026-11-14",
+                                       "note":  ""
+                                   },
+                 "telegraf":  {
+                                  "winget":  "InfluxData.Telegraf",
+                                  "confidence":  "high",
+                                  "score":  55,
+                                  "signals":  [
+                                                  "name-exact",
+                                                  "publisher"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "temurin21":  {
+                                   "winget":  "EclipseAdoptium.Temurin.21.JDK",
+                                   "confidence":  "reviewed",
+                                   "score":  0,
+                                   "signals":  [
+                                                   "review"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "temurin21jre":  {
+                                      "winget":  "EclipseAdoptium.Temurin.21.JRE",
+                                      "confidence":  "reviewed",
+                                      "score":  0,
+                                      "signals":  [
+                                                      "review"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  ""
+                                  },
+                 "temurin8jre":  {
+                                     "winget":  "EclipseAdoptium.Temurin.8.JRE",
+                                     "confidence":  "reviewed",
+                                     "score":  0,
+                                     "signals":  [
+                                                     "review"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  ""
+                                 },
+                 "terraform":  {
+                                   "winget":  "Hashicorp.Terraform",
+                                   "confidence":  "high",
+                                   "score":  95,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-alias",
+                                                   "publisher"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "texmaker":  {
+                                  "winget":  "Texmaker.Texmaker",
+                                  "confidence":  "high",
+                                  "score":  105,
+                                  "signals":  [
+                                                  "url-exact",
+                                                  "name-exact",
+                                                  "publisher"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "thunderbird":  {
+                                     "winget":  "Mozilla.Thunderbird",
+                                     "confidence":  "reviewed",
+                                     "score":  0,
+                                     "signals":  [
+                                                     "review"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  ""
+                                 },
+                 "tightvnc":  {
+                                  "winget":  "GlavSoft.TightVNC",
+                                  "confidence":  "high",
+                                  "score":  105,
+                                  "signals":  [
+                                                  "url-exact",
+                                                  "name-exact",
+                                                  "publisher"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "tipp10":  {
+                                "winget":  "ThielickeITSolutions.TIPP10",
+                                "confidence":  "high",
+                                "score":  55,
+                                "signals":  [
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "treesizefree":  {
+                                      "winget":  "JAMSoftware.TreeSize.Free",
+                                      "confidence":  "high",
+                                      "score":  55,
+                                      "signals":  [
+                                                      "name-exact",
+                                                      "publisher"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  ""
+                                  },
+                 "twingate":  {
+                                  "winget":  "Twingate.Client",
+                                  "confidence":  "high",
+                                  "score":  80,
+                                  "signals":  [
+                                                  "url-host",
+                                                  "name-exact",
+                                                  "publisher"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "untis":  {
+                               "winget":  "Untis.Untis.2026",
+                               "confidence":  "reviewed",
+                               "score":  0,
+                               "signals":  [
+                                               "review"
+                                           ],
+                               "checked":  "2026-11-14",
+                               "note":  "versioned id: 2026 is the newest line in winget (Chocolatey is at 2027)"
+                           },
+                 "urlrewrite":  {
+                                    "winget":  "Microsoft.IIS.URLRewrite",
+                                    "confidence":  "high",
+                                    "score":  70,
+                                    "signals":  [
+                                                    "url-host",
+                                                    "name-alias",
+                                                    "publisher"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  ""
+                                },
+                 "veeam-agent":  {
+                                     "winget":  "Veeam.VeeamAgent",
+                                     "confidence":  "high",
+                                     "score":  80,
+                                     "signals":  [
+                                                     "url-host",
+                                                     "name-exact",
+                                                     "publisher"
+                                                 ],
+                                     "checked":  "2026-11-14",
+                                     "note":  ""
+                                 },
+                 "vim":  {
+                             "winget":  "vim.vim",
+                             "confidence":  "high",
+                             "score":  105,
+                             "signals":  [
+                                             "url-exact",
+                                             "name-exact",
+                                             "publisher"
+                                         ],
+                             "checked":  "2026-11-14",
+                             "note":  ""
+                         },
+                 "virtualbox":  {
+                                    "winget":  "Oracle.VirtualBox",
+                                    "confidence":  "high",
+                                    "score":  95,
+                                    "signals":  [
+                                                    "url-exact",
+                                                    "name-alias",
+                                                    "publisher"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  ""
+                                },
+                 "visualstudio2017buildtools":  {
+                                                    "winget":  "Microsoft.VisualStudio.2017.BuildTools",
+                                                    "confidence":  "reviewed",
+                                                    "score":  0,
+                                                    "signals":  [
+                                                                    "review"
+                                                                ],
+                                                    "checked":  "2026-11-14",
+                                                    "note":  ""
+                                                },
+                 "visualstudio2019buildtools":  {
+                                                    "winget":  "Microsoft.VisualStudio.2019.BuildTools",
+                                                    "confidence":  "reviewed",
+                                                    "score":  0,
+                                                    "signals":  [
+                                                                    "review"
+                                                                ],
+                                                    "checked":  "2026-11-14",
+                                                    "note":  ""
+                                                },
+                 "visualstudio2022buildtools":  {
+                                                    "winget":  "Microsoft.VisualStudio.2022.BuildTools",
+                                                    "confidence":  "reviewed",
+                                                    "score":  0,
+                                                    "signals":  [
+                                                                    "review"
+                                                                ],
+                                                    "checked":  "2026-11-14",
+                                                    "note":  ""
+                                                },
+                 "visualstudio2026buildtools":  {
+                                                    "winget":  "Microsoft.VisualStudio.BuildTools",
+                                                    "confidence":  "reviewed",
+                                                    "score":  0,
+                                                    "signals":  [
+                                                                    "review"
+                                                                ],
+                                                    "checked":  "2026-11-14",
+                                                    "note":  "the id without year is the 2026 line"
+                                                },
+                 "vivaldi":  {
+                                 "winget":  "Vivaldi.Vivaldi",
+                                 "confidence":  "high",
+                                 "score":  80,
+                                 "signals":  [
+                                                 "url-host",
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "vlc":  {
+                             "winget":  "VideoLAN.VLC",
+                             "confidence":  "high",
+                             "score":  105,
+                             "signals":  [
+                                             "url-exact",
+                                             "name-exact",
+                                             "publisher"
+                                         ],
+                             "checked":  "2026-11-14",
+                             "note":  ""
+                         },
+                 "vscode":  {
+                                "winget":  "Microsoft.VisualStudioCode",
+                                "confidence":  "high",
+                                "score":  95,
+                                "signals":  [
+                                                "url-exact",
+                                                "name-alias",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "vscodium.install":  {
+                                          "winget":  "VSCodium.VSCodium",
+                                          "confidence":  "high",
+                                          "score":  105,
+                                          "signals":  [
+                                                          "url-exact",
+                                                          "name-exact",
+                                                          "publisher"
+                                                      ],
+                                          "checked":  "2026-11-14",
+                                          "note":  ""
+                                      },
+                 "webex":  {
+                               "winget":  "Cisco.Webex",
+                               "confidence":  "high",
+                               "score":  55,
+                               "signals":  [
+                                               "name-exact",
+                                               "publisher"
+                                           ],
+                               "checked":  "2026-11-14",
+                               "note":  ""
+                           },
+                 "webex-meetings":  {
+                                        "winget":  "Cisco.CiscoWebexMeetings",
+                                        "confidence":  "high",
+                                        "score":  55,
+                                        "signals":  [
+                                                        "name-exact",
+                                                        "publisher"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  ""
+                                    },
+                 "webview2-runtime":  {
+                                          "winget":  "Microsoft.EdgeWebView2Runtime",
+                                          "confidence":  "reviewed",
+                                          "score":  0,
+                                          "signals":  [
+                                                          "review"
+                                                      ],
+                                          "checked":  "2026-11-14",
+                                          "note":  ""
+                                      },
+                 "wget":  {
+                              "winget":  "JernejSimoncic.Wget",
+                              "confidence":  "reviewed",
+                              "score":  0,
+                              "signals":  [
+                                              "review"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  ""
+                          },
+                 "windirstat":  {
+                                    "winget":  "WinDirStat.WinDirStat",
+                                    "confidence":  "high",
+                                    "score":  105,
+                                    "signals":  [
+                                                    "url-repo",
+                                                    "name-exact",
+                                                    "publisher"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  ""
+                                },
+                 "winget-cli":  {
+                                    "winget":  "Microsoft.AppInstaller",
+                                    "confidence":  "reviewed",
+                                    "score":  0,
+                                    "signals":  [
+                                                    "review"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  "App Installer is the winget client"
+                                },
+                 "winlogbeat":  {
+                                    "winget":  "Elastic.Winlogbeat",
+                                    "confidence":  "high",
+                                    "score":  95,
+                                    "signals":  [
+                                                    "url-exact",
+                                                    "name-alias",
+                                                    "publisher"
+                                                ],
+                                    "checked":  "2026-11-14",
+                                    "note":  ""
+                                },
+                 "winmerge":  {
+                                  "winget":  "WinMerge.WinMerge",
+                                  "confidence":  "high",
+                                  "score":  105,
+                                  "signals":  [
+                                                  "url-exact",
+                                                  "name-exact",
+                                                  "publisher"
+                                              ],
+                                  "checked":  "2026-11-14",
+                                  "note":  ""
+                              },
+                 "winrar":  {
+                                "winget":  "RARLab.WinRAR",
+                                "confidence":  "high",
+                                "score":  105,
+                                "signals":  [
+                                                "url-exact",
+                                                "name-exact",
+                                                "publisher"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "winscp.install":  {
+                                        "winget":  "WinSCP.WinSCP",
+                                        "confidence":  "high",
+                                        "score":  105,
+                                        "signals":  [
+                                                        "url-exact",
+                                                        "name-exact",
+                                                        "publisher"
+                                                    ],
+                                        "checked":  "2026-11-14",
+                                        "note":  ""
+                                    },
+                 "wireshark":  {
+                                   "winget":  "WiresharkFoundation.Wireshark",
+                                   "confidence":  "high",
+                                   "score":  85,
+                                   "signals":  [
+                                                   "url-exact",
+                                                   "name-exact"
+                                               ],
+                                   "checked":  "2026-11-14",
+                                   "note":  ""
+                               },
+                 "wiztree":  {
+                                 "winget":  "AntibodySoftware.WizTree",
+                                 "confidence":  "high",
+                                 "score":  55,
+                                 "signals":  [
+                                                 "name-exact",
+                                                 "publisher"
+                                             ],
+                                 "checked":  "2026-11-14",
+                                 "note":  ""
+                             },
+                 "wps-office-free":  {
+                                         "winget":  "Kingsoft.WPSOffice",
+                                         "confidence":  "reviewed",
+                                         "score":  0,
+                                         "signals":  [
+                                                         "review"
+                                                     ],
+                                         "checked":  "2026-11-14",
+                                         "note":  ""
+                                     },
+                 "wsl2":  {
+                              "winget":  "Microsoft.WSL",
+                              "confidence":  "reviewed",
+                              "score":  0,
+                              "signals":  [
+                                              "review"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  ""
+                          },
+                 "xnview":  {
+                                "winget":  "XnSoft.XnView.Classic",
+                                "confidence":  "high",
+                                "score":  60,
+                                "signals":  [
+                                                "url-host",
+                                                "name-exact"
+                                            ],
+                                "checked":  "2026-11-14",
+                                "note":  ""
+                            },
+                 "yarn":  {
+                              "winget":  "Yarn.Yarn",
+                              "confidence":  "high",
+                              "score":  80,
+                              "signals":  [
+                                              "url-host",
+                                              "name-exact",
+                                              "publisher"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  ""
+                          },
+                 "yq":  {
+                            "winget":  "MikeFarah.yq",
+                            "confidence":  "high",
+                            "score":  105,
+                            "signals":  [
+                                            "url-exact",
+                                            "name-exact",
+                                            "publisher"
+                                        ],
+                            "checked":  "2026-11-14",
+                            "note":  ""
+                        },
+                 "zoom":  {
+                              "winget":  "Zoom.Zoom",
+                              "confidence":  "high",
+                              "score":  95,
+                              "signals":  [
+                                              "url-exact",
+                                              "name-alias",
+                                              "publisher"
+                                          ],
+                              "checked":  "2026-11-14",
+                              "note":  ""
+                          },
+                 "zoom-outlook":  {
+                                      "winget":  "Zoom.ZoomOutlookPlugin",
+                                      "confidence":  "high",
+                                      "score":  80,
+                                      "signals":  [
+                                                      "url-exact",
+                                                      "name-part",
+                                                      "publisher"
+                                                  ],
+                                      "checked":  "2026-11-14",
+                                      "note":  ""
+                                  }
+             },
+    "noEquivalent":  {
+                         "adblockpluschrome":  "Browser extension, not an installable application",
+                         "adblockplusie":  "Discontinued product",
+                         "adobeair":  "Discontinued product",
+                         "amd-ryzen-chipset":  "Driver or hardware component, not distributed through winget",
+                         "atom":  "Discontinued product",
+                         "boxstarter":  "Chocolatey tooling (only useful with Chocolatey itself)",
+                         "boxstarter.common":  "Chocolatey tooling (only useful with Chocolatey itself)",
+                         "boxstarter.winconfig":  "Chocolatey tooling (only useful with Chocolatey itself)",
+                         "chocobutler":  "Chocolatey tooling (only useful with Chocolatey itself)",
+                         "choco-cleaner":  "Chocolatey tooling (only useful with Chocolatey itself)",
+                         "chocolateygui":  "Chocolatey tooling (only useful with Chocolatey itself)",
+                         "classic-shell":  "Discontinued product",
+                         "crystalreports2008runtime":  "Legacy runtime, not in winget",
+                         "docfx":  "PowerShell module or developer helper without installer package in winget",
+                         "dotnet":  "Meta package for the .NET SDK and runtimes, winget has one package per component and line",
+                         "dotnet3.5":  ".NET Framework: part of Windows (feature), no separate winget package",
+                         "dotnet4.5":  ".NET Framework: part of Windows (feature), no separate winget package",
+                         "dotnet4.5.2":  ".NET Framework: part of Windows (feature), no separate winget package",
+                         "dotnet4.6.1":  ".NET Framework: part of Windows (feature), no separate winget package",
+                         "dotnet-aspnetcoremodule-v2":  "IIS module that is part of the ASP.NET Core Hosting Bundle (Microsoft.DotNet.HostingBundle.*), no own package",
+                         "dotnetfx":  ".NET Framework: part of Windows (feature), no separate winget package",
+                         "gsuite-sync-outlook":  "Not in winget",
+                         "libreoffice-still":  "winget has only the Fresh line of LibreOffice (see libreoffice-fresh)",
+                         "microsoft-ui-xaml-2-7":  "AppX framework dependency, installed as dependency by apps",
+                         "microsoft-vclibs-140-00":  "AppX framework dependency, installed as dependency by apps",
+                         "netfx-4.7.1-devpack":  ".NET Framework: part of Windows (feature), no separate winget package",
+                         "netfx-4.7.2":  ".NET Framework: part of Windows (feature), no separate winget package",
+                         "netfx-4.8":  ".NET Framework: part of Windows (feature), no separate winget package",
+                         "nvidia-display-driver":  "Driver or hardware component, not distributed through winget",
+                         "octopustools":  "PowerShell module or developer helper without installer package in winget",
+                         "onenote":  "Part of Microsoft 365 Apps / Store app, no own winget package",
+                         "opencppcoverage":  "PowerShell module or developer helper without installer package in winget",
+                         "powershell":  "Windows Management Framework 5.1 (part of Windows), not PowerShell 7",
+                         "powershell-packagemanagement":  "PowerShell module or developer helper without installer package in winget",
+                         "pswindowsupdate":  "PowerShell module or developer helper without installer package in winget",
+                         "quicktime":  "Discontinued product",
+                         "skype":  "Discontinued by Microsoft (May 2025)",
+                         "sql2016-smo":  "SQL Server component (feature pack), not in winget",
+                         "sqlserver-odbcdriver":  "Driver or hardware component, not distributed through winget",
+                         "ublockorigin-chrome":  "Browser extension, not an installable application",
+                         "vcredist140":  "Visual C++ redistributable: winget has one package per version and platform (Microsoft.VCRedist.*), not one equivalent id",
+                         "vcredist2005":  "Visual C++ redistributable: winget has one package per version and platform (Microsoft.VCRedist.*), not one equivalent id",
+                         "vcredist2008":  "Visual C++ redistributable: winget has one package per version and platform (Microsoft.VCRedist.*), not one equivalent id",
+                         "vcredist2010":  "Visual C++ redistributable: winget has one package per version and platform (Microsoft.VCRedist.*), not one equivalent id",
+                         "vcredist2012":  "Visual C++ redistributable: winget has one package per version and platform (Microsoft.VCRedist.*), not one equivalent id",
+                         "vcredist2013":  "Visual C++ redistributable: winget has one package per version and platform (Microsoft.VCRedist.*), not one equivalent id",
+                         "vcredist2015":  "Visual C++ redistributable: winget has one package per version and platform (Microsoft.VCRedist.*), not one equivalent id",
+                         "vcredist2017":  "Visual C++ redistributable: winget has one package per version and platform (Microsoft.VCRedist.*), not one equivalent id",
+                         "vcredist-all":  "Visual C++ redistributable: winget has one package per version and platform (Microsoft.VCRedist.*), not one equivalent id",
+                         "visualstudio2017-workload-vctools":  "Visual Studio workload, added through the Visual Studio installer, no own package",
+                         "visualstudio2019-workload-vctools":  "Visual Studio workload, added through the Visual Studio installer, no own package",
+                         "visualstudio2022-workload-vctools":  "Visual Studio workload, added through the Visual Studio installer, no own package",
+                         "vmware-tools":  "Guest tools come with the hypervisor, not in winget"
+                     }
+}

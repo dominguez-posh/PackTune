@@ -35,6 +35,68 @@ $script:StoreFallbackName = "PackTune-Packages"
 $script:StoreGroupMarker = "PackTune package store"
 $script:StoreHost = $null
 
+$script:StoreSetupClientId = "14d82eec-204b-4c2f-b7e8-296a70dab67e"   # Microsoft Graph Command Line Tools: only the sign-in of the setup, never the holder of a site permission
+$script:StoreTimeoutSec = 300
+
+function Get-PackTuneAppClientId {
+    <#
+        The client id of PackTune's OWN app registration (the one the tool signs in with), the one that gets the permission on the site.
+        Never the setup app of Microsoft (the administrator signs in through it, it must not end up as the holder of the site permission).
+    #>
+    $Candidate = [string]$script:Settings.ClientID
+    if ($Candidate -match '^[0-9a-fA-F-]{36}$' -and $Candidate -ine $script:StoreSetupClientId) { return $Candidate }
+    throw "App registration missing - set it up first (Start page). The client id in the settings is empty or is the setup app of Microsoft, never PackTune's own."
+}
+
+function Get-PackTuneStoreCause {
+    # A short English cause for the readiness item from what Graph or the network said (the raw text stays in the log)
+    param([string]$Text)
+    if ($Text -match '(?i)\b40[13]\b|forbidden|verboten|access denied|accessDenied|insufficient privileges|unauthorized') { return "PackTune has no access to the site yet - an administrator confirms it once (Grant access). If the site belongs to someone else, ask an administrator to add you to the PackTune site." }
+    if ($Text -match '(?i)timed out|timeout|zeit.{1,2}berschreitung|operation has timed out') { return "SharePoint did not answer in time. It is checked again at the next start or with Check." }
+    if ($Text -match '(?i)remote name|remotename|could not be resolved|unable to connect|no such host|network|netzwerk|connection (was )?(closed|refused|reset)') { return "SharePoint cannot be reached (network or VPN). It is checked again later." }
+    $One = ($Text -replace '\s+', ' ').Trim()
+    if ($One.Length -gt 140) { $One = $One.Substring(0, 137) + '...' }
+    return "The site cannot be read: $One"
+}
+
+function Grant-PackTuneSitePermission {
+    <#
+        Gives PackTune's own app registration a role on ONE site and reads the site permissions back: the grant counts only when the
+        application with this client id is in the list afterwards (the earlier version could not tell whose id it had written).
+    #>
+    param([Parameter(Mandatory = $true)][string]$Token, [Parameter(Mandatory = $true)][string]$SiteId, [Parameter(Mandatory = $true)][string]$ClientID, [ValidateSet("write", "manage")][string]$Role = "write")
+    if ($ClientID -notmatch '^[0-9a-fA-F-]{36}$') { throw "The client ID of the app registration is not valid." }
+    if ($ClientID -ieq $script:StoreSetupClientId) { throw "The site permission must go to PackTune's own app registration, not to the setup app of Microsoft ($ClientID)." }
+    [void](Invoke-PackTuneAdminGraph -Token $Token -Method POST -Path "/sites/$SiteId/permissions" -Body @{ roles = @($Role); grantedToIdentities = @(@{ application = @{ id = $ClientID; displayName = "PackTune" } }) })
+    $Holders = @(Get-PackTuneSitePermissions -Token $Token -SiteId $SiteId | Where-Object { $_.ClientId -ieq $ClientID })
+    if ($Holders.Count -eq 0) { throw "The permission was sent, but the site does not list PackTune ($ClientID) as holder when read back." }
+    return $Holders[0]
+}
+
+function Get-PackTuneSitePermissions {
+    # Application permissions of the site: PermissionId, ClientId, DisplayName, Roles
+    param([Parameter(Mandatory = $true)][string]$Token, [Parameter(Mandatory = $true)][string]$SiteId)
+    foreach ($Entry in @((Invoke-PackTuneAdminGraph -Token $Token -Path "/sites/$SiteId/permissions").value | Where-Object { $_ })) {
+        $Apps = @(@($Entry.grantedToIdentitiesV2) + @($Entry.grantedToIdentities) + @($Entry.grantedToV2) | Where-Object { $_ -and $_.application } | ForEach-Object { $_.application })
+        foreach ($App in $Apps) { [pscustomobject]@{ PermissionId = [string]$Entry.id; ClientId = [string]$App.id; DisplayName = [string]$App.displayName; Roles = @($Entry.roles) } }
+    }
+}
+
+function Get-PackTuneStoreWrongGrants {
+    # Permissions of the site held by the setup app of Microsoft (an earlier PackTune version granted it there by mistake)
+    param([Parameter(Mandatory = $true)][string]$Token, [Parameter(Mandatory = $true)][string]$SiteId)
+    @(Get-PackTuneSitePermissions -Token $Token -SiteId $SiteId | Where-Object { $_.ClientId -ieq $script:StoreSetupClientId })
+}
+
+function Remove-PackTuneStoreWrongGrants {
+    param([Parameter(Mandatory = $true)][string]$Token, [Parameter(Mandatory = $true)][string]$SiteId)
+    foreach ($Wrong in @(Get-PackTuneStoreWrongGrants -Token $Token -SiteId $SiteId)) {
+        [void](Invoke-PackTuneAdminGraph -Token $Token -Method DELETE -Path "/sites/$SiteId/permissions/$($Wrong.PermissionId)")
+        Write-Host "Removed the permission of the setup app ($($Wrong.ClientId), $($Wrong.DisplayName)) from the site"
+        [pscustomobject]@{ PermissionId = $Wrong.PermissionId; ClientId = $Wrong.ClientId; Removed = $true }
+    }
+    if (@(Get-PackTuneStoreWrongGrants -Token $Token -SiteId $SiteId).Count) { throw "The permission of the setup app could not be removed from the site." }
+}
 function Invoke-PackTuneAdminGraph {
     <# One Graph request with the token of the administrator's setup sign-in (not the daily token). Replaceable: the checks use a fake. #>
     param([Parameter(Mandatory = $true)][string]$Token, [string]$Method = "GET", [Parameter(Mandatory = $true)][string]$Path, $Body)
@@ -89,7 +151,7 @@ function Write-PackTuneStep {
 }
 function Initialize-PackTuneStoreSite {
     param(
-        [Parameter(Mandatory = $true)][string]$Token, [string]$ClientID = $script:Settings.ClientID, [string]$SiteName,
+        [Parameter(Mandatory = $true)][string]$Token, [string]$ClientID = (Get-PackTuneAppClientId), [string]$SiteName,
         [string]$AdminGroup, [string]$Library = $script:Settings.StoreLibrary, [int]$PollMinutes = 6
     )
     # The steps are reported as they happen; an error is attached to the step that was running
@@ -116,7 +178,7 @@ function Invoke-PackTuneStoreSiteSetup {
         FallbackName says which name to ask for (PackTune-Packages). Returns State (Ready, Conflict), SiteUrl, SiteName, Steps and Warnings.
     #>
     param(
-        [Parameter(Mandatory = $true)][string]$Token, [string]$ClientID = $script:Settings.ClientID, [string]$SiteName,
+        [Parameter(Mandatory = $true)][string]$Token, [string]$ClientID = (Get-PackTuneAppClientId), [string]$SiteName,
         [string]$AdminGroup, [string]$Library = $script:Settings.StoreLibrary, [int]$PollMinutes = 6
     )
     if (-not $SiteName) { $SiteName = if ($script:Settings.StoreSiteName) { [string]$script:Settings.StoreSiteName } else { $script:StoreStandardName } }
@@ -152,8 +214,15 @@ function Invoke-PackTuneStoreSiteSetup {
             }
             $GroupId = [string]$Group.id
             [void]$Steps.Add("Private Microsoft 365 group '$($Group.displayName)' created ($GroupId), owner: $($Me.displayName)")
-            try { [void](Invoke-PackTuneAdminGraph -Token $Token -Method PATCH -Path "/groups/$GroupId" -Body @{ hideFromAddressLists = $true; hideFromOutlookClients = $true }) }
-            catch { [void]$Warnings.Add("The group could not be hidden from the address lists: $($_.Exception.Message)") }
+            # The group is replicated to Exchange a moment after it is made: the first PATCH can get 404. Retried with a growing pause; what Exchange
+            # does not support is no problem (the group is hidden in Outlook anyway), so it is information, not a warning.
+            $Hidden = $false; $Pause = 2
+            for ($Try = 1; $Try -le 5 -and -not $Hidden; $Try++) {
+                try { [void](Invoke-PackTuneAdminGraph -Token $Token -Method PATCH -Path "/groups/$GroupId" -Body @{ hideFromAddressLists = $true; hideFromOutlookClients = $true }); $Hidden = $true }
+                catch { if ($Try -lt 5) { Wait-PackTuneStore $Pause; $Pause = [Math]::Min(20, $Pause * 2) } }
+            }
+            if ($Hidden) { [void]$Steps.Add("The group is hidden from the address lists") }
+            else { [void]$Steps.Add("Info: the group could not be hidden from the address lists (Exchange does not offer it for this group yet or at all); it is hidden in Outlook through its settings") }
         }
         Write-PackTuneStep 2 7 done "Group ready"
         Write-PackTuneStep 3 7 running "$($script:StoreSetupStepTitles[2]) (can take a few minutes)"
@@ -191,15 +260,16 @@ function Invoke-PackTuneStoreSiteSetup {
     else { [void]$Steps.Add("Library '$Library' exists already") }
     Write-PackTuneStep 5 7 done "Library '$Library' is there"
     Write-PackTuneStep 6 7 running $script:StoreSetupStepTitles[5]
-    if ($ClientID -notmatch '^[0-9a-fA-F-]{36}$') { throw "The client ID of the app registration is not valid." }
-    [void](Invoke-PackTuneAdminGraph -Token $Token -Method POST -Path "/sites/$($Site.id)/permissions" -Body @{ roles = @("write"); grantedToIdentities = @(@{ application = @{ id = $ClientID; displayName = "PackTune" } }) })
-    [void]$Steps.Add("PackTune (app registration $ClientID) has write access to this one site")
+    $Holder = Grant-PackTuneSitePermission -Token $Token -SiteId $Site.id -ClientID $ClientID -Role "write"
+    [void]$Steps.Add("PackTune (app registration $ClientID, $($Holder.DisplayName)) has write access to this one site, confirmed by reading the permissions back")
+    $Wrong = @(Get-PackTuneStoreWrongGrants -Token $Token -SiteId $Site.id)
+    if ($Wrong.Count) { [void]$Warnings.Add("The setup app of Microsoft holds a permission on this site (an earlier version granted it there by mistake). It can be removed.") }
     Write-PackTuneStep 6 7 done "PackTune has write access to this one site"
     Write-PackTuneStep 7 7 running $script:StoreSetupStepTitles[6]
     $Check = @((Invoke-PackTuneAdminGraph -Token $Token -Path "/sites/$($Site.id)/drives?`$select=id,name").value | Where-Object { $_.name -eq $Library })
     if (-not $Check.Count) { throw "The library '$Library' was not found after the setup." }
     Write-PackTuneStep 7 7 done "Site, library and access checked"
-    [pscustomobject]@{ State = "Ready"; SiteUrl = $Url; SiteName = $SiteName; FallbackName = $null; Steps = @($Steps); Warnings = @($Warnings); Message = "The package store is set up on $Url." }
+    [pscustomobject]@{ State = "Ready"; SiteUrl = $Url; SiteName = $SiteName; SiteId = [string]$Site.id; FallbackName = $null; Steps = @($Steps); Warnings = @($Warnings); WrongGrants = $Wrong.Count; Message = "The package store is set up on $Url." }
 }#Creates the standard site, the library and the access (administrator, once)
 
 #endregion
@@ -245,7 +315,7 @@ function Invoke-PackTuneStoreGraph {
     )
     $Token = if ($Absolute) { $null } else { Get-PackTuneStoreToken }
     $Uri = if ($Absolute) { $Absolute } else { "$($script:StoreGraph)$Path" }
-    $Request = @{ Method = $Method; Uri = $Uri; UseBasicParsing = $true; TimeoutSec = 300; ErrorAction = "Stop"; Headers = $Headers }
+    $Request = @{ Method = $Method; Uri = $Uri; UseBasicParsing = $true; TimeoutSec = $script:StoreTimeoutSec; ErrorAction = "Stop"; Headers = $Headers }
     if (-not $Absolute) { $Request.Headers["Authorization"] = "Bearer $Token" }
     if ($null -ne $Body) { $Request.Body = [Text.Encoding]::UTF8.GetBytes(($Body | ConvertTo-Json -Depth 8 -Compress)); $Request.ContentType = "application/json" }
     elseif ($Bytes) { $Request.Body = $Bytes; $Request.ContentType = "application/octet-stream" }
@@ -305,12 +375,15 @@ function Get-PackTuneStoreState {
     if (-not $SiteUrl) { $SiteUrl = Get-PackTuneStoreSiteUrl }
     if (-not $SiteUrl) { return [pscustomobject]@{ State = "NotConfigured"; Message = "The SharePoint address of the tenant could not be found. Enter the address of the site under Advanced."; Store = $null; SiteUrl = $null } }
     if (-not (Test-PackTuneStoreSiteUrl $SiteUrl)) { return [pscustomobject]@{ State = "NotConfigured"; Message = "The address must look like https://<tenant>.sharepoint.com/sites/<name>."; Store = $null; SiteUrl = $SiteUrl } }
+    # A check never hangs: 30 seconds per request, then it says so
+    $Before = $script:StoreTimeoutSec; $script:StoreTimeoutSec = 30
     try { $Store = Resolve-PackTuneStore -SiteUrl $SiteUrl -Library $Library }
     catch {
         $Text = $_.Exception.Message
         if ($Text -match '404|not found|itemNotFound|ResourceNotFound|was not found') { return [pscustomobject]@{ State = "Missing"; Message = "The PackTune site does not exist in this tenant yet. An administrator sets it up once (Set up)."; Store = $null; SiteUrl = $SiteUrl } }
-        return [pscustomobject]@{ State = "NoAccess"; Message = "The PackTune site exists, but you have no access: ask an administrator to add you to the PackTune site. ($Text)"; Store = $null; SiteUrl = $SiteUrl }
+        return [pscustomobject]@{ State = "NoAccess"; Message = (Get-PackTuneStoreCause $Text); Store = $null; SiteUrl = $SiteUrl; Raw = $Text }
     }
+    finally { $script:StoreTimeoutSec = $Before }
     if (-not $Store.DriveId) { return [pscustomobject]@{ State = "NoLibrary"; Message = "The site is reachable, the library '$Library' does not exist yet."; Store = $Store; SiteUrl = $SiteUrl } }
     [pscustomobject]@{ State = "Ready"; Message = "The package store '$Library' on $($Store.SiteName) is ready."; Store = $Store; SiteUrl = $SiteUrl }}#State of the package store
 
@@ -335,7 +408,7 @@ function Grant-PackTuneStoreAccess {
         and how to remove it); PackTune does not remove it, because other tools of the tenant may use that app too.
     #>
     param(
-        [Parameter(Mandatory = $true)][string]$SiteUrl, [Parameter(Mandatory = $true)][string]$ClientID, [string]$Token,
+        [Parameter(Mandatory = $true)][string]$SiteUrl, [string]$ClientID = (Get-PackTuneAppClientId), [string]$Token,
         [ValidateSet("write", "manage")][string]$Role = "write"
     )
     if (-not (Test-PackTuneStoreSiteUrl $SiteUrl)) { throw "The address of the SharePoint site is not valid." }
@@ -346,12 +419,13 @@ function Grant-PackTuneStoreAccess {
         $Token = [string](Invoke-PackTunePkceSignIn -TenantID $Tenant -ClientID "14d82eec-204b-4c2f-b7e8-296a70dab67e" -Scope "https://graph.microsoft.com/Sites.FullControl.All offline_access openid profile").access_token
     }
     $Uri = [uri]$SiteUrl
-    $Headers = @{ Authorization = "Bearer $Token" }
     $Site = Invoke-PackTuneAdminGraph -Token $Token -Path "/sites/$($Uri.Host):$($Uri.AbsolutePath.TrimEnd('/'))?`$select=id"
-    $Body = @{ roles = @($Role); grantedToIdentities = @(@{ application = @{ id = $ClientID; displayName = "PackTune" } }) } | ConvertTo-Json -Depth 6 -Compress
-    [void](Invoke-PackTuneAdminGraph -Token $Token -Method POST -Path "/sites/$($Site.id)/permissions" -Body ($Body | ConvertFrom-Json))
+    $Holder = Grant-PackTuneSitePermission -Token $Token -SiteId $Site.id -ClientID $ClientID -Role $Role
+    Write-Host "PackTune (app registration $ClientID, $($Holder.DisplayName)) holds the role $Role on this site, confirmed by reading the permissions back"
+    $Wrong = @(Get-PackTuneStoreWrongGrants -Token $Token -SiteId $Site.id)
+    if ($Wrong.Count) { Write-Warning "The setup app of Microsoft ($($script:StoreSetupClientId)) holds a permission on this site (an earlier version granted it there by mistake). It can be removed." }
     Write-Warning $script:StoreGrantConsentNote
-    return [pscustomobject]@{ SiteId = $Site.id; Role = $Role }
+    return [pscustomobject]@{ SiteId = $Site.id; Role = $Role; ClientId = $ClientID; WrongGrants = $Wrong.Count }
 }#Grants PackTune access to the one site (administrator, once)
 
 function Get-PackTuneStoreWarnings {
@@ -472,7 +546,7 @@ function Get-PackTuneStoreVersions {
 function Get-PackTuneStoreApps {
     param($Store = (Resolve-PackTuneStore))
     if (-not $Store.DriveId) { return @() }
-    @(Get-PackTuneStoreChildren -DriveId $Store.DriveId | Where-Object { $_.folder } | ForEach-Object { [string]$_.name })
+    @(Get-PackTuneStoreChildren -DriveId $Store.DriveId | Where-Object { $_.folder -and [string]$_.name -ne $script:ProtocolFolderName } | ForEach-Object { [string]$_.name })
 }
 
 function ConvertTo-PackTuneManifestAnchor {

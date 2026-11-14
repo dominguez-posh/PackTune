@@ -257,7 +257,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $saved = $script:CustomApps
         $script:CustomApps = @([pscustomobject]@{ Id = 'c-1'; DisplayName = 'Old Tool'; Kind = 'msi'; AppId = 'old-tool-1'; Version = '1.0'; ProductCode = '{X}'; UpgradeCode = ''; Manifest = ('ab' * 32); Identity = ''; Thumbprint = ''; Publisher = 'P'; Created = (Get-Date).ToString('o'); Intents = 'available'; Source = 'Custom'; IsChocolatey = $false })
         Update-CustomRows; $ui.LstCustom.SelectedItem = $script:CustomRows[0]
-        Test-Smoke 'no store: existing apps are listed, New version and Export are off, Remove stays on' (@($script:CustomRows).Count -eq 1 -and -not $ui.BtnCustomNewVersion.IsEnabled -and -not $ui.BtnCustomExport.IsEnabled -and $ui.BtnCustomRemove.IsEnabled)
+        Test-Smoke 'no store: existing apps are listed, New version and Export are off, Remove stays off until the install count is known' (@($script:CustomRows).Count -eq 1 -and -not $ui.BtnCustomNewVersion.IsEnabled -and -not $ui.BtnCustomExport.IsEnabled -and -not $ui.BtnCustomRemove.IsEnabled)
         $script:StoreState = $ready; Update-CustomRows; $ui.LstCustom.SelectedItem = $script:CustomRows[0]
         Test-Smoke 'store ready again: everything is back on' ($ui.BtnCustomNew.IsEnabled -and $ui.BtnCustomNewVersion.IsEnabled -and $ui.BtnCustomExport.IsEnabled -and $ui.BoxCustomStore.Visibility -eq 'Collapsed')
         $script:CustomApps = $saved; $ui.LstCustom.SelectedItem = $null; Update-CustomRows
@@ -294,6 +294,36 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'custom: removed at once after the confirmed delete' (@($script:CustomRows | Where-Object { $_['Title'] -eq 'Custom Fresh' }).Count -eq 0)
         $script:RemovedApps.Clear(); $script:PendingApps.Clear(); $script:CustomApps = $null
         $script:TenantApps = $origApps; $script:TenantPackages = $origPackages; $script:RecentDeploys = $origRecent; Update-TenantRows -Force
+        $true } }
+    @{ Name = 'crash guard'; Do = {
+        # an exception that nothing catches (like one thrown in an event handler of the window) must not end the process: it is logged with the stack and the window goes on
+        $crashLog = Join-Path $script:LogFolder 'crash.log'
+        Remove-Item $crashLog -Force -ErrorAction SilentlyContinue
+        [void]$window.Dispatcher.BeginInvoke([System.Action]{ throw 'smoke boom in an event handler' })
+        $window.Dispatcher.Invoke([System.Action]{ }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+        $window.Dispatcher.Invoke([System.Action]{ }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+        $logged = (Test-Path $crashLog) -and ((Get-Content $crashLog -Raw) -match 'smoke boom in an event handler')
+        Test-Smoke 'an unhandled UI exception is written to crash.log with its stack and the window stays' ($logged -and (Get-Content $crashLog -Raw) -match 'script stack') ''
+        [PackTune.CrashGuard]::Report('Thread', (New-Object System.InvalidOperationException 'smoke boom in a thread'))
+        $line = $null; $seen = @(); while ([PackTune.CrashGuard]::Pending.TryDequeue([ref]$line)) { $seen += $line }
+        Test-Smoke 'a thread exception is logged too and queued for the log and toast of the window' ((Get-Content $crashLog -Raw) -match 'smoke boom in a thread' -and $seen.Count -ge 1)
+        $true } }
+    @{ Name = 'store readiness item'; Do = {
+        $saved = $script:StoreState
+        $script:StoreState = [pscustomobject]@{ State = 'NoAccess'; Message = 'PackTune has no access to the site yet - an administrator confirms it once (Grant access).'; SiteUrl = 'https://contoso.sharepoint.com/sites/PackTune' }
+        $item = @(Get-StoreReadinessItems)[0]
+        Test-Smoke 'store item: named for what it is needed for, offers Grant access when PackTune has no access' ($item.Title -eq 'Package store (for custom applications)' -and $item.Fix -eq 'Grant access' -and $item.Text -like '*an administrator confirms it once*')
+        $script:StoreState = [pscustomobject]@{ State = 'Missing'; Message = 'The PackTune site does not exist in this tenant yet.'; SiteUrl = $null }
+        Test-Smoke 'store item: a site that is not there offers Set up' (@(Get-StoreReadinessItems)[0].Fix -eq 'Set up')
+        $script:StoreState = $null
+        $script:StoreCheckTimedOut = $false
+        $script:Tasks.Add(@{ Job = [pscustomobject]@{ Kind = 'storecheck'; Started = (Get-Date).AddMinutes(-3) }; Hidden = $true; Handle = [pscustomobject]@{ IsCompleted = $false } }) | Out-Null
+        $timer.Stop(); $timer.Start()
+        $window.Dispatcher.Invoke([System.Action]{ }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+        $deadline = (Get-Date).AddSeconds(5); while (-not $script:StoreCheckTimedOut -and (Get-Date) -lt $deadline) { $window.Dispatcher.Invoke([System.Action]{ Start-Sleep -Milliseconds 300 }, [System.Windows.Threading.DispatcherPriority]::Background) }
+        $script:Tasks.RemoveAt($script:Tasks.Count - 1)
+        Test-Smoke 'store check that does not answer: after 90 s the item says so instead of Checking for ever' ($script:StoreCheckTimedOut -and $script:StoreState -and $script:StoreState.Message -like '*did not answer in time*')
+        $script:StoreState = $saved
         $true } }
     @{ Name = 'graph outage text'; Do = {
         Test-Smoke 'a 403 "Remediations not available" is no Graph outage (the .NET text mentions the remote server)' (-not (Test-GraphReadFailureText 'The remote server returned an error: (403) Forbidden.') -and -not (Test-GraphReadFailureText 'Der Remoteserver hat einen Fehler zur?ckgegeben: (403) Unzul?ssig') -and -not (Test-GraphReadFailureText 'Authorization_RequestDenied: Insufficient privileges') -and -not (Test-GraphReadFailureText 'The remote server returned an error: (400) Bad Request'))
@@ -477,7 +507,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'panel shows the selected app with version and update mode' ($ui.ScrollTenantApp.Visibility -eq 'Visible' -and $ui.TxtTenantAppTitle.Text -eq '7-Zip' -and $ui.RbTenantStartup.IsChecked -and $ui.CmbTenantVersion.SelectedIndex -eq 0)
         Test-Smoke 'panel summarises when updates install' ($ui.TxtTenantWhen.Text -like '*10:00 to 15:00*' -and $ui.TxtTenantConditions.Text) "$($ui.TxtTenantWhen.Text) | $($ui.TxtTenantConditions.Text)"
         Test-Smoke 'Available note shown for an Available app' ($ui.TxtTenantAvailableNote.Visibility -eq 'Visible')
-        Test-Smoke 'open, test, remove enabled for a selected app' ($ui.BtnTenantOpen.IsEnabled -and $ui.BtnTenantRemove.IsEnabled)
+        Test-Smoke 'open is enabled; remove is off while 12 devices report the app installed, with the reason and the Set to Uninstall shortcut' ($ui.BtnTenantOpen.IsEnabled -and -not $ui.BtnTenantRemove.IsEnabled -and $ui.TxtTenantRemoveNote.Text -like 'Still installed on 12 devices*' -and $ui.BtnTenantSetUninstall.Visibility -eq 'Visible') $ui.TxtTenantRemoveNote.Text
         $ui.LstTenant.SelectedItem = $rows[0]
         Test-Smoke 'dependency app has no update controls' ($ui.GbTenantPolicy.Visibility -eq 'Collapsed' -and $ui.BtnTenantApply.Visibility -eq 'Collapsed')
         $ui.LstTenant.SelectedItem = $zip
@@ -612,6 +642,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $r = Get-ActionApp
             Test-Smoke 'while the list reloads: Remove is off, the panel says "Updating the list ...", actions get no app' ($off -and $null -eq $r)
             $script:Tasks.RemoveAt($script:Tasks.Count - 1); Update-TenantButtons
+            $script:DeviceCounts[[string]$ui.LstTenant.SelectedItem.Data.Id] = @{ Id = [string]$ui.LstTenant.SelectedItem.Data.Id; Installed = 0; Fetched = Get-Date }; Update-TenantButtons   # no device reports it any more
             & $script:ClickActions[$ui.BtnTenantRemove]
             return $false
         }
@@ -797,7 +828,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if ($s.Phase -eq 2) {
-            if (-not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
+            if (-not (Test-Idle 'removeinfo') -or -not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
             $s.Phase = 3
             $deployedNotes = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | ForEach-Object { $_.notes }) -join ';'
             Test-Smoke 'gate: the deployed app carries the test record in its notes' ($deployedNotes -like '*;test=passed;date=*;hash=*') $deployedNotes
@@ -837,7 +868,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if ($s.Phase -eq 3) {
-            if (-not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
+            if (-not (Test-Idle 'removeinfo') -or -not (Test-Idle 'custom') -or -not (Test-Idle 'customlist') -or -not (Test-Idle 'counts')) { return $false }
             $s.Phase = 4
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             $new = $fake | Where-Object { $_.displayVersion -eq '2.0.0' }
@@ -845,11 +876,13 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke 'the list shows both, the older one marked as replaced' ($script:CustomRows.Count -eq 2 -and @($script:CustomRows | Where-Object { $_['Kind'] -like '*(replaced)' }).Count -eq 1) ($script:CustomRows | ForEach-Object { $_['Kind'] })
             Save-SmokeShot '35-custom-versions'
             $ui.LstCustom.SelectedIndex = 0
+            foreach ($ca in @($script:CustomApps)) { $script:DeviceCounts[[string]$ca.Id] = @{ Id = [string]$ca.Id; Installed = 0; Fetched = Get-Date } }; Update-CustomRemoveState (Get-SelectedCustomApp)
             & $script:ClickActions[$ui.BtnCustomRemove]
             return $false
         }
         if ($s.Phase -eq 4) {
-            if (-not (Test-Idle)) { return $false }
+            # Remove first reads the relationships (task 'removeinfo'), only its answer starts the removal ('custom')
+            if (-not (Test-Idle 'removeinfo') -or -not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'remove: one custom app is gone from Intune and from the list' ($fake.Count -eq 1 -and $script:CustomRows.Count -eq 1 -and $ui.PanelCustomDetails.Visibility -eq 'Collapsed') ($fake | ForEach-Object displayVersion)
             Remove-Item $s.Dir -Recurse -Force -ErrorAction SilentlyContinue
@@ -1431,7 +1464,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $script:CustomInfo = [pscustomobject]@{ Name = 'Menu Tool'; Version = '2.0.0'; Path = (Join-Path $env:TEMP 'menu.msi') }
                 Show-TestMenu 'Custom' $ui.BtnCustomTestMenu
                 $headers = @($script:LastMenu.Items | ForEach-Object { [string]$_.Header })
-                Test-Smoke 'Test in sandbox is a split button: Test installation and Test update from the previous version' ($headers.Count -eq 2 -and $headers[0] -eq 'Test installation' -and $headers[1] -like 'Test update from the previous version*') ($headers -join ' | ')
+                Test-Smoke 'Test in sandbox is a split button: Test installation and Test update from the previous version' ($headers.Count -ge 2 -and $headers[0] -eq 'Test installation' -and $headers[1] -like 'Test update from the previous version*') ($headers -join ' | ')
                 # Custom update test: the previous version comes from the package store when there is one, else a file dialog
                 $savedStore = $script:Settings.StoreSiteUrl; $savedMode = $script:CustomMode; $savedApp = $script:CustomUpdateApp
                 $script:Settings.StoreSiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; $script:CustomMode = 'Version'; $script:CustomUpdateApp = [pscustomobject]@{ AppId = 'smoke-tool-1a2b3c4d' }
@@ -1534,7 +1567,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'In tenant lists the custom applications too, with the source label Custom MSI / Custom MSIX, version and assignment' ($custom.Count -ge 1 -and @($custom | Where-Object { $_['Sub'] -like 'Custom MS*' }).Count -eq $custom.Count -and $custom[0]['Assigned'] -ne $null) (($custom | ForEach-Object { "$($_['Title'])|$($_['Sub'])|$($_['Version'])|$($_['Assigned'])" }) -join '; ')
                 if ($custom.Count) {
                     $ui.LstTenant.SelectedItem = $custom[0]
-                    Test-Smoke 'panel of a custom app: counts and assignment switch like other apps, policy / sandbox / remove replaced by the link to the Custom page' ($ui.BoxTenantCustom.Visibility -eq 'Visible' -and $ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.BoxTenantSummary.Visibility -eq 'Visible' -and $ui.GbTenantPolicy.Visibility -eq 'Collapsed' -and $ui.BtnTenantTest.Visibility -eq 'Collapsed' -and $ui.BtnTenantRemove.Visibility -eq 'Collapsed')
+                    Test-Smoke 'panel of a custom app: counts and assignment switch like other apps, policy / sandbox / remove replaced by the link to the Custom page' ($ui.BoxTenantCustom.Visibility -eq 'Visible' -and $ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.BoxTenantSummary.Visibility -eq 'Visible' -and $ui.GbTenantPolicy.Visibility -eq 'Collapsed' -and $ui.BtnTenantTest.Visibility -eq 'Collapsed' -and $ui.BtnTenantRemove.Visibility -eq 'Visible' -and ($ui.BtnTenantRemove.IsEnabled -or $ui.BtnTenantRemove.ToolTip -or $ui.TxtTenantRemoveNote.Text))
                     $s.CustomId = $custom[0].Data.Id
                     & $script:ClickActions[$ui.BtnTenantCustomPage]
                     $s.Phase = 2; return $false
@@ -1646,7 +1679,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $all = New-Object System.Collections.ArrayList
         foreach ($scale in 1.0, 1.25, 1.5) {
             $ui.RootGrid.LayoutTransform = New-Object System.Windows.Media.ScaleTransform $scale, $scale
-            foreach ($p in 'Start', 'Apps', 'Tenant', 'Activity', 'Settings') { Show-Page $p; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("$p@$scale $x") } }
+            foreach ($p in 'Start', 'Apps', 'Tenant', 'Activity', 'Protocol', 'Settings') { Show-Page $p; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("$p@$scale $x") } }
             foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgHelp') { Show-Dialog $d; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("$d@$scale $x") } }
             Close-Dialog
             $ui.ConfirmTitle.Text = 'Switch'; $ui.ConfirmText.Text = 'Text'; $ui.BtnConfirmYes.Content = 'Switch to PackTune Runtime'; $ui.ConfirmLayer.Visibility = 'Visible'; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("Confirm@$scale $x") }; $ui.ConfirmLayer.Visibility = 'Collapsed'
@@ -1693,6 +1726,70 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $true
             }
         } } }
+    @{ Name = 'toasts: a long message keeps its layout (wide text column, plain Details button, 3 lines at most, friendly first line)'; Phase = 0; Do = {
+        param($s)
+        $before = $ui.ToastHost.Children.Count
+        $long = 'Packaging with IntuneWinAppUtil.exe failed: C:\Users\someone.long\AppData\Local\PackTune\package\custom-keevault-0a1b2c3d\source\keevault-0.9.34.msi could not be read because Windows denied access to the package folder and the files are held by another process, please close Windows Sandbox and try again later when nothing else uses the folder'
+        Show-Toast $long 'bad' 'Details' { }
+        $window.UpdateLayout()
+        $toast = $ui.ToastHost.Children[$ui.ToastHost.Children.Count - 1]
+        $grid = $toast.Child
+        $label = @($grid.Children | Where-Object { $_ -is [System.Windows.Controls.TextBlock] -and $_.Text -notmatch '^.$' })[0]
+        $button = @($grid.Children | Where-Object { $_ -is [System.Windows.Controls.Button] })[0]
+        Test-Smoke 'toast: the text column is at least 250 px wide (not a few characters)' ($label.ActualWidth -ge 250) "$($label.ActualWidth)"
+        Test-Smoke 'toast: at most three lines, shortened path, the full text in the tooltip' ($label.ActualHeight -le 70 -and $label.Text -like '*...*' -and $label.Text -notlike '*AppData\Local\PackTune\package*' -and $label.ToolTip -eq $long) "$($label.ActualHeight) / $($label.Text)"
+        Test-Smoke 'toast: the Details button is plain text (no icon glyph, nothing in Tag) and not wider than 120 px' ($button.Content -eq 'Details' -and $null -eq $button.Tag -and $button.ActualWidth -le 120) "$($button.Tag) $($button.ActualWidth)"
+        Test-Smoke 'toast: the whole toast is not wider than 440 px' ($toast.ActualWidth -le 440) "$($toast.ActualWidth)"
+        Save-SmokeShot '96-long-toast'
+        $c = Get-FriendlyCause 'App 6f0f2a3c-1111-2222-3333-444455556666 is not a custom application of this tool or does not exist any more, nothing was removed'
+        Test-Smoke 'friendly: a removed or foreign app is explained without the id' ($c -like '*not a custom application of PackTune or was already removed*' -and $c -notmatch '[0-9a-f]{8}-[0-9a-f]{4}') $c
+        Test-Smoke 'friendly: other ids in a message become a pointer to Details' ((Get-FriendlyCause 'Something with 6f0f2a3c-1111-2222-3333-444455556666 failed') -notmatch '6f0f2a3c') 
+        $ui.ToastHost.Children.Remove($toast); foreach ($tt in @($script:Toasts | Where-Object { $_.Element -eq $toast })) { $script:Toasts.Remove($tt) }
+        $true } }
+    @{ Name = 'protocol: the session journal, EN/DE text, copy, save, auto-save, history'; Phase = 0; Do = {
+        param($s)
+        Test-Smoke 'protocol: the left navigation has Protocol below Activity' ($ui.NavProtocol -and $ui.NavProtocol.Content -ne $null)
+        Test-Smoke 'protocol: earlier jobs of this session are in the journal (one hook)' ($script:Protocol.Actions.Count -ge 1) "$($script:Protocol.Actions.Count)"
+        $fake = @{ Kind = 'deploy'; Title = 'Deploying Smoke Tool'; Display = 'Smoke Tool password=Hunter2'; Status = 'succeeded'; Result = @(1); Source = 'Chocolatey'; Finished = (Get-Date); Log = @() }
+        $prevPage = $script:CurrentPage
+        Add-ProtocolJob $fake @()
+        $ui.CmbProtocolLanguage.SelectedIndex = 0
+        Show-Page 'Protocol'; $window.UpdateLayout()
+        $text = $ui.TxtProtocol.Text
+        Test-Smoke 'protocol: English by default with header, groups and the new action' ($text -match 'PackTune session protocol' -and $text -match 'Administrator:' -and $text -match 'Tenant:' -and $text -match 'Deployments:' -and $text -match 'Smoke Tool: done') $text
+        Test-Smoke 'protocol: no secret in the text' ($text -notmatch 'Hunter2')
+        Test-Smoke 'protocol: the page is not clipped' ($ui.TxtProtocol.ActualWidth -ge 300 -and $ui.BtnProtocolCopy.ActualWidth -gt 0)
+        $ui.CmbProtocolLanguage.SelectedIndex = 1
+        Test-Smoke 'protocol: German on switch, the choice is stored' ($ui.TxtProtocol.Text -match 'PackTune-Sitzungsprotokoll' -and $ui.TxtProtocol.Text -match 'Bereitstellungen:' -and (Get-PackTuneSettings).ProtocolLanguage -eq 'de') $ui.TxtProtocol.Text
+        $ui.CmbProtocolLanguage.SelectedIndex = 0
+        Test-Smoke 'protocol: and back to English' ($ui.TxtProtocol.Text -match 'session protocol' -and (Get-PackTuneSettings).ProtocolLanguage -eq 'en')
+        & $script:ClickActions[$ui.BtnProtocolCopy]
+        $clip = try { [System.Windows.Clipboard]::GetText() } catch { 'unreadable' }
+        Test-Smoke 'protocol: Copy puts the plain text on the clipboard' ($clip -eq $ui.TxtProtocol.Text -or $clip -eq 'unreadable') "$($clip.Length)"
+        $txt = Join-Path $env:TEMP "protocol-smoke-$PID.txt"; $md = Join-Path $env:TEMP "protocol-smoke-$PID.md"
+        Save-ProtocolFile $txt; Save-ProtocolFile $md
+        Test-Smoke 'protocol: Save as file writes text and Markdown' ((Get-Content $txt -Raw) -match 'Smoke Tool: done' -and (Get-Content $md -Raw) -match '(?m)^# PackTune session protocol' -and (Get-Content $md -Raw) -match '(?m)^- ') 
+        Remove-Item $txt, $md -Force -ErrorAction SilentlyContinue
+        $folder = Get-PackTuneProtocolFolder
+        $saved = @(Get-ChildItem $folder -Filter '*.json' -ErrorAction SilentlyContinue)
+        $onDisk = if ($saved.Count) { Read-PackTuneProtocolJson -Text ([IO.File]::ReadAllText($saved[0].FullName)) }
+        Test-Smoke 'protocol: auto-saved after the action (json and md in the Protocols folder)' ($saved.Count -ge 1 -and $onDisk -and @($onDisk.Actions).Count -eq $script:Protocol.Actions.Count -and (Test-Path ([IO.Path]::ChangeExtension($saved[0].FullName, '.md')))) "$folder $($saved.Count)"
+        Test-Smoke 'protocol: without the package store the page says it is local only' ($ui.TxtProtocolState.Text -match 'package store' -and $ui.TxtProtocolState.Text -match 'Saved after every action')
+        $old = New-PackTuneProtocol -Admin 'Bob Builder' -Account 'bob@contoso.com' -Tenant 'contoso.com' -Started (Get-Date).AddDays(-3)
+        [void](Add-PackTuneProtocolAction -Protocol $old -Category removal -Subject 'Old Thing' -At (Get-Date).AddDays(-3).AddMinutes(12))
+        [void](Save-PackTuneProtocol -Protocol $old)
+        & $script:ClickActions[$ui.BtnProtocolHistory]; $window.UpdateLayout()
+        Test-Smoke 'protocol: History lists the earlier protocol (date, admin, duration, actions)' ($ui.BoxProtocolHistory.Visibility -eq 'Visible' -and @($ui.LstProtocolHistory.ItemsSource).Count -eq 1 -and @($ui.LstProtocolHistory.ItemsSource)[0] -match 'Bob Builder' -and @($ui.LstProtocolHistory.ItemsSource)[0] -match '12 min' -and @($ui.LstProtocolHistory.ItemsSource)[0] -match '1 action') (@($ui.LstProtocolHistory.ItemsSource) -join ' | ')
+        $ui.LstProtocolHistory.SelectedIndex = 0
+        Test-Smoke 'protocol: picking one shows it (read only) and Copy then copies that one' ($ui.TxtProtocol.Text -match 'Old Thing: done' -and $ui.TxtProtocol.Text -match 'Bob Builder' -and $ui.TxtProtocolState.Text -match 'earlier protocol') $ui.TxtProtocol.Text
+        Save-SmokeShot '97-protocol-history'
+        & $script:ClickActions[$ui.BtnProtocolCurrent]
+        Test-Smoke 'protocol: Back to this session shows the current one' ($ui.TxtProtocol.Text -match 'Smoke Tool: done' -and $ui.TxtProtocol.Text -notmatch 'Old Thing')
+        & $script:ClickActions[$ui.BtnProtocolHistory]
+        Test-Smoke 'protocol: closing the history hides it' ($ui.BoxProtocolHistory.Visibility -eq 'Collapsed')
+        Save-SmokeShot '96-protocol'
+        Show-Page $prevPage
+        $true } }
     @{ Name = 'repositories: add a public repository, list, approval, remove (fake GitHub)'; Phase = 0; Do = {
         param($s)
         if (-not (Test-Idle)) { return $false }

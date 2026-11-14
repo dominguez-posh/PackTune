@@ -240,14 +240,15 @@ function Publish-PackTuneRelease {
 }#Release: supersedence for Available apps, in-place update for Required apps
 
 function Get-PackTuneAppInstalledCount {
-    # Devices (and users) that report the app as installed, from the install summary of the app in Graph
+    # Devices that report the app as installed: the app status overview report of Intune (the install summary of the app answers 400 for
+    # Win32 apps). One helper for the removal of apps and the cleanup of old versions. Throws when the count cannot be read.
     param([Parameter(Mandatory = $true)][string]$AppId)
-    Assert-PackTuneConnection
-    Update-PackTuneToken
-    $Headers = @{ Authorization = "Bearer $($Global:AccessToken.access_token)" }
-    $Summary = Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/deviceAppManagement/mobileApps/$AppId/installSummary" -Headers $Headers -TimeoutSec 60 -ErrorAction Stop
-    if ($null -eq $Summary -or $null -eq $Summary.installedDeviceCount) { throw "Intune returned no install summary for app $AppId" }
-    return [int][Math]::Max([int]$Summary.installedDeviceCount, [int]$Summary.installedUserCount)
+    if ($AppId -notmatch '^[0-9A-Za-z-]{1,64}$') { throw "'$AppId' is not an app id" }
+    $Report = Invoke-PackTuneIntuneGraph -Method POST -Path "deviceManagement/reports/getAppStatusOverviewReport" -Body @{ filter = "(ApplicationId eq '$AppId')"; select = @(); top = 1 }
+    $Row = @(ConvertFrom-InsightReport $Report) | Select-Object -First 1
+    if ($null -eq $Report -or $null -eq $Report.Schema) { throw "Intune returned no status report for app $AppId" }
+    if (-not $Row) { return 0 }
+    return [int]$Row.InstalledDeviceCount
 }#Number of devices that report the app as installed
 
 function Get-PackTuneSupersededApps {

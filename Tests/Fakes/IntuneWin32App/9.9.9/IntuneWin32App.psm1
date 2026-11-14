@@ -24,6 +24,9 @@ function Get-IntuneWin32App { param([string]$DisplayName, [string]$ID)
     if (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-network-down')) { Write-Warning ("Der Remotename konnte nicht aufgel" + [char]0xF6 + "st werden: 'graph.microsoft.com'"); return }
     $Apps = Read-Store
     if ($ID) { $Apps = $Apps | Where-Object { $_.id -eq $ID } }
+    # Tests: the list of the tenant lags behind (Graph): apps created after the file was written are not listed yet, by id they are
+    $Lag = Join-Path $env:LOCALAPPDATA 'fake-list-lag'
+    if (-not $ID -and (Test-Path $Lag)) { $Since = (Get-Item $Lag).LastWriteTime; $Apps = $Apps | Where-Object { $_.createdDateTime -and [datetime]$_.createdDateTime -lt $Since } }
     if ($DisplayName) { $Apps = $Apps | Where-Object { $_.displayName -like "*$DisplayName*" } }
     $Apps
 }
@@ -48,7 +51,11 @@ function Remove-IntuneWin32App { param([string]$DisplayName, [string]$ID)
     Test-FakeAccessToken
     Invoke-FakeIntuneGraph -Method DELETE -Path "mobileApps/$ID"
 }
-function New-IntuneWin32AppPackage { param($SourceFolder, $SetupFile, $OutputFolder, [switch]$Force)
+function New-IntuneWin32AppPackage { [CmdletBinding()] param($SourceFolder, $SetupFile, $OutputFolder, [switch]$Force)
+    $Store0 = Split-Path $Store -Parent
+    ConvertTo-Json @{ Source = $SourceFolder; Output = $OutputFolder; SourceExists = (Test-Path -LiteralPath (Join-Path $SourceFolder $SetupFile)) } | Set-Content (Join-Path $Store0 "fake-package-last.json")
+    $DenyFile = Join-Path $Store0 "fake-package-deny.txt"
+    if (Test-Path $DenyFile) { $N = [int](Get-Content $DenyFile -Raw); if ($N -gt 0) { ($N - 1) | Set-Content $DenyFile; Write-Warning "Unexpected error occurred while packaging Win32 app. Return code from invocation: -2147024891"; return $null } }
     $Path = Join-Path $OutputFolder "install.intunewin"; Set-Content $Path "fake"; [pscustomobject]@{ Path = $Path }
 }
 function New-IntuneWin32AppDetectionRuleScript { param($ScriptFile) [ordered]@{ "@odata.type" = "script"; scriptContent = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ScriptFile)) } }
@@ -124,6 +131,8 @@ function Add-IntuneWin32App {
         $RequirementRule, $InstallCommandLine, $UninstallCommandLine, $InformationURL, $Icon)
     Test-FakeAccessToken
     if (-not (Test-Path $FilePath)) { throw "intunewin missing" }
+    # Tests: the real module gives up with a warning and no object (e.g. a token it cannot use); nothing is created
+    if (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-add-silent')) { Write-Warning "Failed to create Win32 app, see the error above (fake)"; return }
     $App = [pscustomobject]@{
         id = [guid]::NewGuid().ToString(); displayName = $DisplayName; notes = $Notes; createdDateTime = (Get-Date).ToString("o")
         hasIcon = [bool]$Icon; iconValid = $(if ($Icon) { $b = [Convert]::FromBase64String($Icon); ($b[0] -eq 0x89 -or $b[0] -eq 0xFF) } else { $false })
@@ -148,6 +157,17 @@ function Invoke-FakeIntuneGraph {
     param([string]$Method = "GET", [string]$Path, $Body)
     Test-FakeAccessToken
     $Apps = Read-Store
+    # The install status of a Win32 app comes from the report, the install summary of the app answers 400 (like the service)
+    if ($Path -eq "deviceManagement/reports/getAppStatusOverviewReport") {
+        $Id = ([string]$Body.filter -replace "^\(ApplicationId eq '(.*)'\)$", '$1')
+        $Own = $Apps | Where-Object id -eq $Id
+        $Count = if ($Own -and $null -ne $Own.installedCount) { [int]$Own.installedCount } else { 0 }
+        if (-not $Own) { return [pscustomobject]@{ TotalRowCount = 0; Schema = @(); Values = @() } }
+        return [pscustomobject]@{ TotalRowCount = 1
+            Schema = @("ApplicationId", "FailedDeviceCount", "InstalledDeviceCount", "PendingInstallDeviceCount", "NotInstalledDeviceCount", "NotApplicableDeviceCount" | ForEach-Object { [pscustomobject]@{ Column = $_; PropertyType = "String" } })
+            Values = @(, @($Id, 0, $Count, 0, 0, 0)) }
+    }
+    if ($Path -match '/installSummary$') { throw "fake Graph: (400) BadRequest: The install summary is not available for this app type" }
     if ($Path -notmatch '^mobileApps/([^/]+)(/(relationships|updateRelationships))?$') { throw "fake Graph: unknown path $Path" }
     $Id = $Matches[1]; $Tail = $Matches[3]
     $App = $Apps | Where-Object id -eq $Id

@@ -122,6 +122,25 @@ try {
     $Msix = Join-Path $Staging "package.msix"
     $Cer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (Join-Path $Staging "signing.cer")
     if ($Cer.Thumbprint -ne $Thumbprint) { Write-Output "signing.cer is not the certificate of this version"; Write-DeviceLog "certificate file does not match the version, nothing installed"; exit 1 }
+    # Only a certificate that is safe to trust goes into TrustedPeople: self-signed leaf, CA=false, Code Signing only, subject = publisher of the package
+    $Why = $null
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $Zip = [System.IO.Compression.ZipFile]::OpenRead($Msix)
+        try { $Reader = New-Object System.IO.StreamReader($Zip.GetEntry("AppxManifest.xml").Open()); try { [xml]$Manifest = $Reader.ReadToEnd() } finally { $Reader.Dispose() } } finally { $Zip.Dispose() }
+        $Publisher = [string]$Manifest.Package.Identity.Publisher
+        $Basic = @($Cer.Extensions | Where-Object { $_ -is [System.Security.Cryptography.X509Certificates.X509BasicConstraintsExtension] })[0]
+        $EkuExt = @($Cer.Extensions | Where-Object { $_ -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] })[0]
+        $Oids = @(if ($EkuExt) { $EkuExt.EnhancedKeyUsages | ForEach-Object { $_.Value } })
+        $KeyUse = @($Cer.Extensions | Where-Object { $_ -is [System.Security.Cryptography.X509Certificates.X509KeyUsageExtension] })[0]
+        if ($Cer.Subject -cne $Publisher) { $Why = "subject is not the publisher of the package" }
+        elseif ($Cer.Subject -ne $Cer.Issuer) { $Why = "not self-signed" }
+        elseif (-not $Basic -or $Basic.CertificateAuthority) { $Why = "BasicConstraints CA is not false" }
+        elseif ($Oids.Count -ne 1 -or $Oids[0] -ne "1.3.6.1.5.5.7.3.3") { $Why = "not for Code Signing only" }
+        elseif ($KeyUse -and ($KeyUse.KeyUsages -band [System.Security.Cryptography.X509Certificates.X509KeyUsageFlags]::KeyCertSign)) { $Why = "may sign certificates" }
+    }
+    catch { $Why = "could not be checked: $($_.Exception.Message)" }
+    if ($Why) { Write-Output "The certificate is not safe to trust ($Why)"; Write-DeviceLog "certificate refused: $Why, nothing installed"; exit 1 }
     $Signature = Get-AuthenticodeSignature -LiteralPath $Msix
     if (-not $Signature.SignerCertificate -or $Signature.SignerCertificate.Thumbprint -ne $Thumbprint -or [string]$Signature.Status -in "HashMismatch", "NotSigned") {
         Write-Output "The package is not signed by the certificate of this version (status $($Signature.Status))"
@@ -288,6 +307,7 @@ function New-PackTuneCustomMsixPackage {
     param([Parameter(Mandatory = $true)]$Build, [Parameter(Mandatory = $true)][string]$AppId)
     $WorkPath = New-PackTuneWorkFolder -Name "custom-$AppId"
     $SourcePath = Join-Path $WorkPath "source"
+    $null = Assert-PackTuneTrustCertificate -CerPath $Build.Cer -Publisher $(if ($Build.Subject) { [string]$Build.Subject } else { [string](Get-PackTuneMsixInfo -Path $Build.Msix).Publisher })
     $Scripts = Get-PackTuneCustomMsixScripts -AppId $AppId -PackageName $Build.PackageName -Version $Build.Version -Thumbprint $Build.Thumbprint
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $Scripts.Install -Encoding ASCII
     Copy-Item -LiteralPath $Build.Msix -Destination (Join-Path $SourcePath "package.msix") -Force

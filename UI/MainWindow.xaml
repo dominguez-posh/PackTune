@@ -306,6 +306,9 @@
                                 </Border>
                             </Grid>
                         </RadioButton>
+                        <RadioButton x:Name="NavProtocol" Style="{StaticResource NavItem}" GroupName="Nav" AutomationProperties.Name="Protocol">
+                            <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE8A5;"/><TextBlock Text="Protocol"/></StackPanel>
+                        </RadioButton>
                     </StackPanel>
                     <StackPanel DockPanel.Dock="Bottom">
                         <Button x:Name="NavHelp" Style="{StaticResource NavButton}" AutomationProperties.Name="Help" HorizontalContentAlignment="Left">
@@ -547,7 +550,8 @@
                                         <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Downloads the package and the original installer files from the package store, checked against the manifest. Change the files, then New version."/>
                                         <Button x:Name="BtnCustomOpen" Margin="0,14,0,0" Content="Open in Intune" Tag="&#xE774;"/>
                                         <Button x:Name="BtnCustomRemove" Margin="0,14,0,0" Content="Remove from Intune" Tag="&#xE74D;"/>
-                                        <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Devices keep the installed software."/>
+                                        <TextBlock x:Name="TxtCustomRemoveNote" Style="{StaticResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap" Text="Devices keep the installed software."/>
+                                        <Button x:Name="BtnCustomSetUninstall" Margin="0,6,0,0" Content="Set to Uninstall" Visibility="Collapsed" ToolTip="Gives the app the assignment Uninstall for all users: devices that have it remove it. Remove the app from Intune when no device reports it any more."/>
                                     </StackPanel>
                                 </ScrollViewer>
                             </Border>
@@ -642,7 +646,7 @@
                                             <Border x:Name="BoxTenantCustom" Visibility="Collapsed" Background="#F7F7F7" CornerRadius="8" Padding="14,10" Margin="0,16,0,0">
                                                 <StackPanel>
                                                     <TextBlock Text="Your own application" Style="{StaticResource FieldLabel}"/>
-                                                    <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap" Text="New version, Export, Test in sandbox and Remove are on the Custom page: they need the package store and the sandbox."/>
+                                                    <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap" Text="New version, Export and Test in sandbox are on the Custom page: they need the package store and the sandbox."/>
                                                     <Button x:Name="BtnTenantCustomPage" Content="Manage on the Custom page ..." HorizontalAlignment="Left" Margin="0,8,0,0" Padding="14,5"/>
                                                 </StackPanel>
                                             </Border>
@@ -710,6 +714,8 @@
                                                     <Button x:Name="BtnTenantOpen" Grid.Column="2" Content="Open in Intune" Padding="8,8"/>
                                                 </Grid>
                                                 <Button x:Name="BtnTenantRemove" Style="{StaticResource DangerGhost}" Content="Remove from Intune..." Margin="0,8,0,0"/>
+                                                <TextBlock x:Name="TxtTenantRemoveNote" Style="{StaticResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
+                                                <Button x:Name="BtnTenantSetUninstall" Content="Set to Uninstall" Margin="0,6,0,0" Visibility="Collapsed" ToolTip="Gives the app the assignment Uninstall for all users: devices that have it remove it. Remove the app from Intune when no device reports it any more."/>
                                             </StackPanel>
                                         </StackPanel>
                                     </ScrollViewer>
@@ -796,6 +802,38 @@
                                     </Grid>
                                 </Border>
                             </ScrollViewer>
+                        </Grid>
+
+                        <!-- ============ Protocol ============ -->
+                        <Grid x:Name="PageProtocol" Visibility="Collapsed" Margin="32,24,32,0">
+                            <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Text="Protocol" Style="{StaticResource PageTitle}"/>
+                                    <TextBlock x:Name="TxtProtocolSubtitle" Style="{StaticResource Subtitle}" Text="Everything you did since PackTune started, ready to paste into a ticket or a time sheet."/>
+                                </StackPanel>
+                                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                                    <ComboBox x:Name="CmbProtocolLanguage" Width="120" Margin="0,0,8,0" AutomationProperties.Name="Language of the protocol"/>
+                                    <Button x:Name="BtnProtocolHistory" Content="History" Margin="0,0,8,0"/>
+                                    <Button x:Name="BtnProtocolSave" Content="Save as file" Margin="0,0,8,0"/>
+                                    <Button x:Name="BtnProtocolCopy" Style="{StaticResource PrimaryButton}" Content="Copy" Tag="&#xE8C8;"/>
+                                </StackPanel>
+                            </Grid>
+                            <Grid Grid.Row="1" Margin="0,16,0,0">
+                                <Grid.ColumnDefinitions><ColumnDefinition x:Name="ColProtocolHistory" Width="0"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <Border x:Name="BoxProtocolHistory" Style="{StaticResource CardBox}" Visibility="Collapsed" Margin="0,0,12,0">
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Top" Text="Earlier protocols" Style="{StaticResource CardTitle}" Margin="14,12,14,6"/>
+                                        <Button x:Name="BtnProtocolCurrent" DockPanel.Dock="Bottom" Style="{StaticResource SmallButton}" Content="Back to this session" Margin="12,6,12,12"/>
+                                        <ListBox x:Name="LstProtocolHistory" BorderThickness="0" Background="Transparent" AutomationProperties.Name="Earlier protocols"/>
+                                    </DockPanel>
+                                </Border>
+                                <Border Grid.Column="1" Style="{StaticResource CardBox}" VerticalAlignment="Stretch">
+                                    <TextBox x:Name="TxtProtocol" VerticalContentAlignment="Top" VerticalAlignment="Stretch" IsReadOnly="True" AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" BorderThickness="0" Background="Transparent" FontFamily="{StaticResource MonoFont}" FontSize="13" Padding="16,14" AutomationProperties.Name="Protocol text"/>
+                                </Border>
+                            </Grid>
+                            <TextBlock x:Name="TxtProtocolState" Grid.Row="2" Style="{StaticResource Hint}" Margin="0,10,0,18" TextWrapping="Wrap"/>
                         </Grid>
 
                         <!-- ============ Settings ============ -->
@@ -904,6 +942,8 @@
                                                 <CheckBox x:Name="ChkRepoOwn" Content="This is our own repository (not a third-party source)" Margin="0,0,16,0"/>
                                                 <CheckBox x:Name="ChkRepoSigned" Content="Require verified commits"/>
                                             </StackPanel>
+                                            <TextBlock Text="Allowed signers: GitHub logins that may author and commit a version (optional, comma separated; empty = anyone with access)" Style="{StaticResource FieldLabel}" Margin="0,10,0,4"/>
+                                            <TextBox x:Name="TxtRepoLogins" AutomationProperties.Name="Allowed GitHub logins"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                                 <Button x:Name="BtnRepoAdd" Content="Add repository" Style="{StaticResource SmallButton}" Margin="0,0,8,0"/>
                                                 <Button x:Name="BtnRepoRefresh" Content="Refresh" Style="{StaticResource SmallButton}" Margin="0,0,8,0"/>
@@ -941,7 +981,7 @@
             </Grid>
         </Grid>
 
-        <StackPanel x:Name="ToastHost" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,24,24" Width="360"/>
+        <StackPanel x:Name="ToastHost" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,24,24" Width="420"/>
 
         <!-- Dialogs: scrim with one sheet at a time -->
         <Grid x:Name="DialogLayer" Visibility="Collapsed">

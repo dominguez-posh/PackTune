@@ -296,6 +296,43 @@ $log = @(Remove-PackTuneIntuneApp -Id 'rel-a' -Name 'App A' 6>&1 | ForEach-Objec
 Test-Check 'an app with relationships of its own: they are cleared (and logged) first, then it is deleted and read back' (@(Get-Store | Where-Object id -eq 'rel-a').Count -eq 0 -and ($log -join "`n") -match 'has 1 relationship\(s\) of its own' -and ($log -join "`n") -match 'Deleted App A \(rel-a\)')
 $null = Remove-PackTuneIntuneApp -Id 'rel-b' -Name 'App B'
 Test-Check 'after its dependent is gone the dependency app can be deleted' (@(Get-Store | Where-Object id -eq 'rel-b').Count -eq 0)
+# --- install counts and the rule "not while devices report the app installed"
+$stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+ConvertTo-Json -InputObject @($stored + (& $mk 'cnt-a' 'Counted App' @() @())) -Depth 6 | Set-Content $Store
+Test-Check 'install count: the report of Intune gives 0 for an app nobody reported' ((Get-PackTuneAppInstalledCount -AppId 'cnt-a') -eq 0)
+$stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+foreach ($s in $stored) { if ($s.id -eq 'cnt-a') { $s | Add-Member -NotePropertyName installedCount -NotePropertyValue 3 -Force } }
+ConvertTo-Json -InputObject @($stored) -Depth 6 | Set-Content $Store
+Test-Check 'install count: installed devices come from InstalledDeviceCount of the app status report' ((Get-PackTuneAppInstalledCount -AppId 'cnt-a') -eq 3)
+$wrong = ''; try { $null = Invoke-PackTuneIntuneGraph -Path 'mobileApps/cnt-a/installSummary' } catch { $wrong = $_.Exception.Message }
+Test-Check 'the fake rejects the endpoint the service rejects for Win32 apps (installSummary, 400)' ($wrong -like '*400*install summary*') $wrong
+$bad = ''; try { $null = Get-PackTuneAppInstalledCount -AppId "x'; drop" } catch { $bad = $_.Exception.Message }
+Test-Check 'install count: an app id with odd characters is refused before it reaches a filter' ($bad -like '*is not an app id*') $bad
+$refused = ''; try { Remove-PackTuneIntuneApp -Id 'cnt-a' -Name 'Counted App' } catch { $refused = $_.Exception.Message }
+Test-Check 'remove: refused while devices report the app installed, with the number and the way out' ($refused -like '*still installed on 3 device(s)*Set the assignment to Uninstall first*' -and @(Get-Store | Where-Object id -eq 'cnt-a').Count -eq 1) $refused
+$origCount = ${function:Get-PackTuneAppInstalledCount}
+function Get-PackTuneAppInstalledCount { param($AppId) throw 'Graph POST failed (403): forbidden' }
+$refused2 = ''; try { Remove-PackTuneIntuneApp -Id 'cnt-a' -Name 'Counted App' } catch { $refused2 = $_.Exception.Message }
+Test-Check 'remove: when the count cannot be read nothing is deleted (fail closed), the cause is named' ($refused2 -like '*install count cannot be read*403*Nothing is deleted without it*' -and @(Get-Store | Where-Object id -eq 'cnt-a').Count -eq 1) $refused2
+Set-Item function:Get-PackTuneAppInstalledCount $origCount
+$stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+foreach ($s in $stored) { if ($s.id -eq 'cnt-a') { $s.installedCount = 0 } }
+ConvertTo-Json -InputObject @($stored) -Depth 6 | Set-Content $Store
+$null = Remove-PackTuneIntuneApp -Id 'cnt-a' -Name 'Counted App'
+Test-Check 'remove: when no device reports it any more it is deleted (the count is read again right before)' (@(Get-Store | Where-Object id -eq 'cnt-a').Count -eq 0)
+$stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+$od = & $mk 'cnt-old' 'Chocolatey' @() @(); $od | Add-Member -NotePropertyName installedCount -NotePropertyValue 40 -Force; $od.notes = 'FiredWithPowershell'
+ConvertTo-Json -InputObject @($stored + $od) -Depth 6 | Set-Content $Store
+$gone = @(Remove-PackTuneUnusedDependencyApps)
+Test-Check 'old dependency apps are exempt (Chocolatey stays on the devices): removed although devices report it' (@(Get-Store | Where-Object id -eq 'cnt-old').Count -eq 0 -and $gone.Count -ge 1)
+# the insight function: same report, the counts of the status page
+$ctx = New-InsightGraphContext -Invoke ([scriptblock]::Create((Get-Content (Join-Path $PSScriptRoot 'InsightFake.txt') -Raw)))
+$sum = Get-InsightAppInstallSummary -Context $ctx -AppId 'abc-123'
+Test-Check 'insight counts: installed, failed, pending, not installed from the status report' ($sum.Installed -eq 12 -and $sum.Failed -eq 1 -and $sum.Pending -eq 3 -and $sum.NotInstalled -eq 4 -and $sum.NotApplicable -eq 2)
+$old = ''; try { $null = Invoke-InsightGraph $ctx GET '/beta/deviceAppManagement/mobileApps/abc-123/installSummary' } catch { $old = $_.Exception.Message }
+Test-Check 'insight fake: the old endpoint answers 400 like the service' ($old -like '*400*') $old
+$odd = ''; try { $null = Get-InsightAppInstallSummary -Context $ctx -AppId "x') or ('1" } catch { $odd = $_.Exception.Message }
+Test-Check 'insight counts: an app id with odd characters is refused' ($odd -like '*is not an app id*') $odd
 # unused old apps: kept ones are logged with their users
 $stored = @(Get-Content $Store -Raw | ConvertFrom-Json | ForEach-Object { $_ })
 ConvertTo-Json -InputObject @($stored + ([pscustomobject]@{ id = 'old-choco'; displayName = 'Chocolatey'; notes = 'FiredWithPowershell'; dependencies = @(); supersedence = @(); assignments = @() }) + (& $mk 'foreign2' 'Other app' @([pscustomobject]@{ targetId = 'old-choco'; dependencyType = 'autoInstall' }) @())) -Depth 6 | Set-Content $Store

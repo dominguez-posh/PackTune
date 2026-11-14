@@ -82,6 +82,7 @@ function Start-PackTuneWin32Lab {
     [pscustomobject]@{ State = $(if ($script:LabVerdict -eq 'Passed') { 'Succeeded' } else { 'Failed' }); Verdict = $script:LabVerdict; Message = $(if ($script:LabVerdict -eq 'Passed') { 'All 5 steps passed' } else { 'Failed at step 2 of 5: Install exited with 1603' }); Result = $steps; JobPath = 'x' }
 }
 
+function Assert-PackTuneTrustCertificate { param([string]$CerPath, [string]$Publisher) $script:TrustChecked = @{ Cer = $CerPath; Publisher = $Publisher }; "X" }  # the fake certificates are text files; Check-Repos checks the real rules
 function Invoke-PackTuneMsixCapture {
     param([string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$PackageName, [string]$DisplayName, [string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertificateThumbprint, [switch]$SkipSigning, [string]$Publisher, [switch]$AllowNetwork)
     [void]$script:Events.Add('capture')

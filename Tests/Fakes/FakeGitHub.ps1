@@ -24,12 +24,12 @@ function New-FakeRepo {
 function Get-FakeRepoFiles($Repo) { $script:Gh.Trees[$script:Gh.Commits[$Repo.Head].Tree] }
 function Add-FakeCommit {
     # files: path -> bytes; adds one commit (path prefix list for the commits API)
-    param($Repo, [hashtable]$Files, [string]$Author = 'Alice Admin', [bool]$Verified = $true, [string]$Message = 'commit')
+    param($Repo, [hashtable]$Files, [string]$Author = 'Alice Admin', [bool]$Verified = $true, [string]$Message = 'commit', [string]$Login = 'alice', [string]$Committer = 'alice')
     $tree = @{}; foreach ($k in (Get-FakeRepoFiles $Repo).Keys) { $tree[$k] = (Get-FakeRepoFiles $Repo)[$k] }
     foreach ($k in $Files.Keys) { $sha = New-GhSha; $script:Gh.Blobs[$sha] = [byte[]]$Files[$k]; $tree[$k] = $sha }
     $t = New-GhSha; $script:Gh.Trees[$t] = $tree
     $c = New-GhSha
-    $script:Gh.Commits[$c] = @{ Tree = $t; Parent = $Repo.Head; Author = $Author; Message = $Message; Verified = $Verified; Paths = @($Files.Keys) }
+    $script:Gh.Commits[$c] = @{ Tree = $t; Parent = $Repo.Head; Author = $Author; Message = $Message; Verified = $Verified; Paths = @($Files.Keys); Login = $Login; Committer = $Committer }
     $Repo.Head = $c
     return $c
 }
@@ -40,7 +40,7 @@ function New-GhResponse($Status, $Body = $null, [hashtable]$Headers = @{}) {
     [pscustomobject]@{ Status = $Status; Body = $(if ($null -ne $Body) { [pscustomobject]$Body } else { $null }); Headers = $h }
 }
 function Invoke-PackTuneGitHub {
-    param([string]$Method = 'GET', [string]$Path, [string]$Absolute, [string]$Token, $Body, [byte[]]$Bytes, [string]$InFile, [string]$OutFile, [string]$Accept, [string]$IfNoneMatch, [string]$ContentType)
+    param([string]$Method = 'GET', [string]$Path, [string]$Absolute, [string]$Token, $Body, [byte[]]$Bytes, [string]$InFile, [string]$OutFile, [string]$Accept, [string]$IfNoneMatch, [string]$ContentType, [int64]$MaxBytes)
     [void]$script:Gh.Requests.Add([pscustomobject]@{ Method = $Method; Path = $(if ($Absolute) { $Absolute } else { $Path }); Token = $Token; IfNoneMatch = $IfNoneMatch })
     if ($script:Gh.Offline) { throw 'GitHub could not be reached: offline' }
     $url = if ($Absolute) { $Absolute } else { $Path }
@@ -70,6 +70,7 @@ function Invoke-PackTuneGitHub {
             $files = Get-FakeRepoFiles $repo
             if (-not $files.ContainsKey($p)) { return (New-GhResponse 404 @{ message = 'Not Found' }) }
             $bytes = $script:Gh.Blobs[$files[$p]]
+            if ($MaxBytes -gt 0 -and $bytes.Length -gt $MaxBytes) { throw "The download is larger than expected ($MaxBytes bytes): aborted." }
             $etag = '"' + $files[$p] + '"'
             if ($IfNoneMatch -and $IfNoneMatch -eq $etag) { return (New-GhResponse 304 $null @{ etag = $etag }) }
             if ($OutFile) { [IO.File]::WriteAllBytes($OutFile, $bytes) }
@@ -80,7 +81,7 @@ function Invoke-PackTuneGitHub {
             while ($sha) { $c = $script:Gh.Commits[$sha]; if (@($c.Paths | Where-Object { $_ -like "$p/*" -or $_ -eq $p }).Count) { break }; $sha = $c.Parent }
             if (-not $sha) { return (New-GhResponse 200 ([pscustomobject]@{}) ) }
             $c = $script:Gh.Commits[$sha]
-            $one = [pscustomobject]@{ sha = $sha; commit = [pscustomobject]@{ author = [pscustomobject]@{ name = $c.Author; date = '2026-11-01T10:00:00Z' }; message = $c.Message; verification = [pscustomobject]@{ verified = $c.Verified; reason = $(if ($c.Verified) { 'valid' } else { 'unsigned' }) } }; author = [pscustomobject]@{ login = 'alice' } }
+            $one = [pscustomobject]@{ sha = $sha; commit = [pscustomobject]@{ author = [pscustomobject]@{ name = $c.Author; date = '2026-11-01T10:00:00Z' }; message = $c.Message; verification = [pscustomobject]@{ verified = $c.Verified; reason = $(if ($c.Verified) { 'valid' } else { 'unsigned' }) } }; author = [pscustomobject]@{ login = $c.Login }; committer = [pscustomobject]@{ login = $c.Committer } }
             return [pscustomobject]@{ Status = 200; Body = @($one); Headers = @{ 'x-ratelimit-remaining' = [string]$script:Gh.RateRemaining; 'x-ratelimit-limit' = '5000' } }
         }
         '^GET /git/ref/heads/' { return (New-GhResponse 200 @{ object = [pscustomobject]@{ sha = $repo.Head } }) }
@@ -99,7 +100,7 @@ function Invoke-PackTuneGitHub {
             $c = New-GhSha
             $base = $script:Gh.Trees[$script:Gh.Commits[[string]@($Body.parents)[0]].Tree]
             $changed = @($script:Gh.Trees[[string]$Body.tree].Keys | Where-Object { -not $base.ContainsKey($_) -or $base[$_] -ne $script:Gh.Trees[[string]$Body.tree][$_] })
-            $script:Gh.Commits[$c] = @{ Tree = [string]$Body.tree; Parent = [string]@($Body.parents)[0]; Author = 'Writer'; Message = [string]$Body.message; Verified = $false; Paths = $changed }
+            $script:Gh.Commits[$c] = @{ Tree = [string]$Body.tree; Parent = [string]@($Body.parents)[0]; Author = 'Writer'; Message = [string]$Body.message; Verified = $false; Paths = $changed; Login = 'writer'; Committer = 'writer' }
             return (New-GhResponse 201 @{ sha = $c })
         }
         '^PATCH /git/refs/heads/' {
@@ -125,7 +126,7 @@ function Invoke-PackTuneGitHub {
         }
         '^GET /releases/assets/(?<id>\d+)' {
             $aid = [int]$Matches['id']
-            foreach ($rel in $repo.Releases.Values) { foreach ($n in $rel.Assets.Keys) { if ($rel.Assets[$n].Id -eq $aid) { [IO.File]::WriteAllBytes($OutFile, $rel.Assets[$n].Bytes); return (New-GhResponse 200) } } }
+            foreach ($rel in $repo.Releases.Values) { foreach ($n in $rel.Assets.Keys) { if ($rel.Assets[$n].Id -eq $aid) { if ($MaxBytes -gt 0 -and $rel.Assets[$n].Bytes.Length -gt $MaxBytes) { throw "The download is larger than expected ($MaxBytes bytes): aborted." }; [IO.File]::WriteAllBytes($OutFile, $rel.Assets[$n].Bytes); return (New-GhResponse 200) } } }
             return (New-GhResponse 404 @{ message = 'Not Found' })
         }
         default { throw "fake GitHub: $Method $url" }
