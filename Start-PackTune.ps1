@@ -1846,10 +1846,20 @@ function Start-CustomRefresh {
         if ($Job.Status -eq 'succeeded') { $script:CustomApps = @(Merge-PendingApps 'custom' @($Result | Where-Object { $_ -and $_.Id })) } elseif (-not $script:GraphDown) { $script:CustomApps = $null }   # a failed read keeps the last list
         if ($Job.Status -eq 'failed') { Write-UiLog 'The custom applications could not be read, see above.' 'Warning' }
         Update-CustomRows
+        if ($Job.Status -eq 'succeeded') { Start-CountsTask }
     })
     Update-CustomRows
 }
 Add-Click $ui.BtnCustomRefresh { $script:CustomApps = $null; Start-CustomRefresh }
+function Update-CustomRemoveState($App) {
+    # Remove is off while devices report the app installed or the count is unknown; Set to Uninstall is the way out
+    $block = Get-RemoveBlock $App
+    $ui.BtnCustomRemove.IsEnabled = -not $block
+    $ui.BtnCustomRemove.ToolTip = if ($block) { $block } else { $null }
+    $ui.TxtCustomRemoveNote.Text = if ($block) { $block } else { 'Devices keep the installed software.' }
+    $c = $script:DeviceCounts[[string]$App.Id]
+    $ui.BtnCustomSetUninstall.Visibility = ConvertTo-Vis ([bool]($c -and -not $c.Error -and [int]$c.Installed -gt 0) -and @([string]$App.Intents -split ',') -notcontains 'uninstall')
+}
 function Show-CustomDetails($App) {
     $ui.PanelCustomDetails.Visibility = if ($App) { 'Visible' } else { 'Collapsed' }
     if (-not $App) { return }
@@ -1867,6 +1877,7 @@ function Show-CustomDetails($App) {
     $ui.TxtCustomVersionHint.Text = if ($isMsix) { 'Rebuilds the package on top of the previous version (restored from the package store) with a new installer: a new app supersedes this one on the devices.' } else { 'Pick a newer MSI: a new app is created that supersedes this one on the devices.' }
     $ui.TxtCustomStore.Text = if ($App.Manifest) { "Kept in the package store (manifest $($App.Manifest.Substring(0, 16))...$(if ($App.Manifest.Length -lt 64) { ', short anchor of the first release: record the full one with Set-PackTuneCustomManifestAnchor' }))." } elseif ($isMsix) { 'No manifest in the notes: not kept in the package store.' } else { 'Not kept in the package store (none was set up when it was deployed).' }
     $ui.BtnCustomExport.IsEnabled = [bool]$App.Manifest -and (Test-StoreReady)
+    Update-CustomRemoveState $App
     $ui.BtnCustomExport.ToolTip = if (Test-StoreReady) { $null } else { 'Set up the package store first' }
 }
 $ui.LstCustom.Add_SelectionChanged({
@@ -2265,6 +2276,7 @@ function Confirm-AppRemoval {
         if (Confirm-Action ($pending.Question + $extra) 'Remove from Intune' 'Remove' 'Cancel') { & $pending.Proceed }
     })
 }
+Add-Click $ui.BtnCustomSetUninstall { $app = Get-SelectedCustomApp; if ($app) { Start-AssignChange 'Uninstall' $app } }
 Add-Click $ui.BtnCustomRemove {
     $app = Get-SelectedCustomApp
     if (-not $app) { return }
@@ -2272,6 +2284,8 @@ Add-Click $ui.BtnCustomRemove {
 }
 function Start-CustomRemoval($app) {
     if (-not (Test-AppId $app)) { return }
+    $block = Get-RemoveBlock $app
+    if ($block) { Show-Toast $block 'warn'; return }
     $script:RemovingIds[[string]$app.DisplayName] = [string]$app.Id
     $deleteStore = $false
     if ($script:Settings.StoreSiteUrl -and $app.AppId -and @($script:CustomApps | Where-Object { $_.AppId -eq $app.AppId }).Count -le 1) {
@@ -3294,7 +3308,7 @@ function Get-ShortCountError([string]$Raw) {
 }
 function Start-CountsTask {
     # Intune's install summary per app (one small call each, DeviceManagementApps.Read.All), a short cache so the list does not hammer Graph
-    $ids = @($script:TenantApps | Where-Object { -not $_.IsChocolatey -and $_.Package } | ForEach-Object { $_.Id } | Where-Object {
+    $ids = @(@($script:TenantApps | Where-Object { -not $_.IsChocolatey -and $_.Package }) + @($script:CustomApps | Where-Object { $_ }) | ForEach-Object { $_.Id } | Where-Object {
         $c = $script:DeviceCounts[$_]; -not $c -or $c.Error -or -not $c.Fetched -or ((Get-Date) - [datetime]$c.Fetched).TotalSeconds -gt $script:CountsCacheSeconds })
     if ($ids.Count -eq 0 -or (Test-TaskRunning 'counts')) { return }
     $work = '
@@ -3313,6 +3327,7 @@ foreach ($Id in $Ids) {
         }
         Update-TenantRows
         try { Update-TenantButtons } catch { }
+        try { $sel = Get-SelectedCustomApp; if ($sel) { Update-CustomRemoveState $sel } } catch { }
     })
 }
 function Update-TenantSummary($App) {
@@ -3517,6 +3532,16 @@ function Start-OldDependencyCleanup {
 }
 
 function Get-SelectedTenantApp { if ($ui.LstTenant.SelectedItem) { $ui.LstTenant.SelectedItem.Data } }
+function Get-RemoveBlock($App) {
+    # Why an app cannot be removed from Intune right now, or $null. Never while a device reports it installed; when the count is not there
+    # or cannot be read the answer is no as well (fail closed). The old dependency apps are exempt: Chocolatey and winget stay on the devices anyway.
+    if (-not $App -or $App.IsChocolatey -or $App.IsDependency -or $App.IsOld) { return $null }
+    $c = $script:DeviceCounts[[string]$App.Id]
+    if (-not $c) { return 'Reading the install count ...' }
+    if ($c.Error) { return "The install count cannot be read ($(Get-FriendlyCause $c.Error)): removing stays off until it can." }
+    if ([int]$c.Installed -gt 0) { return "Still installed on $($c.Installed) devices - set the assignment to Uninstall first and remove the app when no device reports it any more." }
+    return $null
+}
 function Get-ActionApp {
     # The app of the panel for an action: the selected row, with an id, and only while the list is not being updated
     $app = Get-SelectedTenantApp
@@ -3663,8 +3688,13 @@ function Update-TenantButtons {
     $reading = (Test-TaskRunning 'tenant')
     $ui.BtnTenantOpen.IsEnabled = -not $reading
     $ui.BtnTenantOpen.ToolTip = if ($reading) { 'Updating the list ...' } else { $null }
-    $ui.BtnTenantRemove.IsEnabled = (Test-SignedIn) -and -not $reading -and -not (Test-TaskRunning 'remove') -and -not $app.IsDependency
-    $ui.BtnTenantRemove.ToolTip = if ($reading) { 'Updating the list ...' } else { $null }
+    $block = Get-RemoveBlock $app
+    $ui.BtnTenantRemove.IsEnabled = (Test-SignedIn) -and -not $reading -and -not (Test-TaskRunning 'remove') -and -not $app.IsDependency -and -not $block
+    $ui.BtnTenantRemove.ToolTip = if ($reading) { 'Updating the list ...' } elseif ($block) { $block } else { $null }
+    $ui.TxtTenantRemoveNote.Text = [string]$block; $ui.TxtTenantRemoveNote.Visibility = ConvertTo-Vis ([bool]$block)
+    $stillInstalled = $script:DeviceCounts[[string]$app.Id] -and -not $script:DeviceCounts[[string]$app.Id].Error -and [int]$script:DeviceCounts[[string]$app.Id].Installed -gt 0 -and -not $app.IsDependency
+    $ui.BtnTenantSetUninstall.Visibility = ConvertTo-Vis ([bool]$stillInstalled -and @([string]$app.Intents -split ',') -notcontains 'uninstall')
+    $ui.BtnTenantSetUninstall.IsEnabled = (Test-SignedIn) -and -not (Test-TaskRunning 'assign')
     $ui.GbTenantPolicy.Visibility = ConvertTo-Vis (-not $isDep)
     $ui.BtnTenantApply.Visibility = ConvertTo-Vis (-not $isDep)
     Update-SandboxButtons
@@ -3751,6 +3781,7 @@ Add-Click $ui.BtnTenantTest {
     if (-not $app) { return }
     Start-PackageTest -Package $app.Package -Source $app.Source -Title $app.DisplayName -Version (Get-TenantVersion) -Policy (Read-TenantPolicy)
 }
+Add-Click $ui.BtnTenantSetUninstall { $app = Get-ActionApp; if ($app) { Start-AssignChange 'Uninstall' $app } }
 Add-Click $ui.BtnTenantRemove {
     $app = Get-ActionApp
     if (-not $app) { return }
@@ -3760,6 +3791,8 @@ Add-Click $ui.BtnTenantRemove {
 }
 function Start-TenantRemoval($app) {
     if (-not (Test-AppId $app)) { return }
+    $block = Get-RemoveBlock $app
+    if ($block) { Show-Toast $block 'warn'; return }
     $script:RemovingIds[[string]$app.DisplayName] = [string]$app.Id
     Update-UiToken
     [void](Start-UiTask -Kind 'remove' -Title "Removing $($app.DisplayName) from Intune" -Display $app.DisplayName -Package $app.Package -NeedsAuth -Arguments @{ Id = $app.Id; Source = $app.Source } -Work 'param($Id, $Source) Remove-PackTuneApp -Id $Id' -OnDone {
