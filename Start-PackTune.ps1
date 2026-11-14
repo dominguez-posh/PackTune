@@ -1071,7 +1071,7 @@ function Get-ReadinessItems {
                     Fix = 'Confirm now'; Action = { Connect-Intune -Consent } } }
               else { @{ Key = 'appreg'; Title = 'App registration'; State = 'ok'; Text = "$($script:Settings.TenantID), client ID $($script:Settings.ClientID)." } } }
           else { @{ Key = 'appreg'; Title = 'App registration'; State = 'bad'; Wait = $busyAppReg
-                    Text = $(if ($busyAppReg) { 'Waiting for the administrator sign-in in your browser ...' } elseif (-not $script:Settings.ClientID) { "$(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'This tenant' }) has no app registration yet. Created with admin consent." } else { 'The tenant is missing (Settings).' })
+                    Text = $(if ($busyAppReg) { 'Waiting for the administrator sign-in in your browser ...' } elseif ($script:SetupClientRepaired -and -not $script:Settings.ClientID) { "App registration needed: the saved client ID was Microsoft's setup app (Microsoft Graph Command Line Tools), not PackTune's app registration, and is no longer used. Create finds PackTune's registration in the tenant (owned by you) or creates it, with admin consent." } elseif (-not $script:Settings.ClientID) { "$(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'This tenant' }) has no app registration yet. Created with admin consent." } else { 'The tenant is missing (Settings).' })
                     Fix = $(if ($script:Settings.ClientID) { 'Settings' } else { 'Create' }); Action = $(if ($script:Settings.ClientID) { { Show-Page 'Settings' } } else { { Start-AppRegistration } }) } })
         $(if (Test-SignedIn) { @{ Key = 'signin'; Title = 'Signed in to Intune'; State = 'ok'; Text = $(if ($script:AccountText) { "Signed in as $((Get-AccountInfo).Account)" } else { 'Signed in' }) } }
           else { @{ Key = 'signin'; Title = 'Signed in to Intune'; State = 'bad'; Wait = $busyConnect
@@ -1097,6 +1097,13 @@ function Get-ReadinessItems {
                        Text = "PackTune Runtime is in the tenant. $n app$(if ($n -ne 1) { 's' }) still use$(if ($n -eq 1) { 's' }) the old dependency apps (Chocolatey, winget runtime): switch them over, nothing is removed."
                        Fix = 'Switch'; Action = { Start-RuntimeSwitch } } }
                 else { @{ Key = 'deps'; Title = 'Dependency app (PackTune Runtime)'; State = 'ok'; Text = 'PackTune Runtime is in the tenant; every app depends on it.' } })
+    # More than one PackTune Runtime in the tenant: listed, removed only when the person confirms
+    if ((Test-SignedIn) -and $info -and @($info.RuntimeDuplicates).Count -gt 0) {
+        $dups = @($info.RuntimeDuplicates)
+        $items += @{ Key = 'depsdup'; Title = 'Duplicate PackTune Runtime apps'; State = 'warn'; Wait = (Test-TaskRunning 'depsdup')
+            Text = "$($dups.Count) more app$(if ($dups.Count -ne 1) { 's' }) named PackTune Runtime $(if ($dups.Count -ne 1) { 'are' } else { 'is' }) in the tenant: $(@($dups | ForEach-Object { "$($_.Id) (created $($_.Created))" }) -join ', '). The oldest one ($($info.RuntimeId)) is used."
+            Fix = 'Clean up'; Action = { Start-RuntimeDuplicateCleanup } }
+    }
     $items += $(if (-not (Test-SignedIn)) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = 'Devices report their update log to Intune, so failures show up under In tenant. Needs Remediations (Windows Enterprise E3/E5).' } }
                 elseif ($script:GraphDown -and -not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = "Can't check right now: $($script:GraphDown.Cause)" } }
                 elseif (-not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statuscheck'); Text = 'Checking ...' } }
@@ -1212,7 +1219,8 @@ New-PackTuneAppRegistration @Params
     $arguments = @{ TenantID = $script:Settings.TenantID; Authority = $script:SignInTest.Authority; UrlHandler = $script:SignInTest.UrlHandler; GraphUrl = $script:SignInTest.GraphUrl; Token = $setupToken }
     [void](Start-UiTask -Kind 'appreg' -Title 'Creating the app registration with admin consent' -Display 'App registration' -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
         param($Result, $Job)
-        $reg = @($Result | Where-Object { $_ -and $_.ClientID }) | Select-Object -First 1
+        # Only the result object of the registration (tenant and client ID), never the setup client of a token
+        $reg = @($Result | Where-Object { $_ -and $_.ClientID -and $_.TenantID -and $_.PSObject.Properties['Account'] -and -not (Test-PackTuneSetupClient ([string]$_.ClientID)) }) | Select-Object -First 1
         if ($Job.Status -eq 'succeeded' -and $reg) {
             $s = Get-PackTuneSettings; $s.TenantID = $reg.TenantID; $s.ClientID = $reg.ClientID
             [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings
@@ -1226,6 +1234,22 @@ New-PackTuneAppRegistration @Params
         else { $script:SignInAfterRegistration = $false; Update-ConnectionStatus; Complete-SetupStep $false 'creating the app registration' }
     })
     Update-SignInButton
+    Update-Readiness
+}
+
+function Start-RuntimeDuplicateCleanup {
+    $dups = @($script:RuntimeInfo.RuntimeDuplicates)
+    if ($dups.Count -eq 0 -or (Test-TaskRunning 'depsdup')) { return }
+    $list = @($dups | ForEach-Object { "$($_.DisplayName) $($_.Id), created $($_.Created)" }) -join "`n"
+    if (-not (Confirm-Action "Remove these extra PackTune Runtime apps from Intune?`n`n$list`n`nThe oldest one ($($script:RuntimeInfo.RuntimeId)) stays. An app that other apps depend on is kept." 'Clean up PackTune Runtime')) { return }
+    Update-UiToken
+    $ids = @($dups | ForEach-Object { $_.Id })
+    [void](Start-UiTask -Kind 'depsdup' -Title 'Removing the extra PackTune Runtime apps' -Display 'PackTune Runtime' -NeedsAuth -Arguments @{ Ids = $ids } -Work 'param($Ids) Remove-PackTuneRuntimeDuplicates -AppId $Ids -Confirm:$false' -OnDone {
+        param($Result, $Job)
+        foreach ($r in @($Result | Where-Object { $_ -and $_.PSObject.Properties['Removed'] })) { Write-UiLog "PackTune Runtime $($r.Id): $($r.Message)" $(if ($r.Removed) { 'Success' } else { 'Warning' }) }
+        $script:TenantApps = $null; $script:RuntimeId = $null; $script:RuntimeInfo = $null
+        Start-TenantRefresh
+    })
     Update-Readiness
 }
 
@@ -4365,6 +4389,8 @@ function Get-GrantedScopeMemory {
 function Save-GrantedScopes {
     # After a sign-in: the Graph scopes of the token are what the tenant granted (added to what is known)
     if (-not $Global:AccessToken -or -not $Global:AccessToken.Scopes -or -not $script:Settings.TenantID) { return }
+    # Scopes of a setup-client token are that app's consent, not PackTune's
+    if (Test-PackTuneSetupClient ([string]$Global:AccessToken.ClientID)) { return }
     $granted = @($Global:AccessToken.Scopes | ForEach-Object { $_ -replace '^https://graph\.microsoft\.com/', '' } | Where-Object { $_ -and $_ -notin 'offline_access', 'openid', 'profile', 'email' })
     $m = Get-GrantedScopeMemory
     $key = ([string]$script:Settings.TenantID).ToLower()
@@ -4927,6 +4953,7 @@ $window.Add_Closed({
 Update-ModuleState
 Set-DeployDefaults
 Write-UiLog "PackTune $script:ToolVersion started. Work folder: $script:WorkRoot"
+if ($script:SetupClientRepaired) { Write-UiLog "The saved client ID was Microsoft's setup app (Microsoft Graph Command Line Tools, $($script:SetupClientId)), not PackTune's app registration. It was removed from the settings; create or find PackTune's registration on the start page (Create). A package store grant made for that app has to be given again to PackTune's registration." 'Warning' }
 if (-not $script:ModuleState.Ok) { Write-UiLog "The IntuneWin32App module ($($script:MinimumModuleVersion) or newer) is missing: install it on the start page." 'Warning' }
 Update-CatalogRows
 Update-ConnectionStatus

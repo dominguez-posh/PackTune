@@ -24,6 +24,9 @@ function Get-IntuneWin32App { param([string]$DisplayName, [string]$ID)
     if (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-network-down')) { Write-Warning ("Der Remotename konnte nicht aufgel" + [char]0xF6 + "st werden: 'graph.microsoft.com'"); return }
     $Apps = Read-Store
     if ($ID) { $Apps = $Apps | Where-Object { $_.id -eq $ID } }
+    # Tests: the list of the tenant lags behind (Graph): apps created after the file was written are not listed yet, by id they are
+    $Lag = Join-Path $env:LOCALAPPDATA 'fake-list-lag'
+    if (-not $ID -and (Test-Path $Lag)) { $Since = (Get-Item $Lag).LastWriteTime; $Apps = $Apps | Where-Object { $_.createdDateTime -and [datetime]$_.createdDateTime -lt $Since } }
     if ($DisplayName) { $Apps = $Apps | Where-Object { $_.displayName -like "*$DisplayName*" } }
     $Apps
 }
@@ -128,6 +131,8 @@ function Add-IntuneWin32App {
         $RequirementRule, $InstallCommandLine, $UninstallCommandLine, $InformationURL, $Icon)
     Test-FakeAccessToken
     if (-not (Test-Path $FilePath)) { throw "intunewin missing" }
+    # Tests: the real module gives up with a warning and no object (e.g. a token it cannot use); nothing is created
+    if (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-add-silent')) { Write-Warning "Failed to create Win32 app, see the error above (fake)"; return }
     $App = [pscustomobject]@{
         id = [guid]::NewGuid().ToString(); displayName = $DisplayName; notes = $Notes; createdDateTime = (Get-Date).ToString("o")
         hasIcon = [bool]$Icon; iconValid = $(if ($Icon) { $b = [Convert]::FromBase64String($Icon); ($b[0] -eq 0x89 -or $b[0] -eq 0xFF) } else { $false })
