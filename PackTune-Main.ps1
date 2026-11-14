@@ -52,7 +52,7 @@ $script:GraphScopeString = (@("DeviceManagementApps.ReadWrite.All", "DeviceManag
         ForEach-Object { "https://graph.microsoft.com/$_" }) + "offline_access", "openid", "profile") -join " "
 # Added to the app registration and its consent for the install status and device views (Modules\TenantInsight.psm1).
 # Sign-ins request them with Get-InsightScopeSet once the consent exists (Test-InsightReadiness shows what is missing).
-$script:GraphInsightScopes = @("DeviceManagementManagedDevices.Read.All")
+$script:GraphInsightScopes = @("DeviceManagementManagedDevices.Read.All", "Sites.Selected")
 
 $script:DefaultSettings = [ordered]@{
     TenantID              = ""
@@ -86,6 +86,9 @@ $script:DefaultSettings = [ordered]@{
     # Schedule of new apps (when and under which conditions updates install) as compact JSON with the property names of
     # New-ChocoSchedule, e.g. {"OnlyOnMains":true,"WindowFrom":"12:00"}; empty = the built-in defaults (like before)
     UpdateSchedule        = ""
+    # Package store of custom applications: the private SharePoint site and its document library
+    StoreSiteUrl          = ""
+    StoreLibrary          = "PackTune Packages"
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
 # Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
@@ -150,6 +153,8 @@ function Save-PackTuneSettings {
     if ($Clean.UpdateDelayMinMinutes -lt 0 -or $Clean.UpdateDelayMaxMinutes -lt $Clean.UpdateDelayMinMinutes) { throw "Update delay range is invalid" }
     if ($Clean.MetadataFeed -notmatch '^https?://') { throw "The metadata feed must be an http(s) URL" }
     Assert-ChocoPackageSource $Clean.PackageSource
+    if ($Clean.StoreSiteUrl -and -not (Test-PackTuneStoreSiteUrl $Clean.StoreSiteUrl)) { throw "The SharePoint site must look like https://<tenant>.sharepoint.com/sites/<name>" }
+    if ($Clean.StoreLibrary -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,60}$') { throw "The name of the document library may contain letters, digits, spaces, . _ -" }
     # The current pair is remembered for later tenant switches
     $Map = ConvertFrom-TenantClients $Clean.TenantClients
     if ($Clean.TenantID -and $Clean.ClientID) { $Map[$Clean.TenantID.ToLower()] = $Clean.ClientID }
@@ -2689,6 +2694,7 @@ function New-PackTuneAppFromCatalog {
 . (Join-Path $PSScriptRoot "PackTune-Runtime.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Release.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Custom.ps1")
+. (Join-Path $PSScriptRoot "PackTune-Store.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Aliases.ps1")
 
 # Tenant insight (import of existing apps, install status): own module, gets the functions it needs from here

@@ -237,20 +237,26 @@ exit 1
 #region notes and the apps in the tenant
 
 function ConvertTo-PackTuneCustomNotes {
-    param([Parameter(Mandatory = $true)]$Info, [Parameter(Mandatory = $true)][string]$AppId)
-    return "$($script:CustomMarker)msi;app=$AppId;ver=$($Info.Version);product=$($Info.ProductCode);upgrade=$($Info.UpgradeCode)"
+    param([Parameter(Mandatory = $true)]$Info, [Parameter(Mandatory = $true)][string]$AppId, [string]$Manifest)
+    $Notes = "$($script:CustomMarker)msi;app=$AppId;ver=$($Info.Version);product=$($Info.ProductCode);upgrade=$($Info.UpgradeCode)"
+    # The start of the manifest hash of the package store: Intune is the trust anchor for what the store holds
+    if ($Manifest) { $Notes += ";manifest=$($Manifest.Substring(0, 16).ToLower())" }
+    return $Notes
 }
 
 function ConvertFrom-PackTuneCustomNotes {
     # Kind, app id, version, product code and upgrade code of a custom app from its notes; $null for anything else
     param([string]$Notes)
     if ($Notes -notlike "$($script:CustomMarker)*") { return $null }
-    $Result = [ordered]@{ Kind = $null; AppId = $null; Version = ""; ProductCode = ""; UpgradeCode = "" }
+    $Result = [ordered]@{ Kind = $null; AppId = $null; Version = ""; ProductCode = ""; UpgradeCode = ""; Manifest = ""; Identity = ""; Thumbprint = "" }
     if ($Notes -match '(?:^|;)custom=(msi|msix)(?:;|$)') { $Result.Kind = $Matches[1] } else { return $null }
     if ($Notes -match '(?:^|;)app=([a-z0-9-]+)(?:;|$)') { $Result.AppId = $Matches[1] }
     if ($Notes -match '(?:^|;)ver=([0-9.]+)(?:;|$)') { $Result.Version = $Matches[1] }
     if ($Notes -match '(?:^|;)product=(\{[0-9A-Fa-f-]{36}\})(?:;|$)') { $Result.ProductCode = $Matches[1].ToUpper() }
     if ($Notes -match '(?:^|;)upgrade=(\{[0-9A-Fa-f-]{36}\})(?:;|$)') { $Result.UpgradeCode = $Matches[1].ToUpper() }
+    if ($Notes -match '(?:^|;)manifest=([0-9a-f]{16})(?:;|$)') { $Result.Manifest = $Matches[1] }
+    if ($Notes -match '(?:^|;)identity=([A-Za-z0-9._-]+)(?:;|$)') { $Result.Identity = $Matches[1] }
+    if ($Notes -match '(?:^|;)thumb=([0-9A-Fa-f]{40})(?:;|$)') { $Result.Thumbprint = $Matches[1].ToUpper() }
     return [pscustomobject]$Result
 }
 
