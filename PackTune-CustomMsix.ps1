@@ -232,7 +232,9 @@ function Invoke-PackTuneCustomMsixBuild {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Folder, [Parameter(Mandatory = $true)][string]$EntryPoint, [string]$Arguments = "",
-        [Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertFolder
+        [Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertFolder,
+        # Network in the capture sandbox: off unless the person allows it for this capture (some setups download content)
+        [switch]$AllowNetwork
     )
     if (-not (Test-PackTuneSandboxAvailable)) { throw "Windows Sandbox is not installed on this computer: custom applications of type Other are captured there." }
     $Folder = Get-PackTuneLongPath -Path $Folder
@@ -244,6 +246,7 @@ function Invoke-PackTuneCustomMsixBuild {
         Version = $ExpectedVersion; PublisherDisplayName = $(if ($PublisherDisplayName) { $PublisherDisplayName } else { $Name }); SkipSigning = $true; Publisher = $Identity.Subject
     }
     if ($BasePackage) { $Params.BasePackage = $BasePackage }
+    if ($AllowNetwork) { $Params.AllowNetwork = $true }
     $Result = Invoke-PackTuneMsixCapture @Params
     if ($Result.State -ne "Succeeded" -or -not $Result.PackagePath) { throw "The capture failed: $($Result.Message) (logs: $($Result.JobPath))" }
 
@@ -356,7 +359,7 @@ function New-PackTuneCustomOtherApp {
     param(
         [Parameter(Mandatory = $true)][string]$Folder, [Parameter(Mandatory = $true)][string]$EntryPoint, [string]$Arguments = "",
         [Parameter(Mandatory = $true)][string]$Name, [string]$Version = "1.0.0.0", [string]$Publisher, [string]$Description, [string]$IconBase64,
-        [ValidateSet("Available", "Required", "None")][string]$Assignment = $script:Settings.Assignment
+        [ValidateSet("Available", "Required", "None")][string]$Assignment = $script:Settings.Assignment, [switch]$AllowNetwork
     )
     Assert-PackTunePrerequisites
     Assert-PackTuneConnection
@@ -371,7 +374,7 @@ function New-PackTuneCustomOtherApp {
     if (@(Get-PackTuneCustomApps | Where-Object { $_.AppId -eq $AppId }).Count -gt 0) { throw "A custom application with this name exists already. Use New version on it." }
 
     Write-Host "Capturing $Name from the folder in a fresh Windows Sandbox (this takes a few minutes)"
-    $Build = Invoke-PackTuneCustomMsixBuild -Folder $Folder -EntryPoint $EntryPoint -Arguments $Arguments -Name $Name -Version $Version -PublisherDisplayName $Publisher
+    $Build = Invoke-PackTuneCustomMsixBuild -Folder $Folder -EntryPoint $EntryPoint -Arguments $Arguments -Name $Name -Version $Version -PublisherDisplayName $Publisher -AllowNetwork:$AllowNetwork
     Write-Host "Building the Win32 package"
     $Package = New-PackTuneCustomMsixPackage -Build $Build -AppId $AppId
     Write-Host "Keeping this version in the package store"
@@ -393,7 +396,7 @@ function Update-PackTuneCustomOtherApp {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AppId,
-        [string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$Version
+        [string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$Version, [switch]$AllowNetwork
     )
     Assert-PackTunePrerequisites
     Assert-PackTuneConnection
@@ -420,7 +423,7 @@ function Update-PackTuneCustomOtherApp {
         if ((Compare-SourceVersion -A $NewVersion -B $OldNotes.Version) -ne 1) { throw "Version $NewVersion is not newer than $($OldNotes.Version)" }
 
         Write-Host "Capturing the update in a fresh Windows Sandbox on top of the previous version"
-        $Build = Invoke-PackTuneCustomMsixBuild -Folder $Folder -EntryPoint $Entry -Arguments $Args -Name ([string]$Old.displayName) -Version $NewVersion -PublisherDisplayName ([string]$Old.publisher) -BasePackage $Msix
+        $Build = Invoke-PackTuneCustomMsixBuild -Folder $Folder -EntryPoint $Entry -Arguments $Args -Name ([string]$Old.displayName) -Version $NewVersion -PublisherDisplayName ([string]$Old.publisher) -BasePackage $Msix -AllowNetwork:$AllowNetwork
         Write-Host "Building the Win32 package"
         $Package = New-PackTuneCustomMsixPackage -Build $Build -AppId $OldNotes.AppId
         Write-Host "Keeping the new version in the package store"

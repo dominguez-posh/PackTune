@@ -73,10 +73,10 @@ function New-PackTuneSigningCertificate { param([string]$Subject, [string]$Outpu
 }
 function Remove-PackTuneSigningCertificate { param([string]$Thumbprint) [void]$script:Events.Add('remove'); [void]$script:CertsRemoved.Add($Thumbprint); $true }
 function Invoke-PackTuneMsixCapture {
-    param([string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$PackageName, [string]$DisplayName, [string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertificateThumbprint, [switch]$SkipSigning, [string]$Publisher)
+    param([string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$PackageName, [string]$DisplayName, [string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertificateThumbprint, [switch]$SkipSigning, [string]$Publisher, [switch]$AllowNetwork)
     [void]$script:Events.Add('capture')
     $baseBytes = if ($BasePackage) { [IO.File]::ReadAllBytes($BasePackage) } else { $null }
-    [void]$script:Captures.Add(@{ Folder = $InstallerFolder; Entry = $EntryPoint; Arguments = $Arguments; PackageName = $PackageName; Version = $Version; Thumbprint = $CertificateThumbprint; SkipSigning = [bool]$SkipSigning; Publisher = $Publisher; Base = $BasePackage; BaseBytes = $baseBytes; Files = @(Get-ChildItem $InstallerFolder -Recurse -File).Name })
+    [void]$script:Captures.Add(@{ Folder = $InstallerFolder; Entry = $EntryPoint; Arguments = $Arguments; PackageName = $PackageName; Version = $Version; Thumbprint = $CertificateThumbprint; SkipSigning = [bool]$SkipSigning; Publisher = $Publisher; Network = [bool]$AllowNetwork; Base = $BasePackage; BaseBytes = $baseBytes; Files = @(Get-ChildItem $InstallerFolder -Recurse -File).Name })
     if ($script:FailCapture) { return [pscustomobject]@{ State = 'Failed'; Message = 'the installer exited with code 1603'; PackagePath = $null; JobPath = 'C:\jobs\x'; Identity = $null; Documentation = $null } }
     $out = Join-Path $work "msix\$PackageName`_$Version.msix"; New-Item -ItemType Directory -Path (Split-Path $out) -Force | Out-Null
     $text = "MSIX $PackageName $Version publisher $Publisher"
@@ -189,7 +189,8 @@ $tmpZip = Join-Path $work 'v2-installer.zip'; [IO.File]::WriteAllBytes($tmpZip, 
 Test-Check 'update: installer.zip of the new version holds the files of the new folder' ((Test-Path (Join-Path $work 'v2-files\extra.dll')) -and ((Get-Content (Join-Path $work 'v2-files\setup.exe') -Raw).Trim() -eq 'setup v2'))
 # update without a new folder: the stored installer files are used (edited export -> same entry)
 $script:Captures.Clear()
-$id3 = Update-PackTuneCustomOtherApp -AppId $id2 -Version '2.0.0.0'
+$id3 = Update-PackTuneCustomOtherApp -AppId $id2 -Version '2.0.0.0' -AllowNetwork
+Test-Check 'network: off for a capture unless it is allowed for that one (update with -AllowNetwork)' ((-not $cap.Network) -and (-not $cap2.Network) -and $script:Captures[0].Network)
 Test-Check 'update without a folder: the stored installer files of the previous version are used, the given version too' (($script:Captures[0].Folder -like '*previous*installer') -and ($script:Captures[0].Version -eq '2.0.0.0') -and ($script:Captures[0].Files -contains 'extra.dll'))
 $threw = $false; try { $null = Update-PackTuneCustomOtherApp -AppId $id3 -Version '1.0.0.0' } catch { $threw = $_.Exception.Message -like '*not newer*' }
 Test-Check 'update: a version that is not newer is refused' $threw

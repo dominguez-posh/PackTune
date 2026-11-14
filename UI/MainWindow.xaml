@@ -1031,6 +1031,7 @@
                             <ComboBox x:Name="CmbOtherEntry" IsEditable="True" AutomationProperties.Name="Entry point"/>
                             <TextBlock Text="Arguments (silent install)" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
                             <TextBox x:Name="TxtOtherArgs" AutomationProperties.Name="Arguments" ToolTip="e.g. /S or /VERYSILENT /NORESTART"/>
+                            <CheckBox x:Name="ChkOtherNetwork" Margin="0,12,0,0" AutomationProperties.Name="Allow network for this capture"><StackPanel><TextBlock Text="Allow network for this capture"/><TextBlock Text="Off by default: the installer runs without network. Turn it on only if the setup downloads content." Style="{StaticResource Hint}" TextWrapping="Wrap"/></StackPanel></CheckBox>
                             <Grid x:Name="GridOtherIdentity" Margin="0,12,0,0">
                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="120"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
                                 <StackPanel Margin="0,0,8,0"><TextBlock Text="Name" Style="{StaticResource FieldLabel}"/><TextBox x:Name="TxtOtherName" Margin="0,4,0,0" AutomationProperties.Name="Application name"/></StackPanel>

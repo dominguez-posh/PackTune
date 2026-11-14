@@ -710,6 +710,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke 'Other: the panel for the installation folder shows, MSI panel hidden, nothing to deploy yet' ($ui.PanelCustomOther.Visibility -eq 'Visible' -and $ui.PanelCustomMsi.Visibility -eq 'Collapsed' -and -not $ui.BtnCustomDeploy.IsEnabled -and $ui.BtnCustomDeploy.Content -eq 'Capture and deploy' -and $ui.BtnCustomTest.Visibility -eq 'Collapsed') ''
             Set-OtherFolder $s.Dir
             Test-Smoke 'Other: entry point candidates (exe, cmd), setup.exe preselected, name from the folder' (@($ui.CmbOtherEntry.ItemsSource).Count -eq 2 -and $ui.CmbOtherEntry.SelectedItem -eq 'setup.exe' -and $ui.TxtOtherName.Text -eq 'smoke other') ((@($ui.CmbOtherEntry.ItemsSource)) -join ',')
+            Test-Smoke 'Other: network for the capture is offered and off by default' ($ui.ChkOtherNetwork -and -not $ui.ChkOtherNetwork.IsChecked -and $ui.ChkOtherNetwork.Visibility -eq 'Visible')
             Test-Smoke 'Other: the button is on when folder, entry point, name and version are there' ($ui.BtnCustomDeploy.IsEnabled) ''
             $ui.TxtOtherName.Text = ''
             Test-Smoke 'Other: without a name there is nothing to deploy' (-not $ui.BtnCustomDeploy.IsEnabled) ''

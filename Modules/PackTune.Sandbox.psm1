@@ -19,6 +19,7 @@ $script:LearnOfflinePage = 'https://learn.microsoft.com/en-us/windows/msix/packa
 $script:Options = @{
     MemoryMB          = 4096
     VGpu              = $true
+    # Network of the test lab (it installs Chocolatey or winget from the internet); a capture has none unless -AllowNetwork
     Networking        = $true
     JobTimeoutMinutes = 45
     TimestampUrl      = 'http://timestamp.digicert.com'
@@ -163,7 +164,7 @@ function New-SandboxConfig {
   <vGPU>$(if ($script:Options.VGpu) { 'Enable' } else { 'Disable' })</vGPU>
   <Networking>$(if ($Networking) { 'Enable' } else { 'Disable' })</Networking>
   <MemoryInMB>$($script:Options.MemoryMB)</MemoryInMB>
-  <ClipboardRedirection>Enable</ClipboardRedirection>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
   <MappedFolders>
 $Folders
   </MappedFolders>
@@ -630,7 +631,9 @@ function Invoke-PackTuneMsixCapture {
     param(
         [Parameter(Mandatory = $true)][string]$InstallerFolder, [Parameter(Mandatory = $true)][string]$EntryPoint, [string]$Arguments = '',
         [string]$PackageName, [string]$DisplayName, [string]$Version = '1.0.0.0', [string]$PublisherDisplayName, [string]$InstallLocation = '',
-        [string]$BasePackage, [string]$Publisher, [string]$CertificateThumbprint, [switch]$SkipSigning, [switch]$AllowNoTimestamp, [int]$TimeoutMinutes
+        [string]$BasePackage, [string]$Publisher, [string]$CertificateThumbprint, [switch]$SkipSigning, [switch]$AllowNoTimestamp, [int]$TimeoutMinutes,
+        # The installer runs without network unless this is given for this capture (some setups download content)
+        [switch]$AllowNetwork
     )
     if (-not $TimeoutMinutes) { $TimeoutMinutes = [int]$script:Options.JobTimeoutMinutes }
     $Entry = Get-EntryCommand -Folder $InstallerFolder -EntryPoint $EntryPoint -Arguments $Arguments -SandboxFolder "$script:SandboxLocal\input\installer"
@@ -684,7 +687,7 @@ function Invoke-PackTuneMsixCapture {
 
     $What = if ($Base) { "update of $($Base.DisplayName) $($Base.Version) to $Version" } else { "$DisplayName $Version" }
     Write-SandboxLog "Capturing $What from the folder (entry point $($Entry.Relative)) in a fresh sandbox ..."
-    $Wsb = New-SandboxConfig -JobPath $Job -Networking ([bool]$script:Options.Networking) -InputFolder (Resolve-Path -LiteralPath $InstallerFolder).ProviderPath
+    $Wsb = New-SandboxConfig -JobPath $Job -Networking ([bool]$AllowNetwork) -InputFolder (Resolve-Path -LiteralPath $InstallerFolder).ProviderPath
     Start-SandboxProcess -WsbPath $Wsb
     $Status = Wait-SandboxJob -JobPath $Job -TimeoutMinutes $TimeoutMinutes
 

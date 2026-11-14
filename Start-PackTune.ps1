@@ -1577,6 +1577,8 @@ function Show-CustomDialog([string]$Mode, $App) {
     $ui.CmbCustomMsi.Visibility = 'Collapsed'
     Set-CustomPath ''
     foreach ($c in $ui.TxtOtherFolder, $ui.TxtOtherArgs, $ui.TxtOtherName, $ui.TxtOtherPublisher) { $c.Text = '' }
+    # Network in the capture sandbox: off unless the person turns it on for this capture
+    $ui.ChkOtherNetwork.IsChecked = $false
     $ui.CmbOtherEntry.ItemsSource = @(); $ui.CmbOtherEntry.Text = ''
     $ui.TxtOtherVersion.Text = if ($Mode -eq 'Update') { Get-PackTuneNextVersion $App.Version } else { '1.0.0.0' }
     $ui.TxtOtherName.IsEnabled = $isNew; $ui.TxtOtherPublisher.IsEnabled = $isNew
@@ -1615,13 +1617,13 @@ Add-Click $ui.BtnCustomDeploy {
         if ($version -notmatch '^\d+(\.\d+){0,3}$') { throw "The version '$version' must be a number like 1.0.0.0." }
         if ($script:CustomMode -eq 'Update') {
             $old = $script:CustomUpdateApp
-            $arguments = @{ Id = $old.Id; Version = $version }
+            $arguments = @{ Id = $old.Id; Version = $version; Network = [bool]$ui.ChkOtherNetwork.IsChecked }
             if ($folder) { $arguments.Folder = $folder }
             if ($entry) { $arguments.Entry = $entry }
             if ($ui.TxtOtherArgs.Text.Trim()) { $arguments.Args = $ui.TxtOtherArgs.Text.Trim() }
             Close-Dialog
             Update-UiToken
-            $work = 'param($Id, $Version, $Folder, $Entry, $Args) $p = @{ AppId = $Id; Version = $Version }; if ($Folder) { $p.InstallerFolder = $Folder }; if ($Entry) { $p.EntryPoint = $Entry }; if ($Args) { $p.Arguments = $Args }; Update-PackTuneCustomOtherApp @p'
+            $work = 'param($Id, $Version, $Folder, $Entry, $Args, $Network) $p = @{ AppId = $Id; Version = $Version; AllowNetwork = [bool]$Network }; if ($Folder) { $p.InstallerFolder = $Folder }; if ($Entry) { $p.EntryPoint = $Entry }; if ($Args) { $p.Arguments = $Args }; Update-PackTuneCustomOtherApp @p'
             [void](Start-UiTask -Kind 'custom' -Title "Capturing version $version of $($old.DisplayName) in Windows Sandbox (a few minutes)" -Display "$($old.DisplayName) $version" -NeedsAuth -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
                 param($Result, $Job)
                 if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] published: devices with the old version get it through supersedence." 'Success'; Show-Toast "$($Job.Display) was published." 'ok' }
@@ -1632,8 +1634,8 @@ Add-Click $ui.BtnCustomDeploy {
             $assign = $script:AssignValues[[Math]::Max(0, $ui.CmbOtherAssign.SelectedIndex)]
             Close-Dialog
             Update-UiToken
-            $arguments = @{ Folder = $folder; Entry = $entry; Args = $ui.TxtOtherArgs.Text.Trim(); Name = $name; Version = $version; Publisher = $ui.TxtOtherPublisher.Text.Trim(); Assignment = $assign }
-            $work = 'param($Folder, $Entry, $Args, $Name, $Version, $Publisher, $Assignment) New-PackTuneCustomOtherApp -Folder $Folder -EntryPoint $Entry -Arguments $Args -Name $Name -Version $Version -Publisher $Publisher -Assignment $Assignment'
+            $arguments = @{ Folder = $folder; Entry = $entry; Args = $ui.TxtOtherArgs.Text.Trim(); Name = $name; Version = $version; Publisher = $ui.TxtOtherPublisher.Text.Trim(); Assignment = $assign; Network = [bool]$ui.ChkOtherNetwork.IsChecked }
+            $work = 'param($Folder, $Entry, $Args, $Name, $Version, $Publisher, $Assignment, $Network) New-PackTuneCustomOtherApp -Folder $Folder -EntryPoint $Entry -Arguments $Args -Name $Name -Version $Version -Publisher $Publisher -Assignment $Assignment -AllowNetwork:([bool]$Network)'
             [void](Start-UiTask -Kind 'custom' -Title "Capturing $name in Windows Sandbox (a few minutes), then deploying" -Display "$name $version" -NeedsAuth -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
                 param($Result, $Job)
                 if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] captured, stored and created in Intune." 'Success'; Show-Toast "$($Job.Display) is in Intune." 'ok' }
