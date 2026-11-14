@@ -2695,6 +2695,7 @@ function New-PackTuneAppFromCatalog {
 . (Join-Path $PSScriptRoot "PackTune-Release.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Custom.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Store.ps1")
+. (Join-Path $PSScriptRoot "PackTune-CustomMsix.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Aliases.ps1")
 
 # Tenant insight (import of existing apps, install status): own module, gets the functions it needs from here

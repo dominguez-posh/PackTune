@@ -276,7 +276,8 @@ function Get-PackTuneCustomApps {
         $Intents = if ($WithAssignments) { @(Get-PackTuneAppIntents -AppId $App.id | Select-Object -Unique) } else { @() }
         [pscustomobject]@{
             Id = [string]$App.id; DisplayName = [string]$App.displayName; Kind = $Notes.Kind; AppId = $Notes.AppId; Version = $Notes.Version
-            ProductCode = $Notes.ProductCode; UpgradeCode = $Notes.UpgradeCode; Publisher = [string]$App.publisher; Created = $App.createdDateTime
+            ProductCode = $Notes.ProductCode; UpgradeCode = $Notes.UpgradeCode; Manifest = $Notes.Manifest; Identity = $Notes.Identity; Thumbprint = $Notes.Thumbprint
+            Publisher = [string]$App.publisher; Created = $App.createdDateTime
             Intents = $Intents; Source = "Custom"; IsChocolatey = $false
         }
     }
@@ -306,7 +307,7 @@ function Add-PackTuneCustomIntuneApp {
     param(
         [Parameter(Mandatory = $true)]$Info, [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)]$Built,
         [Parameter(Mandatory = $true)][string]$DisplayName, [string]$Description, [string]$Publisher, [string]$IconBase64,
-        [string]$Architecture = $script:Settings.Architecture, [string]$MinimumWindows = "W10_1607"
+        [string]$Architecture = $script:Settings.Architecture, [string]$MinimumWindows = "W10_1607", [string]$Manifest
     )
     $DetectionFile = $Built.DetectionFile
     $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }
@@ -317,7 +318,7 @@ function Add-PackTuneCustomIntuneApp {
         Description          = $(if ($Description) { $Description } else { $DisplayName })
         Publisher            = $(if ($Publisher) { $Publisher } else { "-" })
         AppVersion           = $Info.Version
-        Notes                = ConvertTo-PackTuneCustomNotes -Info $Info -AppId $AppId
+        Notes                = ConvertTo-PackTuneCustomNotes -Info $Info -AppId $AppId -Manifest $Manifest
         InstallExperience    = "system"
         RestartBehavior      = "suppress"
         DetectionRule        = $DetectionRule
@@ -345,6 +346,27 @@ function Get-PackTuneMsiIconBase64 {
     }
     catch { Write-Verbose "The icon of the MSI could not be used: $($_.Exception.Message)"; return $null }
     finally { if ($Temp) { Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue } }
+}
+
+function Save-PackTuneCustomMsiToStore {
+    <#
+        Keeps the MSI version in the package store when a store is set up (the MSI as the "installer files", the package, the
+        recipe). No site set: nothing is stored (a warning). A site that is set but not ready is an error: the version
+        could not be exported later. Returns the manifest hash or $null.
+    #>
+    param([Parameter(Mandatory = $true)]$Info, [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)]$Built, [string]$Extra)
+    if (-not $script:Settings.StoreSiteUrl) { Write-Warning "No package store is set up: this version cannot be exported or edited later (Start page, Package store)."; return $null }
+    $State = Get-PackTuneStoreState
+    if ($State.State -ne "Ready") { throw "The package store is not ready: $($State.Message)" }
+    $Folder = Join-Path ([IO.Path]::GetTempPath()) ("packtune-msi-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    New-Item -ItemType Directory -Path $Folder -Force | Out-Null
+    try {
+        Copy-Item -LiteralPath $Info.Path -Destination (Join-Path $Folder $Info.FileName)
+        $Recipe = [ordered]@{ format = "PackTune.Recipe"; kind = "msi"; app = $AppId; name = $Info.Name; version = $Info.Version; publisher = $Info.Manufacturer; productCode = $Info.ProductCode; upgradeCode = $Info.UpgradeCode; msi = $Info.FileName; arguments = $Extra }
+        Write-Host "Keeping this version in the package store"
+        return (Save-PackTuneCustomVersionToStore -AppId $AppId -Version $Info.Version -Kind "msi" -InstallerFolder $Folder -Recipe $Recipe -IntuneWin $Built.Package.Path -Store $State.Store)
+    }
+    finally { Remove-Item -LiteralPath $Folder -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 function New-PackTuneCustomMsiApp {
@@ -377,8 +399,9 @@ function New-PackTuneCustomMsiApp {
     Write-Host "Building the package for $($Info.Name) $($Info.Version)"
     $Built = New-PackTuneCustomAppPackage -Info $Info -AppId $AppId -ExtraArguments $Extra
     $Icon = Get-PackTuneMsiIconBase64 -Info $Info -IconFile $IconFile
+    $Manifest = Save-PackTuneCustomMsiToStore -Info $Info -AppId $AppId -Built $Built -Extra $Extra
     Write-Host "Creating and uploading $Name as win32 App to Intune"
-    $App = Add-PackTuneCustomIntuneApp -Info $Info -AppId $AppId -Built $Built -DisplayName $Name -Description $Description -Publisher $(if ($Publisher) { $Publisher } else { $Info.Manufacturer }) -IconBase64 $Icon -Architecture $Architecture
+    $App = Add-PackTuneCustomIntuneApp -Info $Info -AppId $AppId -Built $Built -DisplayName $Name -Description $Description -Publisher $(if ($Publisher) { $Publisher } else { $Info.Manufacturer }) -IconBase64 $Icon -Architecture $Architecture -Manifest $Manifest
     Set-PackTuneAssignment -Id $App.id -Assignment $Assignment
     Write-Host "Deployment of $Name was successful"
     return $App.id
@@ -419,21 +442,27 @@ function Publish-PackTuneCustomVersion {
     if (-not $Architecture) { $Architecture = $script:Settings.Architecture }
     $Windows = Get-PackTuneMinimumWindows $Old
     if (-not $Windows) { $Windows = "W10_1607" }
+    $Manifest = Save-PackTuneCustomMsiToStore -Info $Info -AppId $AppKey -Built $Built -Extra $Extra
     Write-Host "Creating and uploading the new app"
-    $New = Add-PackTuneCustomIntuneApp -Info $Info -AppId $AppKey -Built $Built -DisplayName ([string]$Old.displayName) -Description ([string]$Old.description) -Publisher ([string]$Old.publisher) -IconBase64 $Icon -Architecture $Architecture -MinimumWindows $Windows
+    $New = Add-PackTuneCustomIntuneApp -Info $Info -AppId $AppKey -Built $Built -DisplayName ([string]$Old.displayName) -Description ([string]$Old.description) -Publisher ([string]$Old.publisher) -IconBase64 $Icon -Architecture $Architecture -MinimumWindows $Windows -Manifest $Manifest
     Complete-PackTuneSupersedingApp -Old $Old -New $New
     return $New.id
 }#New version of a custom MSI app through supersedence
 
 function Remove-PackTuneCustomApp {
-    # Removes a custom app from the tenant (only apps with the custom marker); devices keep the installed software
-    param([Parameter(Mandatory = $true)][string]$Id)
+    # Removes a custom app from the tenant (only apps with the custom marker); devices keep the installed software.
+    # -DeleteStore also deletes the stored files when this was the last Intune app of the application (SharePoint keeps them in its recycle bin).
+    param([Parameter(Mandatory = $true)][string]$Id, [switch]$DeleteStore)
     $App = @(Get-PackTuneCustomApps | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
     if (-not $App) { throw "App $Id is not a custom application of this tool or does not exist any more, nothing was removed" }
     Write-Host "Removing $($App.DisplayName) from Intune"
     Invoke-IntuneModule { Remove-IntuneWin32App -ID $Id } | Out-Null
     if (@(Invoke-IntuneModule { Get-IntuneWin32App } | Where-Object { $_.id -eq $Id }).Count -gt 0) { throw "Intune still lists $($App.DisplayName), it was not removed" }
     Write-Host "$($App.DisplayName) was removed from Intune. Devices keep the installed software."
+    if ($DeleteStore -and $App.AppId -and @(Get-PackTuneCustomApps | Where-Object { $_.AppId -eq $App.AppId }).Count -eq 0) {
+        Remove-PackTuneCustomStore -AppId $App.AppId
+        Write-Host "The stored files of $($App.DisplayName) were deleted from the package store."
+    }
 }#Removes a custom application from the tenant
 
 function Test-PackTuneCustomApp {
