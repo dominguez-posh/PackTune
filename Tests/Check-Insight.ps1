@@ -178,8 +178,12 @@ $ok = New-InsightGraphContext -Name fake -Invoke { param($m, $p, $b)
 $created = Set-InsightStatusScript -Context $ok
 Test-Check 'status script created and assigned hourly' ($created.Created -and $calls -contains 'POST /beta/deviceManagement/deviceHealthScripts' -and $calls -contains 'POST /beta/deviceManagement/deviceHealthScripts/hs1/assign')
 $deny = New-InsightGraphContext -Name fake -Invoke { param($m, $p, $b) throw 'Graph GET failed (403): The tenant is not licensed for this feature' }
+$Global:AccessToken = [pscustomobject]@{ Scopes = @('DeviceManagementScripts.ReadWrite.All') }
 $degraded = Set-InsightStatusScript -Context $deny
-Test-Check 'no licence: degrades without throwing' (-not $degraded.Created -and $degraded.Message -like '*not available*')
+Test-Check 'no licence (scope granted): degrades without throwing, license hint' (-not $degraded.Created -and $degraded.Message -like '*not available*' -and -not $degraded.MissingScope)
+$Global:AccessToken = [pscustomobject]@{ Scopes = @('DeviceManagementConfiguration.ReadWrite.All') }
+$noScope = Set-InsightStatusScript -Context $deny
+Test-Check '403 without the Scripts scope: missing permission, not the license' ($noScope.MissingScope -eq 'DeviceManagementScripts.ReadWrite.All' -and $noScope.Message -like 'Missing permission*')
 
 # ---- diagnostics: admin center pointer and zip extraction
 $info = Get-InsightDiagnosticsInfo -ManagedDeviceId 'm1' -Package 'git'
