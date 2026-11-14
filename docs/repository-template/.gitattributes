@@ -1,0 +1,6 @@
+# Package files are binary and must never be changed by line-ending conversion: their SHA256 is in manifest.json.
+* -text
+*.json text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.ps1 text eol=lf

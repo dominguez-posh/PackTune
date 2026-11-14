@@ -1573,6 +1573,46 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $true
             }
         } } }
+    @{ Name = 'repositories: add a public repository, list, approval, remove (fake GitHub)'; Phase = 0; Do = {
+        param($s)
+        if (-not (Test-Idle)) { return $false }
+        if ($s.Phase -eq 0) {
+            Show-Page 'Settings'; $window.UpdateLayout()
+            Test-Smoke 'repositories: the section is on the Settings page, empty at first' ($ui.CardRepositories.IsVisible -and @(Get-PackTuneRepositories).Count -eq 0 -and $ui.TxtRepoEmpty.Visibility -eq 'Visible' -and -not $ui.BtnRepoRemove.IsEnabled)
+            $ui.TxtRepoAddress.Text = 'not a repo'
+            $threw = $false; try { & $script:ClickActions[$ui.BtnRepoAdd] } catch { $threw = $true }
+            Test-Smoke 'repositories: an address that is no repository is refused before any request' ($threw -and @(Get-PackTuneRepositories).Count -eq 0)
+            $ui.TxtRepoAddress.Text = 'https://github.com/demo/packages'
+            & $script:ClickActions[$ui.BtnRepoAdd]
+            $s.Phase = 1; return $false
+        }
+        if ($s.Phase -eq 1) {
+            Test-Smoke 'repositories: connected, pinned, public means third-party and read only' (@(Get-PackTuneRepositories).Count -eq 1 -and (Get-PackTuneRepositories)[0].ThirdParty -and (Get-PackTuneRepositories)[0].RepoId -eq 7701 -and @($ui.LstRepos.ItemsSource).Count -eq 1 -and "$(@($ui.LstRepos.ItemsSource)[0])" -like '*third-party source*') "$(@($ui.LstRepos.ItemsSource) -join '|')"
+            Test-Smoke 'repositories: no write grant for a third-party source' (-not $ui.BtnRepoGrantWrite.IsEnabled -and -not $ui.BtnRepoMove.IsEnabled)
+            $ui.LstRepos.SelectedIndex = 0
+            $s.Phase = 2; return $false
+        }
+        if ($s.Phase -eq 2) {
+            Test-Smoke 'repositories: the app is listed with source label, version and "needs approval"' ($script:RepoRows.Count -eq 1 -and $script:RepoRows[0].Data.Source -eq 'Repository: packages' -and $script:RepoRows[0].Data.Latest -eq '1.0.0' -and $script:RepoRows[0].Data.Name -eq 'Demo Tool' -and -not $script:RepoRows[0].Data.Approved -and $script:RepoRows[0]['Assigned'] -eq 'Needs approval') "rows=$($script:RepoRows.Count)"
+            Test-Smoke 'repositories: the unprotected-branch / third-party warning is shown' ($ui.TxtRepoWarnings.Text -like '*Third-party source*') $ui.TxtRepoWarnings.Text
+            $ui.CardRepositories.BringIntoView(); $window.UpdateLayout(); Save-SmokeShot '95-repositories'
+            $ui.LstRepoApps.SelectedIndex = 0
+            $threw = $false; try { & $script:ClickActions[$ui.BtnRepoDeploy] } catch { $threw = $_.Exception.Message -like '*needs your approval*' }
+            Test-Smoke 'repositories: deploying an unapproved version is refused in the interface' $threw
+            $req = Get-PackTuneRepoApprovalRequest -Repository 'demo/packages' -AppId 'demo-tool-0a1b2c3d' -Version '1.0.0'
+            $text = Format-RepoApprovalText $req
+            Test-Smoke 'repositories: the approval text shows third-party label, commit, signature, manifest and every file hash' ($text -like '*THIRD-PARTY SOURCE*' -and $text -like "*Commit $($req.Commit.Sha.Substring(0, 12))*" -and $text -like '*Signature:*' -and $text -like "*$($req.Manifest)*" -and $text -like '*installer.zip*' -and $text -like '*SHA256*') $text
+            & $script:ClickActions[$ui.BtnRepoApprove]
+            $s.Phase = 3; return $false
+        }
+        if ($s.Phase -eq 3) {
+            Test-Smoke 'repositories: approving records the exact manifest, the list shows Approved' (@(Get-PackTuneRepoApprovals).Count -eq 1 -and $script:RepoRows.Count -eq 1 -and $script:RepoRows[0].Data.Approved -and $script:RepoRows[0]['Assigned'] -eq 'Approved') "approvals=$(@(Get-PackTuneRepoApprovals).Count) rows=$($script:RepoRows.Count)"
+            & $script:ClickActions[$ui.BtnRepoRemove]
+            Test-Smoke 'repositories: removing disconnects it, the approvals stay as a record' (@(Get-PackTuneRepositories).Count -eq 0 -and $script:RepoRows.Count -eq 0 -and @(Get-PackTuneRepoApprovals).Count -eq 1 -and $ui.TxtRepoEmpty.Visibility -eq 'Visible')
+            Show-Page 'Start'
+            $s.Phase = 4; return $false
+        }
+        $true } }
     @{ Name = 'sign out'; Do = {
         Test-Smoke 'account menu offers sign out and the other tenants' ($true)
         Disconnect-Intune

@@ -177,6 +177,7 @@ Deployments run one after another in the background, and the window stays usable
 - **Tenant and app registration**: tenant (domain or ID) and client ID. *Create or update app registration* runs the setup again, adds missing permissions and the admin consent.
 - **Deployment defaults**: assignment, preferred source, architecture, version, update mode and the default schedule for new apps.
 - **Package sources**: the metadata feed (read on this computer), the package source used on the devices (`choco --source`), and the download URL of the Chocolatey bootstrap. Empty = the community repository.
+- **Repositories**: custom applications from GitHub repositories (public without a sign-in, private with a read token, any number of them). Apps show the source "Repository: <name>"; every new version needs your approval (commit, author, signature, file hashes shown) before **Deploy to Intune**; **Move to repository** copies an app with all versions from the package store, verifies it and keeps SharePoint unless you confirm the removal. Guide, layout and template repository: [docs/REPOSITORIES.md](docs/REPOSITORIES.md).
 - Module installation and the work folder.
 
 Settings are saved in `%LOCALAPPDATA%\PackTune\settings.json` and are also used by the command line functions. On the first start after the rename they are copied (not moved) from `%LOCALAPPDATA%\IntuneChocoDeployment`, together with the feed and icon caches. Package infos are cached for 24 hours; SVG icons are rendered once with Edge and kept in the work folder.
@@ -312,6 +313,7 @@ Catalog entries live in [catalog.json](catalog.json): `{ "id": "<choco id>", "wi
 Run in Windows PowerShell 5.1 from the repository folder. None of them contacts a tenant.
 
 - `Tests\Invoke-GuiSmoke.ps1`: starts the interface off-screen with a fake IntuneWin32App module (`Tests\Fakes`), its own `%LOCALAPPDATA%` and a stand-in for the Microsoft sign-in. It drives every page and checks the results. Package infos come from the real Chocolatey feed.
+- `Tests\Check-Repos.ps1`: custom repositories against a fake GitHub in memory (pinning, index, hash and zip-slip checks, approval, signed commits, token handling, rate limits, deployment of a repository MSI app, Move with write grant, read-back, release assets, confirmed removal, template and clone check).
 - `Tests\Check-Insight.ps1`: import, status and device-log functions with fake Graph responses.
 - `Tests\Check-Schedule.ps1`: policy round trip through the notes, fingerprint, notes length and the generated device scripts (they are parsed, never run).
 - `Tests\Check-Toast.ps1`: the device notifications (generated scripts, escaped toast XML, the activation that only maps to fixed actions, toast or window route, the whole flow with stand-ins).

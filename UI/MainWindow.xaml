@@ -874,6 +874,58 @@
                                             <TextBlock x:Name="TxtSettingsPath" Style="{StaticResource Hint}" Margin="0,10,0,0"/>
                                         </StackPanel>
                                     </Border>
+
+                                    <!-- region: Repositories (custom repositories on GitHub; Start-PackTune.ps1 region "Repositories") -->
+                                    <Border x:Name="CardRepositories" Style="{StaticResource CardBox}" Padding="20,18" Margin="0,18,0,0">
+                                        <StackPanel>
+                                            <TextBlock Text="Repositories" Style="{StaticResource CardTitle}"/>
+                                            <TextBlock x:Name="TxtRepoHint" Style="{StaticResource Hint}" Margin="0,4,0,12" FontSize="13" TextWrapping="Wrap" Text="Custom applications from GitHub repositories, next to the package store. Public repositories need no sign-in, private ones a token with Contents (read) on that repository only. Every new version needs your approval before it can be deployed."/>
+                                            <ListBox x:Name="LstRepos" Style="{StaticResource PlainList}" MaxHeight="150" AutomationProperties.Name="Connected repositories"/>
+                                            <TextBlock x:Name="TxtRepoEmpty" Style="{StaticResource Hint}" Margin="0,4,0,0" Text="No repository connected."/>
+                                            <Grid Margin="0,12,0,0">
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                <StackPanel>
+                                                    <TextBlock Text="Repository (owner/name or URL)" Style="{StaticResource FieldLabel}" Margin="0,0,0,4"/>
+                                                    <TextBox x:Name="TxtRepoAddress" AutomationProperties.Name="Repository owner and name"/>
+                                                </StackPanel>
+                                                <StackPanel Grid.Column="2">
+                                                    <TextBlock Text="Token (private repositories only, stays on this PC)" Style="{StaticResource FieldLabel}" Margin="0,0,0,4"/>
+                                                    <PasswordBox x:Name="PwdRepoToken" AutomationProperties.Name="Token for a private repository"/>
+                                                </StackPanel>
+                                            </Grid>
+                                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                                <CheckBox x:Name="ChkRepoOwn" Content="This is our own repository (not a third-party source)" Margin="0,0,16,0"/>
+                                                <CheckBox x:Name="ChkRepoSigned" Content="Require verified commits"/>
+                                            </StackPanel>
+                                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                                <Button x:Name="BtnRepoAdd" Content="Add repository" Style="{StaticResource SmallButton}" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnRepoRefresh" Content="Refresh" Style="{StaticResource SmallButton}" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnRepoRemove" Content="Remove" Style="{StaticResource SmallButton}"/>
+                                            </StackPanel>
+                                            <TextBlock x:Name="TxtRepoWarnings" Style="{StaticResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                                            <TextBlock Text="Applications in the selected repository" Style="{StaticResource FieldLabel}" Margin="0,18,0,4"/>
+                                            <Border BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="0,1,0,0">
+                                                <ListBox x:Name="LstRepoApps" Style="{StaticResource PlainList}" ItemTemplate="{StaticResource CustomRowTemplate}" MaxHeight="300" AutomationProperties.Name="Applications in the repository"/>
+                                            </Border>
+                                            <TextBlock x:Name="TxtRepoAppsEmpty" Style="{StaticResource Hint}" Margin="0,4,0,0" Text="Select a repository."/>
+                                            <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                                                <Button x:Name="BtnRepoApprove" Content="Review and approve ..." Style="{StaticResource SmallButton}" Margin="0,0,8,0"/>
+                                                <Button x:Name="BtnRepoDeploy" Content="Deploy to Intune" Style="{StaticResource SmallButton}"/>
+                                            </StackPanel>
+                                            <TextBlock Text="Move a custom application from the package store" Style="{StaticResource FieldLabel}" Margin="0,22,0,4"/>
+                                            <TextBlock Style="{StaticResource Hint}" Margin="0,0,0,8" TextWrapping="Wrap" Text="Copies every version into the selected repository, checks it by reading it back, and keeps SharePoint unless you confirm the removal afterwards. Needs a write token (Contents: write) for that repository, asked only here."/>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="12"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                                <PasswordBox x:Name="PwdRepoWrite" AutomationProperties.Name="Write token"/>
+                                                <Button x:Name="BtnRepoGrantWrite" Grid.Column="2" Content="Grant write access" Style="{StaticResource SmallButton}" HorizontalAlignment="Left"/>
+                                            </Grid>
+                                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                                <ComboBox x:Name="CmbRepoMove" MinWidth="320" Margin="0,0,8,0" AutomationProperties.Name="Custom application to move"/>
+                                                <Button x:Name="BtnRepoMove" Content="Move to repository ..." Style="{StaticResource SmallButton}"/>
+                                            </StackPanel>
+                                        </StackPanel>
+                                    </Border>
+                                    <!-- end region: Repositories -->
                                 </StackPanel>
                             </ScrollViewer>
                         </Grid>

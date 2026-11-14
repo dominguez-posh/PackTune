@@ -2779,6 +2779,7 @@ function New-PackTuneAppFromCatalog {
 . (Join-Path $PSScriptRoot "PackTune-Custom.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Store.ps1")
 . (Join-Path $PSScriptRoot "PackTune-CustomMsix.ps1")
+. (Join-Path $PSScriptRoot "PackTune-Repos.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Aliases.ps1")
 
 # Windows Sandbox functions (test lab, MSIX capture, signing, capture tools): own module, no other tool needed

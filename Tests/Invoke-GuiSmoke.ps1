@@ -130,6 +130,7 @@ $psi.EnvironmentVariables['PACKTUNE_SANDBOX_LAUNCHER'] = (Join-Path $PSScriptRoo
 $psi.EnvironmentVariables['PACKTUNE_POPULAR_FIXTURE'] = $fixture
 $psi.EnvironmentVariables['PACKTUNE_SMOKE_OUT'] = $OutDir
 $psi.EnvironmentVariables['PACKTUNE_SMOKE_AUTHORITY'] = "http://localhost:$authorityPort"
+$psi.EnvironmentVariables['PACKTUNE_FAKE_GITHUB'] = (Join-Path $PSScriptRoot 'Fakes\FakeGitHub.ps1')
 $process = [System.Diagnostics.Process]::Start($psi)
 $stdout = $process.StandardOutput.ReadToEndAsync()
 $stderr = $process.StandardError.ReadToEndAsync()

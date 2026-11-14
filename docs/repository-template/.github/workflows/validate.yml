@@ -1,0 +1,16 @@
+name: Validate PackTune repository
+# Reads only: checks packtune.json, every manifest.json and the hash of every file (the same checks PackTune makes).
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check the repository
+        shell: pwsh
+        run: ./tools/Check-PackTuneRepository.ps1 -Path .
