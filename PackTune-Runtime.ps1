@@ -18,7 +18,7 @@ $script:RuntimeMarker = "PackTuneRuntimeApp"
 $script:OldWingetRuntimeName = "winget runtime"
 $script:OldWingetRuntimeMarker = "WingetRuntimeApp"
 # Raised when the install, update or detection script of the runtime app changes (part of its detection)
-$script:RuntimeRevision = 4
+$script:RuntimeRevision = 5
 
 #region scripts
 
@@ -187,13 +187,13 @@ finally { Exit-DeploymentLock }
 try {
     Remove-Item -LiteralPath (Join-Path $RuntimeRoot "update.ps1") -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "update.ps1") -Destination $RuntimeRoot -Force -ErrorAction Stop
-    # The tray agent "PackTune Updates": a script in the protected folder (users read it, they cannot change it), started by a task of the Users group at every logon
+    # The tray agent "PackTune Updates" (one per user session: the task runs in parallel for every user who signs in, e.g. on multi-session hosts; the agent's own Local\ mutex keeps it to one per session): a script in the protected folder (users read it, they cannot change it), started by a task of the Users group at every logon
     Remove-Item -LiteralPath (Join-Path $RuntimeRoot "tray.ps1") -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "tray.ps1") -Destination $RuntimeRoot -Force -ErrorAction Stop
     $TrayPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
     $TrayAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$TrayPowerShell`" -STA -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $RuntimeRoot 'tray.ps1')`""
     $TrayUsers = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
-    $TraySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+    $TraySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances Parallel
     Register-ScheduledTask -TaskName $TrayTaskName -TaskPath $TaskPath -Action $TrayAction -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Principal $TrayUsers -Settings $TraySettings -Force -ErrorAction Stop | Out-Null
     foreach ($Name in $OldTaskName, $TaskName) { Unregister-ScheduledTask -TaskName $Name -TaskPath $OldTaskPath -Confirm:$false -ErrorAction SilentlyContinue }
     Remove-OldTaskFolder $OldTaskPath
