@@ -123,6 +123,7 @@ $psi.RedirectStandardError = $true
 $psi.EnvironmentVariables['LOCALAPPDATA'] = $appData
 $psi.EnvironmentVariables['PSModulePath'] = (Join-Path $PSScriptRoot 'Fakes') + ';' + "$env:USERPROFILE\Documents\WindowsPowerShell\Modules;$env:ProgramFiles\WindowsPowerShell\Modules;$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules"
 $psi.EnvironmentVariables['PACKTUNE_SMOKE'] = $Driver
+$psi.EnvironmentVariables['PACKTUNE_TIMING'] = $OutDir
 # No Windows Sandbox opens: a launcher script plays the part of it (the test lab runs in background runspaces)
 $psi.EnvironmentVariables['PACKTUNE_SANDBOX_LAUNCHER'] = (Join-Path $PSScriptRoot 'Fakes\FakeSandboxLauncher.ps1')
 $psi.EnvironmentVariables['PACKTUNE_POPULAR_FIXTURE'] = $fixture

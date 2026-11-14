@@ -10,6 +10,7 @@ $window.Left = -20000; $window.Top = -20000
 $window.ShowActivated = $false
 $window.ShowInTaskbar = $false
 
+$script:AppListSync = $true
 function Test-Smoke([string]$Name, [bool]$Ok, $Detail) {
     $line = if ($Ok) { "PASS $Name" } else { "FAIL $Name" + $(if ($null -ne $Detail) { "  -> $Detail" } else { '' }) }
     [void]$script:SmokeResults.Add($line)
@@ -241,6 +242,58 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if (-not (Test-Idle)) { return $false }
         Test-Smoke 'status script created and assigned' ($script:StatusScript.State -eq 'Present' -and (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-health.json')) -and (Get-JobLog) -match 'created|assigned') ($script:StatusScript | ConvertTo-Json -Compress)
         $true } }
+    @{ Name = 'apps page timing'; Phase = 0; Waited = 0; Do = {
+        param($s)
+        # The page switch must not wait for the list: loading state at once, lines fill in the background, the second visit is instant.
+        # (Everything else in this run builds the list synchronously; here the real, time-sliced path runs.)
+        $log = Join-Path $env:PACKTUNE_TIMING 'timing.txt'
+        switch ($s.Phase) {
+            0 {
+                Show-Page 'Start'; $window.UpdateLayout()
+                $script:AppListSync = $false; $script:AppListBuilt = $false; $script:CardKeys = ''
+                $script:CardCollection.Clear(); $script:CardLines.Clear()
+                $s.Watch = [Diagnostics.Stopwatch]::StartNew()
+                Show-Page 'Apps'
+                $s.Call = $s.Watch.ElapsedMilliseconds
+                $window.UpdateLayout()
+                $s.Layout = $s.Watch.ElapsedMilliseconds
+                Add-Content $log ('{0,6} ms  FIRST visit: Show-Page returned after {1} ms, layout pass done after {2} ms' -f $s.Layout, $s.Call, $s.Layout)
+                Test-Smoke 'first visit: the page switches within 300 ms' ($s.Call -lt 300) "$($s.Call) ms"
+                Test-Smoke 'first visit: shows the loading state, the list is not there yet' ($ui.AppsLoading.Visibility -eq 'Visible' -and $ui.PageApps.Visibility -eq 'Visible' -and $script:CardLines.Count -eq 0) "loading=$($ui.AppsLoading.Visibility) lines=$($script:CardLines.Count)"
+                $s.Phase = 1; $s.Watch.Restart()
+                return $false
+            }
+            1 {
+                $s.Waited++
+                if (($script:AppListJob -or $script:AppListTimer.IsEnabled) -and $s.Watch.Elapsed.TotalSeconds -lt 60) { return $false }
+                Add-Content $log ('{0,6} ms  list complete after the page switch ({1} cards in {2} lines)' -f $s.Watch.ElapsedMilliseconds, $script:CardCollection.Count, $script:CardLines.Count)
+                $async = @($script:CardCollection | ForEach-Object { Get-AppKey $_.Data }) -join '|'
+                $script:AppListSync = $true; Update-CatalogRows; Update-AppList
+                $sync = @($script:CardCollection | ForEach-Object { Get-AppKey $_.Data }) -join '|'
+                Test-Smoke 'the list built in the background is the same as the one built at once' ($async -eq $sync -and $script:CardCollection.Count -gt 0) "$($async.Length) vs $($sync.Length)"
+                Test-Smoke 'lines hold the cards in order, loading state gone' ($ui.AppsLoading.Visibility -eq 'Collapsed' -and (@($script:CardLines | ForEach-Object { @($_.Items) }).Count -eq $script:CardCollection.Count)) "lines=$($script:CardLines.Count)"
+                $realized = @($ui.CardList.ItemContainerGenerator.Items).Count
+                Test-Smoke 'virtualized: fewer line containers exist than lines (when more lines than fit)' ($script:CardLines.Count -le 6 -or $ui.CardList.ItemContainerGenerator.ContainerFromIndex($script:CardLines.Count - 1) -eq $null) "lines=$($script:CardLines.Count)"
+                # second visit: the cards stay, the switch does not wait
+                Show-Page 'Start'; $window.UpdateLayout()
+                $script:AppListSync = $false
+                $w = [Diagnostics.Stopwatch]::StartNew()
+                Show-Page 'Apps'
+                $call = $w.ElapsedMilliseconds
+                $window.UpdateLayout()
+                Add-Content $log ('{0,6} ms  SECOND visit: Show-Page returned after {1} ms, layout pass done after {2} ms' -f $w.ElapsedMilliseconds, $call, $w.ElapsedMilliseconds)
+                Test-Smoke 'second visit: the page switches within 300 ms with the cards already there' ($call -lt 300 -and $script:CardLines.Count -gt 0 -and $ui.AppsLoading.Visibility -eq 'Collapsed') "$call ms, lines=$($script:CardLines.Count)"
+                $s.Phase = 2; $s.Watch.Restart()
+                return $false
+            }
+            2 {
+                $s.Waited++
+                if (($script:AppListJob -or $script:AppListTimer.IsEnabled) -and $s.Watch.Elapsed.TotalSeconds -lt 60) { return $false }
+                $script:AppListSync = $true
+                Test-Smoke 'second visit: list still complete afterwards' ($script:CardCollection.Count -gt 0 -and $script:CardKeys -ne '<building>')
+                return $true
+            }
+        } } }
     @{ Name = 'apps list'; Started = $false; Waited = 0; Do = {
         param($s)
         if (-not $s.Started) { $s.Started = $true; Show-Page 'Apps'; return $false }

@@ -446,7 +446,7 @@ $timer.Add_Tick({
         Update-Toasts
         # App cards fill up while the feed lookups run
         if ($script:Refreshing -and $script:Tick % 4 -eq 0) { Update-RefreshButton }
-        if ($script:Refreshing -and $script:Tick % 8 -eq 0 -and $script:CurrentPage -eq 'Apps') { Update-CatalogRows; Update-AppList }
+        if ($script:Refreshing -and $script:Tick % 8 -eq 0 -and $script:CurrentPage -eq 'Apps') { Update-AppList -Reload }
         if ($script:MetaRefreshPending -and $script:Tick % 4 -eq 0) {
             $script:MetaRefreshPending = $false
             if ($script:CurrentPage -eq 'Apps') { Update-AppList }
@@ -672,7 +672,15 @@ $script:AccountText = ''
 # ---------------------------------------------------------------- navigation, dialogs, help
 $script:Pages = @('Start', 'Apps', 'Custom', 'Tenant', 'Status', 'Activity', 'Settings')
 $script:CurrentPage = 'Start'
+function Measure-Ui([string]$Step, [scriptblock]$Do) {
+    # Timing for the page switches: with PACKTUNE_TIMING set, every step is appended to timing.txt in that folder
+    if (-not $env:PACKTUNE_TIMING) { & $Do; return }
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    & $Do
+    Add-Content -Path (Join-Path $env:PACKTUNE_TIMING 'timing.txt') -Value ('{0,6} ms  {1}' -f $sw.ElapsedMilliseconds, $Step)
+}
 function Show-Page([string]$Name) {
+    $pageWatch = [Diagnostics.Stopwatch]::StartNew()
     Close-Dialog
     $script:CurrentPage = $Name
     foreach ($p in $script:Pages) { $ui["Page$p"].Visibility = if ($p -eq $Name) { 'Visible' } else { 'Collapsed' } }
@@ -680,12 +688,13 @@ function Show-Page([string]$Name) {
     $ui["Nav$navName"].IsChecked = $true
     switch ($Name) {
         'Start'    { $script:SandboxState = $null; Update-Readiness; if (-not $script:StoreState) { Start-StoreCheck } }
-        'Apps'     { Update-CatalogRows; Update-AppList; Start-CatalogPrefetch }
+        'Apps'     { if (-not $script:AppListBuilt) { Set-AppsLoading $true }; $script:PrefetchPending = $true; Update-AppList -Reload }
         'Custom'   { if ((Test-SignedIn) -and $null -eq $script:CustomApps) { Start-CustomRefresh } else { Update-CustomRows } }
         'Tenant'   { if ((Test-SignedIn) -and $null -eq $script:TenantApps -and -not (Test-TaskRunning 'tenant')) { Start-TenantRefresh } else { Update-TenantRows } }
         'Settings' { Update-SettingsView }
     }
     Update-SelectionBar
+    if ($env:PACKTUNE_TIMING) { Add-Content -Path (Join-Path $env:PACKTUNE_TIMING 'timing.txt') -Value ('{0,6} ms  Show-Page {1} (total)' -f $pageWatch.ElapsedMilliseconds, $Name) }
 }
 foreach ($p in 'Start', 'Apps', 'Custom', 'Tenant', 'Activity', 'Settings') {
     $ui["Nav$p"].Add_Checked({
@@ -1070,7 +1079,6 @@ $script:TenantApps = $null
 $script:TenantPackages = @{}         # meta key of the apps already in the tenant
 $script:RecentDeploys = @{}          # meta key -> time it was created by this window
 $script:CardCollection = New-Object System.Collections.ObjectModel.ObservableCollection[object]
-$ui.CardList.ItemsSource = $script:CardCollection
 
 function Get-AppKey($Row) {
     if ($Row.CatalogId) { return ([string]$Row.CatalogId).ToLower() }
@@ -1132,7 +1140,8 @@ function Set-CardRow($Card, $Src) {
     } + (Get-TileStyle $Src.Name))
 }
 
-function Update-AppList {
+function Get-AppListRows {
+    # Phase 1: the apps of the current view in display order (merge of the lists, source filter, text filter, chips, category, sort)
     $rows = New-Object System.Collections.ArrayList
     $seen = @{}
     foreach ($r in @($script:SourceRows) + @($script:MyRows) + @($script:PopularRows) + @($script:SearchRows)) { $k = Get-AppKey $r; if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; [void]$rows.Add($r) } }
@@ -1149,23 +1158,114 @@ function Update-AppList {
     elseif ($script:Category -eq 'My apps') { $rows = @($rows | Where-Object { $_.Mine }) }
     elseif ($script:Category -ne 'All') { $rows = @($rows | Where-Object { $_.Category -eq $script:Category }) }
     if ($script:SortMode -eq 'Downloads') { $rows = @($rows | Sort-Object -Property @{ Expression = { Get-AppDownloads $_ }; Descending = $true }, @{ Expression = { $_.Name } }) }
-    $cards = foreach ($r in $rows) {
+    return @($rows)
+}
+
+# The grid shows LINES of cards in a virtualizing list: only the lines on screen exist as visuals (a window of ~300 cards at once
+# took seconds to lay out). The flat card list stays the model (CardCollection); the lines are what the interface binds to.
+$script:AppListSync = $false         # tests: build everything at once instead of in time slices
+$script:AppListGen = 0               # raised by every request: a build in progress starts over
+$script:AppListJob = $null
+$script:AppListBuilt = $false
+$script:CatalogDirty = $false
+$script:PrefetchPending = $false
+$script:CardColumns = 3
+$script:CardLines = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+$ui.CardList.ItemsSource = $script:CardLines
+
+function Add-CardLine($Cards) {
+    $line = New-Object PackTune.Row
+    $line.Items = @($Cards)
+    $line['Cols'] = [string]$script:CardColumns
+    [void]$script:CardLines.Add($line)
+}
+function Sync-CardLines {
+    # All lines again from the card list (the number of cards per line changed)
+    $script:CardLines.Clear()
+    $all = @($script:CardCollection)
+    for ($i = 0; $i -lt $all.Count; $i += $script:CardColumns) { Add-CardLine @($all[$i..([Math]::Min($i + $script:CardColumns, $all.Count) - 1)]) }
+}
+function Set-AppsLoading([bool]$On, [string]$Text = 'Loading apps ...') {
+    $ui.AppsLoading.Visibility = ConvertTo-Vis $On
+    if ($On) { $ui.TxtAppsLoading.Text = $Text }
+}
+
+function Step-AppList($Job, [int]$BudgetMs) {
+    # One time slice of a build; true when the list is complete. Phase 1 (rows) is one slice, then cards in batches within the budget.
+    $sw = [Diagnostics.Stopwatch]::StartNew()
+    if ($null -eq $Job.Rows) {
+        if ($script:CatalogDirty) { $script:CatalogDirty = $false; Update-CatalogRows }
+        $Job.Rows = @(Get-AppListRows)
+        $Job.Keys = ($Job.Rows | ForEach-Object { Get-AppKey $_ }) -join '|'
+        $Job.Index = 0
+        $Job.Pending = New-Object System.Collections.ArrayList
+        $Job.Changed = $Job.Keys -ne $script:CardKeys
+        if ($Job.Changed) {
+            # The marker keeps a build that is cut short from passing as the finished list
+            $script:CardKeys = '<building>'
+            $script:CardCollection.Clear(); $script:CardLines.Clear()
+        }
+        if (-not $script:AppListSync -and $Job.Rows.Count -gt 0 -and $script:CardLines.Count -eq 0) { Set-AppsLoading $true }
+        if ($env:PACKTUNE_TIMING) { Add-Content (Join-Path $env:PACKTUNE_TIMING 'timing.txt') ('{0,6} ms    list: rows ({1}) incl. chips' -f $sw.ElapsedMilliseconds, $Job.Rows.Count) }
+        if (-not $script:AppListSync) { return $false }
+    }
+    while ($Job.Index -lt $Job.Rows.Count) {
+        $r = $Job.Rows[$Job.Index]; $Job.Index++
         $k = Get-AppKey $r
         if (-not $script:CardRows.ContainsKey($k)) { $script:CardRows[$k] = New-Object PackTune.Row }
-        Set-CardRow $script:CardRows[$k] $r
+        $card = $script:CardRows[$k]
+        [void](Set-CardRow $card $r)
+        if ($Job.Changed) {
+            $script:CardCollection.Add($card)
+            [void]$Job.Pending.Add($card)
+            if ($Job.Pending.Count -ge $script:CardColumns) { Add-CardLine $Job.Pending; $Job.Pending.Clear(); Set-AppsLoading $false }
+        }
+        if ($sw.ElapsedMilliseconds -ge $BudgetMs) {
+            if (-not $script:AppListSync) { $ui.TxtAppsCount.Text = "Loading apps $($Job.Index)/$($Job.Rows.Count) ..." }
+            return $false
+        }
     }
-    $cards = @($cards)
-    $keys = ($rows | ForEach-Object { Get-AppKey $_ }) -join '|'
-    if ($keys -ne $script:CardKeys) {
-        $script:CardKeys = $keys
-        $script:CardCollection.Clear()
-        foreach ($c in $cards) { $script:CardCollection.Add($c) }
-    }
-    $loading = @($script:Shared.Meta.Count -lt 2 -and (Test-TaskRunning 'meta')).Count
-    $ui.TxtAppsCount.Text = "$($cards.Count) shown" + $(if (Get-RefreshProgress) { ', ' + (Get-RefreshProgress) } elseif (Test-TaskRunning 'popular') { ', popular apps loading' } elseif (Test-TaskRunning 'meta') { ', versions still loading' } elseif ($searching) { ", $(@($script:SearchRows).Count) from the repositories" } else { '' })
+    if ($Job.Changed -and $Job.Pending.Count) { Add-CardLine $Job.Pending; $Job.Pending.Clear() }
+    $script:CardKeys = $Job.Keys
+    $script:AppListBuilt = $true
+    Set-AppsLoading $false
+    $cards = $Job.Rows.Count
+    $filterText = $ui.TxtFilter.Text.Trim()
+    $searching = $script:SearchTerm -and $script:SearchTerm -eq $filterText
+    $ui.TxtAppsCount.Text = "$cards shown" + $(if (Get-RefreshProgress) { ', ' + (Get-RefreshProgress) } elseif (Test-TaskRunning 'popular') { ', popular apps loading' } elseif (Test-TaskRunning 'meta') { ', versions still loading' } elseif ($searching) { ", $(@($script:SearchRows).Count) from the repositories" } else { '' })
     $curated = $script:SourceRows.Count
     $ui.TxtAppsSubtitle.Text = "$curated curated apps$(if (@($script:PopularRows).Count) { " and the $(@($script:PopularRows).Count) most popular Chocolatey packages" }) from winget and Chocolatey in one list. Type to filter, or search both repositories."
     if ($script:DetailRow) { Show-AppDetails $script:DetailRow -Keep }
+    if ($script:PrefetchPending) { $script:PrefetchPending = $false; Start-CatalogPrefetch }
+    if ($env:PACKTUNE_TIMING) { Add-Content (Join-Path $env:PACKTUNE_TIMING 'timing.txt') ('{0,6} ms    list: complete ({1} cards, {2} lines)' -f ([int]((Get-Date) - $Job.Started).TotalMilliseconds), $cards, $script:CardLines.Count) }
+    return $true
+}
+
+$script:AppListTimer = New-Object System.Windows.Threading.DispatcherTimer ([System.Windows.Threading.DispatcherPriority]::Background)
+$script:AppListTimer.Interval = [TimeSpan]::FromMilliseconds(10)
+$script:AppListTimer.Add_Tick({
+    try {
+        $job = $script:AppListJob
+        if (-not $job -or $job.Gen -ne $script:AppListGen) { $job = $script:AppListJob = @{ Gen = $script:AppListGen; Rows = $null; Started = Get-Date } }
+        if ((Step-AppList $job 30) -eq $true) { $script:AppListTimer.Stop(); $script:AppListJob = $null }
+    }
+    catch { $script:AppListTimer.Stop(); $script:AppListJob = $null; Set-AppsLoading $false; if ($env:PACKTUNE_TIMING) { Add-Content (Join-Path $env:PACKTUNE_TIMING 'timing.txt') ("ERROR in the list build: " + $_.Exception.Message + " @ " + $_.InvocationInfo.ScriptLineNumber) }; Show-Error $_.Exception.Message }
+})
+
+function Update-AppList {
+    # Rebuilds the card list. In the interface it runs in time slices at background priority (the window stays usable, the
+    # lines appear as they are ready); a new request starts over. -Reload reads the catalog rows again first.
+    param([switch]$Reload)
+    if ($Reload) { $script:CatalogDirty = $true }
+    $script:AppListGen++
+    if ($script:AppListSync) {
+        $job = @{ Gen = $script:AppListGen; Rows = $null; Started = Get-Date }
+        while ((Step-AppList $job 1000000) -ne $true) { }
+        $script:AppListJob = $null
+        return
+    }
+    $script:AppListJob = $null
+    if (-not $script:AppListTimer.IsEnabled) { $script:AppListTimer.Start() }
 }
 $script:SearchKeys = @{}
 
@@ -1299,16 +1399,15 @@ function Find-VisualChild($Parent, [type]$Type) {
     }
 }
 function Set-CardWidth {
-    # As many cards per row as fit (at least 300 px each); the cards share the width
-    $panel = Find-VisualChild $ui.CardList ([System.Windows.Controls.WrapPanel])
-    $width = $ui.AppsScroll.ActualWidth - 4
-    if (-not $panel -or $width -lt 100) { return }
-    $columns = [Math]::Max(1, [Math]::Floor($width / 300))
-    $panel.ItemWidth = [Math]::Floor($width / $columns)
+    # As many cards per line as fit (at least 300 px each); the cards of a line share the width
+    $width = $ui.CardList.ActualWidth - 4
+    if ($width -lt 100) { return }
+    $columns = [int][Math]::Max(1, [Math]::Floor($width / 300))
+    if ($columns -eq $script:CardColumns) { return }
+    $script:CardColumns = $columns
+    if ($script:AppListJob) { $script:AppListGen++ } else { Sync-CardLines }
 }
-$ui.AppsScroll.Add_SizeChanged({ try { Set-CardWidth } catch { } })
-$ui.CardList.Add_LayoutUpdated({ if (-not $script:CardWidthSet) { $p = Find-VisualChild $ui.CardList ([System.Windows.Controls.WrapPanel]); if ($p) { $script:CardWidthSet = $true; try { Set-CardWidth } catch { } } } })
-$script:CardWidthSet = $false
+$ui.CardList.Add_SizeChanged({ try { Set-CardWidth } catch { } })
 $ui.TxtFilter.Add_TextChanged({
     $ui.HintFilter.Visibility = ConvertTo-Vis (-not $ui.TxtFilter.Text)
     try { Update-AppList } catch { Show-Error $_.Exception.Message }
@@ -1936,7 +2035,7 @@ $ui.CardList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEv
 function Update-SelectionBar {
     $count = $script:Selected.Count
     $ui.SelectionBar.Visibility = ConvertTo-Vis ($count -gt 0 -and $script:CurrentPage -eq 'Apps')
-    $ui.CardList.Margin = if ($ui.SelectionBar.Visibility -eq 'Visible') { '0,0,0,110' } else { '0,0,0,16' }
+    $ui.CardList.Padding = if ($ui.SelectionBar.Visibility -eq 'Visible') { '0,0,0,110' } else { '0,0,0,16' }
     $ui.TxtSelectionCount.Text = if ($count -eq 1) { '1 app selected' } else { "$count apps selected" }
     $wingetMissing = (@($script:Selected.Values | Where-Object { (Get-AppSource $_) -eq 'Winget' }).Count -gt 0) -and -not $script:ModuleState.Winget
     $ui.BtnReview.IsEnabled = $count -gt 0 -and (Test-SignedIn) -and $script:ModuleState.Ok -and -not $wingetMissing
