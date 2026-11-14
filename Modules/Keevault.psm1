@@ -217,7 +217,8 @@ $script:SignInPageScript = @'
   let last = '';
   setInterval(() => {
     let step = '';
-    if (empty('input[name="otc"]')) step = 'otp';
+    if (/AADSTS(65001|90094|90008|650056)|need admin approval|admin approval required|Genehmigung durch einen Administrator|Administratorgenehmigung/i.test((document.body && document.body.innerText) || '')) step = 'admin-needed';
+    else if (empty('input[name="otc"]')) step = 'otp';
     else if (toPasskey()) step = 'to-passkey';
     else if (empty('input[name="passwd"]')) step = 'password';
     else if (empty('input[name="loginfmt"]')) step = 'username';
@@ -294,6 +295,87 @@ $script:PasskeyShimScript = @'
 })();
 '@
 
+# Entra refuses the consent of a user who is no administrator: the tool says this instead of an error
+$script:AdminConsentMessage = 'An administrator must confirm these permissions.'
+function Get-PackTuneSessionFolder {
+    <# The WebView2 profile of all embedded sign-ins of this Windows user (one Microsoft session: no second password or passkey).
+       Only the current user gets access. Sign out clears it (Clear-PackTuneSession). #>
+    param([string]$Root = (Join-Path $env:LOCALAPPDATA 'PackTune'))
+    $folder = Join-Path $Root 'WebView2Session'
+    if (-not (Test-Path $folder)) { [void](New-Item -ItemType Directory -Path $folder -Force) }
+    try {
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $acl = New-Object System.Security.AccessControl.DirectorySecurity
+        $acl.SetAccessRuleProtection($true, $false)
+        $rule = New-Object System.Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+        $acl.AddAccessRule($rule)
+        (New-Object System.IO.DirectoryInfo $folder).SetAccessControl($acl)
+    }
+    catch { }
+    $folder
+}
+
+function Start-PackTuneSessionHold {
+    # A tiny hidden WebView2 on the session folder keeps the browser process (and with it the session cookies) alive
+    # between the sign-in windows of one run; every sign-in window then finds the Microsoft session again.
+    param([Parameter(Mandatory)][string]$UserDataFolder)
+    if ($script:SessionHold -and $script:SessionHold.Folder -eq $UserDataFolder) { return }
+    try {
+        $w = New-Object System.Windows.Window
+        $w.WindowStyle = 'None'; $w.ShowInTaskbar = $false; $w.ShowActivated = $false; $w.ResizeMode = 'NoResize'
+        $w.Width = 1; $w.Height = 1; $w.Left = -32000; $w.Top = -32000
+        $props = New-Object Microsoft.Web.WebView2.Wpf.CoreWebView2CreationProperties
+        $props.UserDataFolder = $UserDataFolder
+        $wv = New-Object Microsoft.Web.WebView2.Wpf.WebView2
+        $wv.CreationProperties = $props
+        $w.Content = $wv
+        $w.Show()
+        $script:SessionHold = @{ Folder = $UserDataFolder; Window = $w; View = $wv }
+    }
+    catch { $script:SessionHold = $null }
+}
+
+function Close-PackTuneSessionHold {
+    # Ends the hidden browser (the cookies stay in the folder). Clear = delete cookies and the folder too (Sign out).
+    param([switch]$Clear)
+    $h = $script:SessionHold
+    $script:SessionHold = $null
+    if ($h) {
+        try { if ($Clear -and $h.View.CoreWebView2) { $h.View.CoreWebView2.CookieManager.DeleteAllCookies() } } catch { }
+        try { $h.View.Dispose() } catch { }
+        try { $h.Window.Close() } catch { }
+    }
+}
+
+function Clear-PackTuneSession {
+    param([Parameter(Mandatory)][string]$UserDataFolder)
+    Close-PackTuneSessionHold -Clear
+    for ($i = 0; $i -lt 5; $i++) {
+        try { if (Test-Path $UserDataFolder) { Remove-Item $UserDataFolder -Recurse -Force -ErrorAction Stop }; return $true }
+        catch { Start-Sleep -Milliseconds 300 }
+    }
+    $false   # still locked by the browser process; the cookies were deleted above
+}
+function Get-PackTuneAuthorizeUrl {
+    # The authorize URL of the v2 endpoint (dynamic consent: the scopes asked for here are what the sign-in grants).
+    # Prompt: 'default' sends none (an existing session goes straight on, the consent page shows when a scope is new),
+    # 'consent' makes the administrator see the consent page. Never 'login' in this tool.
+    param([Parameter(Mandatory)][string]$TenantID, [Parameter(Mandatory)][string]$ClientID, [string[]]$Scopes, [Parameter(Mandatory)][string]$State, [Parameter(Mandatory)][string]$Challenge,
+        [string]$Prompt = 'default', [string]$LoginHint)
+    $query = [ordered]@{
+        client_id             = $ClientID
+        response_type         = 'code'
+        redirect_uri          = $script:SignInRedirect
+        response_mode         = 'query'
+        scope                 = (Get-SignInScopeString $Scopes)
+        state                 = $State
+        code_challenge        = $Challenge
+        code_challenge_method = 'S256'
+    }
+    if ($Prompt -and $Prompt -ne 'default') { $query.prompt = $Prompt }
+    if ($LoginHint) { $query.login_hint = $LoginHint }
+    "https://login.microsoftonline.com/$TenantID/oauth2/v2.0/authorize?" + (($query.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, [Uri]::EscapeDataString($_.Value) }) -join '&')
+}
 function Invoke-PackTuneBrowserSignIn {
     <#
     Runs the Microsoft sign-in (authorization code + PKCE) in an embedded browser window and returns the token
@@ -316,7 +398,7 @@ function Invoke-PackTuneBrowserSignIn {
         [string]$Hint,
         # Profile folder kept after the window closes (shared session) and the prompt: login (always ask) or select_account
         [string]$UserDataFolder,
-        [ValidateSet("login", "select_account", "none", "default")][string]$Prompt = "login",
+        [ValidateSet("login", "select_account", "none", "consent", "default")][string]$Prompt = "default",
         [System.Windows.Window]$Owner,
         # Tests: gets ($win, $wv) before the window opens (e.g. to render it off-screen)
         [scriptblock]$Configure
@@ -330,20 +412,7 @@ function Invoke-PackTuneBrowserSignIn {
     $rng.GetBytes($bytes); $state = ConvertTo-Base64Url $bytes
     $sha = [Security.Cryptography.SHA256]::Create()
     $challenge = ConvertTo-Base64Url $sha.ComputeHash([Text.Encoding]::ASCII.GetBytes($verifier))
-    $query = [ordered]@{
-        client_id             = $ClientID
-        response_type         = 'code'
-        redirect_uri          = $script:SignInRedirect
-        response_mode         = 'query'
-        scope                 = (Get-SignInScopeString $Scopes)
-        state                 = $state
-        code_challenge        = $challenge
-        code_challenge_method = 'S256'
-        prompt                = $Prompt
-    }
-    if ($LoginHint) { $query.login_hint = $LoginHint }
-    if ($Prompt -eq 'default') { $query.Remove('prompt') }   # no prompt: an existing session goes straight on (consent page)
-    $url = "https://login.microsoftonline.com/$TenantID/oauth2/v2.0/authorize?" + (($query.GetEnumerator() | ForEach-Object { '{0}={1}' -f $_.Key, [Uri]::EscapeDataString($_.Value) }) -join '&')
+    $url = Get-PackTuneAuthorizeUrl -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -State $state -Challenge $challenge -Prompt $Prompt -LoginHint $LoginHint
 
     # Window in the Windows 11 look of the tool: hint on top, browser in the middle, Cancel below; modal to the owner
     $brush = New-Object System.Windows.Media.BrushConverter
@@ -378,6 +447,7 @@ function Invoke-PackTuneBrowserSignIn {
 
     $persistent = [bool]$UserDataFolder   # a shared profile keeps the Microsoft session between sign-ins of the same run (no second password)
     $userData = if ($persistent) { $UserDataFolder } else { Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N')) }
+    if ($persistent) { Start-PackTuneSessionHold $UserDataFolder }
     $wv = New-Object Microsoft.Web.WebView2.Wpf.WebView2
     $props = New-Object Microsoft.Web.WebView2.Wpf.CoreWebView2CreationProperties
     $props.UserDataFolder = $userData
@@ -385,7 +455,7 @@ function Invoke-PackTuneBrowserSignIn {
     [void]$grid.Children.Add($wv)
     $win.Content = $grid
 
-    $ctx = @{ Redirect = $null; Done = @{}; Otp = 0; ToPasskey = 0; PasskeyBusy = $false; Error = $null }
+    $ctx = @{ AdminNeeded = $false; Redirect = $null; Done = @{}; Otp = 0; ToPasskey = 0; PasskeyBusy = $false; Error = $null }
     $wv.Add_CoreWebView2InitializationCompleted({
         param($s, $e)
         if (-not $e.IsSuccess) { $ctx.Error = "The embedded browser could not start: $($e.InitializationException.Message)"; $win.Close(); return }
@@ -424,6 +494,7 @@ function Invoke-PackTuneBrowserSignIn {
             return
         }
         switch ($step) {
+            'admin-needed' { $ctx.AdminNeeded = $true }
             'to-passkey' {
                 # Keevault has the passkey: take "Face, fingerprint, PIN or security key" instead of the password
                 if (-not $Passkey -or $ctx.ToPasskey -ge 2) { return }
@@ -473,8 +544,9 @@ function Invoke-PackTuneBrowserSignIn {
     }
 
     if ($ctx.Error) { throw $ctx.Error }
-    if (-not $ctx.Redirect) { throw 'Sign-in cancelled.' }
+    if (-not $ctx.Redirect) { if ($ctx.AdminNeeded) { throw $script:AdminConsentMessage }; throw 'Sign-in cancelled.' }
     $result = [System.Web.HttpUtility]::ParseQueryString(([Uri]$ctx.Redirect).Query)
+    if ($result['error'] -in 'consent_required', 'interaction_required' -or "$($result['error_description'])" -match 'AADSTS(65001|90094|90008|650056)') { throw $script:AdminConsentMessage }
     if ($result['error']) { throw "Sign-in failed: $($result['error_description'])" }
     if ($result['state'] -ne $state) { throw 'Sign-in failed: the answer does not belong to this sign-in.' }
     Request-PackTuneToken -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -Body @{
@@ -498,6 +570,7 @@ function Connect-PackTuneWithKeevault {
         [Parameter(Mandatory)][string]$TenantID,
         [Parameter(Mandatory)][string]$ClientID,
         [string]$UserDataFolder,
+        [ValidateSet('default', 'consent')][string]$Prompt = 'default',
         [Parameter(Mandatory)][string]$CacheFolder,
         [string[]]$Scopes,
         [System.Windows.Window]$Owner,
@@ -557,7 +630,7 @@ function Connect-PackTuneWithKeevault {
         }
         $hint = if ($passkey) { "Keevault signs in $($login.username) with the passkey; confirm it in Keevault. You can type yourself or choose another sign-in method at any time." }
         else { "Keevault fills in the account $($login.username). You can type yourself or choose another sign-in method (e.g. a passkey) at any time." }
-        $token = Invoke-PackTuneBrowserSignIn -TenantID $TenantID -ClientID $ClientID -CacheFolder $CacheFolder -UserDataFolder $UserDataFolder -Prompt default -Scopes $Scopes -LoginHint $login.username `
+        $token = Invoke-PackTuneBrowserSignIn -TenantID $TenantID -ClientID $ClientID -CacheFolder $CacheFolder -UserDataFolder $UserDataFolder -Prompt $Prompt -Scopes $Scopes -LoginHint $login.username `
             -Fill $fill -HasOtp:([bool]$login.totp) -Passkey $passkey -Hint $hint -Owner $Owner -Title 'Sign in to Microsoft Intune with Keevault'
     }
     finally {
@@ -571,4 +644,4 @@ function Connect-PackTuneWithKeevault {
 }
 
 Export-ModuleMember -Function Set-PackTuneSignInLog, Find-KeevaultMcp, Connect-KeevaultMcp, Invoke-KeevaultMcpRequest, Invoke-KeevaultMcpTool, Close-KeevaultMcp,
-    Get-PackTuneWebView2, Request-PackTuneToken, Invoke-PackTuneBrowserSignIn, Connect-PackTuneWithKeevault
+    Get-PackTuneWebView2, Get-PackTuneSessionFolder, Start-PackTuneSessionHold, Close-PackTuneSessionHold, Clear-PackTuneSession, Get-PackTuneAuthorizeUrl, Request-PackTuneToken, Invoke-PackTuneBrowserSignIn, Connect-PackTuneWithKeevault
