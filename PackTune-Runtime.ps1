@@ -74,7 +74,7 @@ try {
     Protect-Folder $RuntimeRoot
     Protect-Folder (Join-Path $RuntimeRoot "Logs")
 }
-catch { Write-Output "The folder $RuntimeRoot could not be protected: $($_.Exception.Message)"; exit 1 }
+catch { Write-Output "The folder $RuntimeRoot could not be protected: $($_.Exception.Message)"; exit $PTExit.FolderProtect }
 Start-Transcript -Path (Join-Path $RuntimeRoot "Logs\runtime.log") -Append | Out-Null
 
 __GETWINGET__
@@ -102,7 +102,7 @@ $DownloadUrl = '__DOWNLOADURL__'
 if (-not (Test-Path -LiteralPath $Choco)) {
     if ($DownloadUrl) { $env:chocolateyDownloadUrl = $DownloadUrl }
     for ($Attempt = 1; $Attempt -le 4 -and -not (Test-Path -LiteralPath $Choco); $Attempt++) {
-        if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; Stop-Transcript | Out-Null; exit 1618 }
+        if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; Stop-Transcript | Out-Null; exit (Get-LockExitCode) }
         try {
             Set-ExecutionPolicy Bypass -Scope Process -Force
             Invoke-Expression ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
@@ -112,12 +112,12 @@ if (-not (Test-Path -LiteralPath $Choco)) {
         if (-not (Test-Path -LiteralPath $Choco) -and $Attempt -lt 4) { Start-Sleep -Seconds (Get-Random -Minimum 60 -Maximum 300) }
     }
 }
-if (-not (Test-Path -LiteralPath $Choco)) { Write-Output "Chocolatey installation failed"; Write-DeviceLog "Chocolatey installation failed"; Stop-Transcript | Out-Null; exit 1 }
+if (-not (Test-Path -LiteralPath $Choco)) { Write-Output "Chocolatey installation failed"; Write-DeviceLog "Chocolatey installation failed"; Stop-Transcript | Out-Null; exit $PTExit.ChocoMissing }
 & $Choco --version | Out-Host
-if ($LASTEXITCODE -ne 0) { Write-Output "choco.exe does not run (exit code $LASTEXITCODE)"; Write-DeviceLog "choco.exe does not run"; Stop-Transcript | Out-Null; exit 1 }
+if ($LASTEXITCODE -ne 0) { Write-Output "choco.exe does not run (exit code $LASTEXITCODE)"; Write-DeviceLog "choco.exe does not run"; Stop-Transcript | Out-Null; exit $PTExit.RuntimeBroken }
 
 ### Part 2: winget (App Installer) for SYSTEM
-if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; Stop-Transcript | Out-Null; exit 1618 }
+if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; Stop-Transcript | Out-Null; exit (Get-LockExitCode) }
 try {
     $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
     $Release = "https://github.com/microsoft/winget-cli/releases/latest/download"
@@ -168,7 +168,7 @@ try {
         try { Add-AppxPackage -RegisterByFamilyName -MainPackage "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe" -ErrorAction Stop } catch { Write-Output "Registration: $($_.Exception.Message)" }
         for ($Wait = 0; -not $Winget -and $Wait -lt 12; $Wait++) { Start-Sleep -Seconds 10; $Winget = Get-Winget }
     }
-    if (-not $Winget) { Write-Output "winget.exe not found (App Installer is missing)"; Write-DeviceLog "winget.exe not found"; Stop-Transcript | Out-Null; exit 1 }
+    if (-not $Winget) { Write-Output "winget.exe not found (App Installer is missing)"; Write-DeviceLog "winget.exe not found"; Stop-Transcript | Out-Null; exit $PTExit.WingetMissing }
     Write-Output "Using $Winget"
 
     # winget must start for SYSTEM; if not, dependencies are missing
@@ -178,7 +178,7 @@ try {
         try { Install-AppInstaller } catch { Write-Output "App Installer could not be provisioned: $($_.Exception.Message)" }
         $Winget = Get-Winget
         & $Winget --version | Out-Host
-        if ($LASTEXITCODE -ne 0) { Write-Output "winget still does not start"; Write-DeviceLog "winget does not start"; Stop-Transcript | Out-Null; exit 1 }
+        if ($LASTEXITCODE -ne 0) { Write-Output "winget still does not start"; Write-DeviceLog "winget does not start"; Stop-Transcript | Out-Null; exit $PTExit.RuntimeBroken }
     }
 }
 finally { Exit-DeploymentLock }
@@ -208,7 +208,7 @@ catch {
     Write-Output "The update task could not be registered: $($_.Exception.Message)"
     Write-DeviceLog "update task could not be registered: $($_.Exception.Message)"
     Stop-Transcript | Out-Null
-    exit 1
+    exit $PTExit.TaskRegister
 }
 # The folder of the earlier name (%ProgramFiles%\IntuneChocoDeployment\Runtime) is not needed any more
 Remove-OldToolFolder "Runtime"

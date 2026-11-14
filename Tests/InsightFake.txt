@@ -4,7 +4,9 @@ $P = [uri]::UnescapeDataString($Path)
 $Now = (Get-Date).ToUniversalTime()
 if ($P -like '*/deviceStatuses*') {
     return @{ value = @(
-        @{ deviceId = 'md-1'; deviceName = 'PC-0142'; userPrincipalName = 'j.weber@example.test'; installState = 'failed'; installStateDetail = 'installFailed'; displayVersion = '23.1'; errorCode = 1; lastSyncDateTime = $Now.ToString('o') }
+        @{ deviceId = 'md-1'; deviceName = 'PC-0142'; userPrincipalName = 'j.weber@example.test'; installState = 'failed'; installStateDetail = 'installFailed'; displayVersion = '23.1'; errorCode = 61011; lastSyncDateTime = $Now.ToString('o') }
+        @{ deviceId = 'md-5'; deviceName = 'PC-0777'; userPrincipalName = 'k.otto@example.test'; installState = 'failed'; installStateDetail = 'installFailed'; displayVersion = ''; errorCode = -1978335215; lastSyncDateTime = $Now.ToString('o') }
+        @{ deviceId = 'md-6'; deviceName = 'NB-0420'; userPrincipalName = 'r.lang@example.test'; installState = 'failed'; installStateDetail = 'installFailed'; displayVersion = ''; errorCode = 1603; lastSyncDateTime = $Now.ToString('o') }
         @{ deviceId = 'md-2'; deviceName = 'NB-0288'; userPrincipalName = 'a.keller@example.test'; installState = 'pendingInstall'; installStateDetail = 'pending'; displayVersion = '23.1'; lastSyncDateTime = $Now.ToString('o') }
         @{ deviceId = 'md-3'; deviceName = 'PC-0001'; userPrincipalName = 'm.schulz@example.test'; installState = 'installed'; installStateDetail = 'ok'; displayVersion = '26.6.0'; lastSyncDateTime = $Now.ToString('o') }
         @{ deviceId = 'md-4'; deviceName = 'PC-0002'; userPrincipalName = 'shared@example.test'; installState = 'installed'; installStateDetail = 'ok'; displayVersion = '26.6.0'; lastSyncDateTime = $Now.AddDays(-12).ToString('o') }

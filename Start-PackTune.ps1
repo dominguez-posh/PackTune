@@ -3980,13 +3980,20 @@ function Show-AppStatus($App) {
 $script:DeviceRowList = New-Object System.Collections.ObjectModel.ObservableCollection[object]
 $ui.LstDevices.ItemsSource = $script:DeviceRowList
 
+function Get-StatusSubText {
+    # With the Remediations status script the page shows the install status plus the device log; without it (no Windows Enterprise license, e.g. Business Premium) only Intune's install report, with the cause from the exit code
+    $when = if ($script:StatusData) { " Updated $((Get-Date).ToString('HH:mm'))." } else { '' }
+    if ($script:StatusScript -and $script:StatusScript.State -eq 'Present') { "Intune install status, plus the update log each device reports.$when" }
+    else { "Status from Intune's install report: failed devices first, with the cause from the exit code of the install.$when" }
+}
 function Update-StatusBanner {
     $st = $script:StatusScript
+    if ($script:CurrentPage -eq 'Status' -and $ui.TxtStatusSub.Text -notlike 'Reading*' -and $ui.TxtStatusSub.Text -notlike '*Reading ...') { $ui.TxtStatusSub.Text = Get-StatusSubText }
     $show = $st -and $st.State -ne 'Present'
     $ui.BoxStatusScript.Visibility = ConvertTo-Vis ([bool]$show)
     if (-not $show) { return }
     if ($st.State -eq 'Missing') { $ui.TxtStatusScript.Text = 'The status script is not set up. Without it you see the Intune install status, but not the log the device reports. It runs as a Remediations detection script on all devices, once an hour.'; $ui.BtnStatusScript.Visibility = 'Visible' }
-    else { $ui.TxtStatusScript.Text = "The device log is not available in this tenant: Remediations need a Windows Enterprise E3/E5 (or A3/A5, VDA) license. The install status above still works. $(Get-FriendlyCause $st.Reason)"; $ui.BtnStatusScript.Visibility = 'Visible' }
+    else { $ui.TxtStatusScript.Text = "Status from Intune's install report. Missing without Remediations: the history and the last successful update of each device, because only Remediations read the device log (they need a Windows Enterprise E3/E5, A3/A5 or VDA license, which Business Premium does not include). $(Get-FriendlyCause $st.Reason)"; $ui.BtnStatusScript.Visibility = 'Visible' }
 }
 Add-Click $ui.BtnStatusScript { Start-StatusScriptSetup }
 Add-Click $ui.BtnStatusBack { Show-Page 'Tenant' }
@@ -4022,14 +4029,20 @@ if ($Script) {
     })
 }
 
+function Format-ExitCodeText($Hex) {
+    # PackTune's own codes read best as numbers (61010), everything else as the hex value Intune shows
+    $n = try { [Convert]::ToInt64(([string]$Hex).Replace('0x', ''), 16) } catch { $null }
+    if ($null -ne $n -and $n -ge 61001 -and $n -le 61099) { "exit $n" } else { [string]$Hex }
+}
 function Show-StatusRows($St) {
     $ui.TxtStatOk.Text = [string]$St.Installed; $ui.TxtStatWait.Text = [string]$St.Pending; $ui.TxtStatFail.Text = [string]$St.Failed; $ui.TxtStatStale.Text = [string]$St.NotReported7Days
-    $ui.TxtStatusSub.Text = "Intune install status, plus the update log each device reports. Updated $((Get-Date).ToString('HH:mm'))."
+    $script:StatusData = if ($script:StatusData) { $script:StatusData } else { $true }
+    $ui.TxtStatusSub.Text = Get-StatusSubText
     $rows = foreach ($d in @($St.Devices | Sort-Object @{ Expression = { switch -Wildcard ($_.State) { 'failed' { 0 } 'uninstallFailed' { 0 } 'pendingInstall' { 1 } default { 2 } } } }, DeviceName)) {
         $last = $d.LastResult
         $label, $kind = if ($d.State -in 'failed', 'uninstallFailed') { 'Failed', 'bad' } elseif ($d.State -eq 'pendingInstall') { 'Waiting', 'warn' } elseif ($d.NotReported) { 'No report', 'gray' } elseif ($d.State -eq 'installed') { 'Installed', 'ok' } else { $d.State, 'gray' }
         $cause = if ($last -and -not $last.Ok -and $last.Cause) { [string]$last.Cause } elseif ($d.Cause) { [string]$d.Cause } elseif ($label -eq 'No report') { "No report for 7 days" } else { '' }
-        $code = if ($last -and -not $last.Ok -and $null -ne $last.ExitCode) { "exit $($last.ExitCode)" } elseif ($d.ErrorCode) { [string]$d.ErrorCode } else { '' }
+        $code = if ($last -and -not $last.Ok -and $null -ne $last.ExitCode) { "exit $($last.ExitCode)" } elseif ($d.ErrorCode) { Format-ExitCodeText $d.ErrorCode } else { '' }
         $when = if ($d.LastReport) { $t = ([datetime]$d.LastReport).ToLocalTime(); if ($t.Date -eq (Get-Date).Date) { "Today $($t.ToString('HH:mm'))" } else { $t.ToString('d MMM') } } else { '' }
         New-Row @{ Data = $d; Title = $d.DeviceName; Sub = $d.User; Status = $label; StatusBg = $script:PillColors[$kind][0]; StatusFg = $script:PillColors[$kind][1]
             Version = $d.Version; Cause = $cause; Code = $code; When = $when }

@@ -97,7 +97,7 @@ $script:DefaultSettings = [ordered]@{
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
 # Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
-$script:DeviceScriptRevision = 9
+$script:DeviceScriptRevision = 10
 # Longest random delay of the update tasks that is read back from the notes (one week)
 $script:MaxDelayMinutes = 10080
 
@@ -1451,7 +1451,7 @@ function Get-ChocoIconBase64 {
 function Get-DeviceScriptCommon {
     # Functions of install.ps1 and update.ps1, for Chocolatey and winget apps: the device wide lock and the protected
     # folders of the update helpers (both run as SYSTEM)
-    return @'
+    return (Get-DeviceExitCodeBlock) + @'
 # Every folder of this tool on the device is under %ProgramFiles%\PackTune: Chocolatey\<package>, Winget\<id>,
 # Winget\Logs, Runtime. Before the rename it was %ProgramFiles%\IntuneChocoDeployment ($OldToolRoot): install.ps1 and the
 # runtime remove their part of it (Remove-OldToolFolder), nothing else touches it. Users cannot create anything in %ProgramFiles%, so no user can prepare
@@ -2274,8 +2274,6 @@ if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProces
 $ChocoRoot = $env:ChocolateyInstall
 if (-not $ChocoRoot) { $ChocoRoot = Join-Path $env:ProgramData "chocolatey" }
 $Choco = Join-Path $ChocoRoot "bin\choco.exe"
-if (-not (Test-Path $Choco)) { Write-Output "choco.exe not found in $ChocoRoot"; exit 1 }
-
 $TaskPath = "\PackTune\Chocolatey\"
 $OldTaskPath = "\Intune-Choco-Updates\"   # before the rename: its tasks are removed
 $TaskNames = @("Update $Package on startup", "Update $Package now", "Check $Package for updates", "Notify $Package update",
@@ -2296,6 +2294,7 @@ if ($Source) { $SourceArguments = @("--source", $Source) }
 
 __COMMON__
 __CHOCOCOMMON__
+if (-not (Test-Path $Choco)) { Write-Output "choco.exe not found in $ChocoRoot"; exit $PTExit.ChocoMissing }
 
 # The helpers of this app: %ProgramFiles%\PackTune\Chocolatey\<package> (see $ToolRoot). The tasks of
 # older versions (same names, helpers under %ProgramData%\IntuneChocoUpdates) are replaced below; that old folder is
@@ -2306,7 +2305,7 @@ $AppRoot = Join-Path $Base $Package
 if ($Uninstall) {
     $ExitCode = 0
     if (Get-InstalledVersion) {
-        if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; exit 1618 }
+        if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; exit (Get-LockExitCode) }
         # --remove-dependencies: a meta package (e.g. vlc) takes its installer package (vlc.install) with it
         & $Choco uninstall $Package -y --no-progress --remove-dependencies
         $ExitCode = $LASTEXITCODE
@@ -2332,19 +2331,22 @@ try {
     Protect-Folder $Base
     Protect-Folder $AppRoot
 }
-catch { Write-Output "The folder $AppRoot could not be protected: $($_.Exception.Message)"; exit 1 }
+catch { Write-Output "The folder $AppRoot could not be protected: $($_.Exception.Message)"; exit $PTExit.FolderProtect }
 $ResultFile = Join-Path $AppRoot "last-result.json"
 
 # A new installation always installs. When only the policy changed (released version, update mode), the device
 # follows its update mode: Off installs a released version right away (latest + Off leaves the installed version
 # alone), Startup at the next startup, Custom asks the user and installs at the latest when the grace period is over.
 $Upgrade = (-not $Installed) -or ($Mode -eq "Off" -and $Version -and (Compare-PackageVersion $Version $Installed) -ne 0)
-if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running after 30 minutes"; Write-DeviceLog "another installation is still running, Intune tries again"; exit 1618 }
+if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running after 30 minutes"; Write-DeviceLog "another installation is still running, Intune tries again"; exit (Get-LockExitCode) }
 if (Test-ChocolateyUpdateDue) { Write-Output (Update-Chocolatey) }
 $ExitCode = 0
 if ($Upgrade) {
-    & $Choco upgrade $Package -y --no-progress @VersionArguments @SourceArguments
+    # The output is kept to tell the cause (not found, unreachable, checksum ...) from a plain failure
+    $ChocoOutput = (& $Choco upgrade $Package -y --no-progress @VersionArguments @SourceArguments 2>&1 | Out-String)
     $ExitCode = $LASTEXITCODE
+    Write-Output $ChocoOutput
+    $ExitCode = Resolve-PackageFailure $ExitCode $ChocoOutput
 }
 Exit-DeploymentLock
 if ($Upgrade) {
@@ -2366,7 +2368,7 @@ try {
     Write-ProtectedFile (Join-Path $AppRoot "config.json") (@{ Package = $Package; TaskId = $Package; TaskPath = $TaskPath; Source = $Source; Version = $Version; Mode = $Mode; GraceHours = $GraceHours; DisplayName = $DisplayName; Schedule = $Sched } | ConvertTo-Json -Depth 4)
     foreach ($File in "state.json", "retry.json", "restart.json") { Remove-Item -Path (Join-Path $AppRoot $File) -Force -ErrorAction SilentlyContinue }
 }
-catch { Write-Output "The update helpers could not be copied: $($_.Exception.Message)"; exit 1 }
+catch { Write-Output "The update helpers could not be copied: $($_.Exception.Message)"; exit $PTExit.HelpersCopy }
 
 __TASKREG__
 
@@ -2381,12 +2383,13 @@ catch {
     # Without its tasks the app is not set up: no marker, so detection fails and Intune runs install.ps1 again
     Write-Output "Update tasks could not be registered: $($_.Exception.Message)"
     Write-DeviceLog "update tasks could not be registered: $($_.Exception.Message)"
-    Save-LastResult "install" "failed" 1 "update tasks could not be registered"
-    exit 1
+    Save-LastResult "install" "failed" $PTExit.TaskRegister "update tasks could not be registered"
+    exit $PTExit.TaskRegister
 }
 
 # The detection rule compares this marker with the policy in Intune
-Write-ProtectedFile (Join-Path $AppRoot "policy.txt") $Policy
+try { Write-ProtectedFile (Join-Path $AppRoot "policy.txt") $Policy }
+catch { Write-Output "The policy marker could not be written: $($_.Exception.Message)"; exit $PTExit.PolicyWrite }
 exit $ExitCode
 '@
 
@@ -3100,6 +3103,7 @@ function New-PackTuneAppFromCatalog {
 . (Join-Path $PSScriptRoot "PackTune-Toast.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Tray.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Release.ps1")
+. (Join-Path $PSScriptRoot "PackTune-ExitCodes.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Custom.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Store.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Protocol.ps1")
