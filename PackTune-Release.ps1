@@ -146,8 +146,9 @@ function Publish-PackTuneSupersedingApp {
 
     Write-Host "Building the package"
     $WorkPath = New-PackTuneWorkFolder -Name $(if ($IsWinget) { "winget-" + ($Package -replace '[^A-Za-z0-9._-]', '_') } else { $Package })
-    $DetectionFile = if ($IsWinget) { New-WingetPackageScripts -WingetId $Package -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $Old.displayName }
-    else { New-ChocoPackageScripts -ChocoName $Package -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $Old.displayName }
+    $OldIcon = if ($Old.largeIcon -and $Old.largeIcon.value) { [string]$Old.largeIcon.value } else { "" }
+    $DetectionFile = if ($IsWinget) { New-WingetPackageScripts -WingetId $Package -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $Old.displayName -IconBase64 $OldIcon }
+    else { New-ChocoPackageScripts -ChocoName $Package -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $Old.displayName -IconBase64 $OldIcon }
     $IntuneWinFile = New-PackTunePackage -WorkPath $WorkPath
 
     $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }

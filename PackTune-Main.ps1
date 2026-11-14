@@ -90,7 +90,7 @@ $script:DefaultSettings = [ordered]@{
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
 # Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
-$script:DeviceScriptRevision = 7
+$script:DeviceScriptRevision = 8
 # Longest random delay of the update tasks that is read back from the notes (one week)
 $script:MaxDelayMinutes = 10080
 
@@ -1825,18 +1825,37 @@ function Invoke-UpdateRun {
 }#Schedule logic of update.ps1
 
 function Get-UpdateNotifyScript {
-    # The prompts for the signed-in user, for Chocolatey and winget apps (only the task folder differs): update prompt of
-    # Custom mode, warning before the app is closed at the deadline, restart request
+    # The notifications for the signed-in user, for Chocolatey and winget apps (only the task folder differs): update prompt of
+    # Custom mode, notice before the app is closed at the deadline, restart request. Windows toasts with the icon of the package and
+    # buttons; a PackTune styled window when toasts are off or hidden at the deadline (library: PackTune-Toast.ps1)
     param([Parameter(Mandatory = $true)][string]$TaskPath)
     $Script = @'
-# Shows prompts in the session of a signed-in user (scheduled task of the Users group, no admin rights).
+# Shows notifications in the session of a signed-in user (scheduled task of the Users group, no admin rights).
 # Update: "Install now" starts the SYSTEM task "Update <package> now"; "Later" is respected for 4 hours, but not within
 # the last hour before the update is installed anyway. Closing: after the deadline, tells when the app is closed.
-# Restart: asks to restart after an update that needs it.
-Add-Type -AssemblyName System.Windows.Forms
-# DefaultDesktopOnly: the prompt comes to the front without a window of its own
-$Options = [System.Windows.Forms.MessageBoxOptions]::DefaultDesktopOnly
+# Restart: asks to restart after an update that needs it ("Remind me in 1 hour" asks again later).
+# Windows toast notifications under the app "PackTune Updates"; the buttons start this script again with -Activate and a
+# packtune-update: address, which only maps to those fixed actions (one-time token written when the toast was shown).
+param([string]$Activate)
 $SnoozeFolder = Join-Path $env:LOCALAPPDATA "PackTune\Updates"
+__LIBRARY__
+
+$TaskPath = "__TASKPATH__"
+$HandlerScript = $MyInvocation.MyCommand.Path
+$IconFile = Join-Path $PSScriptRoot "icon.png"
+
+if ($Activate) {
+    # A button of a toast: only the fixed actions of a token this machine wrote, for an installed package
+    try {
+        $Action = Resolve-ToastActivation $Activate
+        if ($Action) {
+            $Result = Invoke-ToastAction $Action
+            if ($Result) { [void](Show-Notice -Package $Action.Package -Name $Action.DisplayName -TaskPath $Action.TaskPath -Title "Software update: $($Action.DisplayName)" -Lines @($Result) -IconFile $IconFile -HandlerScript $HandlerScript) }
+        }
+    }
+    catch { Write-NotifyLog "activation failed: $($_.Exception.Message)" }
+    exit 0
+}
 
 $RestartFile = Join-Path $PSScriptRoot "restart.json"
 if (Test-Path $RestartFile) {
@@ -1848,15 +1867,12 @@ if (Test-Path $RestartFile) {
         if (Test-Path $SnoozeFile) { try { $Snoozed = (Get-Date) -lt [datetime](Get-Content -Path $SnoozeFile -Raw).Trim() } catch { } }
         if (-not $Booted -and -not $Snoozed) {
             $Name = if ($Request.DisplayName) { $Request.DisplayName } else { $Request.Package }
-            $Answer = [System.Windows.Forms.MessageBox]::Show("The update of $Name needs a restart of this device.`r`n`r`nRestart now? Save your work first.", "Software update: $Name", "YesNo", "Information", "Button2", $Options)
-            if ($Answer -eq "Yes") { & shutdown.exe /r /t 60 /c "Restart for the update of $Name" | Out-Null }
-            else {
-                New-Item -Path $SnoozeFolder -ItemType Directory -Force | Out-Null
-                Set-Content -Path $SnoozeFile -Value (Get-Date).AddHours(4).ToString("o")
-            }
+            [void](Show-Notice -Package $Request.Package -Name $Name -TaskPath $TaskPath -Title "Software update: $Name" -IconFile $IconFile -HandlerScript $HandlerScript `
+                -Lines @("The update of $Name needs a restart of this device.", "Restart now? Save your work first.") `
+                -Buttons @(@{ Text = "Restart now"; Verb = "restart"; Primary = $true }, @{ Text = "Remind me in 1 hour"; Verb = "remind" }))
         }
     }
-    catch { }
+    catch { Write-NotifyLog "restart notice failed: $($_.Exception.Message)" }
 }
 
 $StateFile = Join-Path $PSScriptRoot "state.json"
@@ -1871,7 +1887,9 @@ if ((Get-Date) -ge $Deadline) {
         if (-not $Warned) {
             New-Item -Path $SnoozeFolder -ItemType Directory -Force | Out-Null
             Set-Content -Path $WarnFile -Value ([string]$State.CloseAt)
-            [void][System.Windows.Forms.MessageBox]::Show("$Name is updated now and will be closed at $(([datetime]$State.CloseAt).ToString('t')).`r`n`r`nPlease save your work and close $Name.", "Software update: $Name", "OK", "Warning", "Button1", $Options)
+            [void](Show-Notice -Package $State.Package -Name $Name -TaskPath $TaskPath -Title "Software update: $Name" -IconFile $IconFile -HandlerScript $HandlerScript -Deadline $true `
+                -Lines @("$Name is updated now and will be closed at $(([datetime]$State.CloseAt).ToString('t')).", "Please save your work and close $Name.") `
+                -Buttons @(@{ Text = "OK"; Primary = $true }))
         }
     }
     exit 0
@@ -1884,21 +1902,12 @@ if (Test-Path $SnoozeFile) {
 }
 
 $Versions = if ($State.Installed -and $State.Target) { " ($($State.Installed) -> $($State.Target))" } else { "" }
-$Text = "An update for $Name is available$Versions.`r`n`r`n" +
-    "Install it now? Save your work in $Name first, it may be closed during the update.`r`n`r`n" +
-    "Otherwise it is installed automatically from $($Deadline.ToString('g'))."
-$Answer = [System.Windows.Forms.MessageBox]::Show($Text, "Software update: $Name", "YesNo", "Information", "Button1", $Options)
-if ($Answer -eq "Yes") {
-    & schtasks.exe /run /tn "__TASKPATH__Update $($State.Package) now" | Out-Null
-    $Message = if ($LASTEXITCODE -eq 0) { "The update of $Name is being installed now." } else { "The update could not be started. It is installed automatically from $($Deadline.ToString('g'))." }
-    [void][System.Windows.Forms.MessageBox]::Show($Message, "Software update: $Name", "OK", "Information", "Button1", $Options)
-}
-else {
-    New-Item -Path $SnoozeFolder -ItemType Directory -Force | Out-Null
-    Set-Content -Path $SnoozeFile -Value (Get-Date).AddHours(4).ToString("o")
-}
+# The last hour before the automatic update: the toast stays on screen until it is dealt with, and Focus assist does not hide it
+[void](Show-Notice -Package $State.Package -Name $Name -TaskPath $TaskPath -Title "Software update: $Name" -IconFile $IconFile -HandlerScript $HandlerScript -Deadline ($Deadline -le (Get-Date).AddHours(1)) `
+    -Lines @("An update for $Name is available$Versions. Install it now? Save your work in $Name first, it may be closed during the update.", "Otherwise it is installed automatically from $($Deadline.ToString('g')).") `
+    -Buttons @(@{ Text = "Install now"; Verb = "install"; Primary = $true }, @{ Text = "Later"; Verb = "later" }))
 '@
-    return $Script.Replace("__TASKPATH__", $TaskPath)
+    return $Script.Replace("__LIBRARY__", (Get-UpdateToastLibrary)).Replace("__TASKPATH__", $TaskPath)
 }#Script of the prompts for the signed-in user
 
 function New-ChocoPackageScripts {
@@ -1910,7 +1919,9 @@ function New-ChocoPackageScripts {
         [Parameter(Mandatory = $true)][string]$ChocoName,
         [Parameter(Mandatory = $true)][string]$SourcePath,
         [Parameter(Mandatory = $true)]$Policy,
-        [string]$DisplayName = ""
+        [string]$DisplayName = "",
+        # The icon of the package (PNG or JPEG, base64), shown in the notifications on the device
+        [string]$IconBase64 = ""
     )
 
     # Plain ASCII on purpose: Windows PowerShell reads BOM-less files as ANSI
@@ -2028,7 +2039,9 @@ try {
     foreach ($File in "update.ps1", "notify.ps1", "probe.ps1") {
         Remove-Item -LiteralPath (Join-Path $AppRoot $File) -Force -ErrorAction SilentlyContinue
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $File) -Destination $AppRoot -Force -ErrorAction Stop
-    }
+    }    # The icon of the package for the notifications of the user (optional)
+    Remove-Item -LiteralPath (Join-Path $AppRoot "icon.png") -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath (Join-Path $PSScriptRoot "icon.png")) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "icon.png") -Destination $AppRoot -Force -ErrorAction SilentlyContinue }
     Write-ProtectedFile (Join-Path $AppRoot "config.json") (@{ Package = $Package; TaskId = $Package; TaskPath = $TaskPath; Source = $Source; Version = $Version; Mode = $Mode; GraceHours = $GraceHours; DisplayName = $DisplayName; Schedule = $Sched } | ConvertTo-Json -Depth 4)
     foreach ($File in "state.json", "retry.json", "restart.json") { Remove-Item -Path (Join-Path $AppRoot $File) -Force -ErrorAction SilentlyContinue }
 }
@@ -2209,7 +2222,7 @@ exit 1
     Set-Content -Path (Join-Path $SourcePath "update.ps1") -Value $UpdateScript -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "notify.ps1") -Value $NotifyScript -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "probe.ps1") -Value (Get-ScreenProbeScript) -Encoding ASCII
-    $DetectionFile = Join-Path (Split-Path $SourcePath) "detection.ps1"
+    if ($IconBase64) { try { [IO.File]::WriteAllBytes((Join-Path $SourcePath "icon.png"), [Convert]::FromBase64String($IconBase64)) } catch { } }    $DetectionFile = Join-Path (Split-Path $SourcePath) "detection.ps1"
     Set-Content -Path $DetectionFile -Value $DetectionScript -Encoding ASCII
     return $DetectionFile
 }#Writes install.ps1, the update helpers and the detection script for an update policy
@@ -2327,7 +2340,7 @@ function New-PackTuneChocolateyApp {
                 ### Install and Detection Script, package
                 Write-Host "Creating the install and detection script"
                 $WorkPath = New-PackTuneWorkFolder -Name $Name
-                $DetectionFile = New-ChocoPackageScripts -ChocoName $Name -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $AppName
+                $DetectionFile = New-ChocoPackageScripts -ChocoName $Name -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $AppName -IconBase64 $Icon
                 $IntuneWinFile = New-PackTunePackage -WorkPath $WorkPath
 
                 $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }
@@ -2473,8 +2486,9 @@ function Update-PackTuneApp {
 
     Write-Host "Building the package with the new policy"
     $WorkPath = New-PackTuneWorkFolder -Name $(if ($IsWinget) { "winget-" + ($Package -replace '[^A-Za-z0-9._-]', '_') } else { $Package })
-    $DetectionFile = if ($IsWinget) { New-WingetPackageScripts -WingetId $Package -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $App.displayName }
-    else { New-ChocoPackageScripts -ChocoName $Package -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $App.displayName }
+    $AppIcon = if ($App.largeIcon -and $App.largeIcon.value) { [string]$App.largeIcon.value } else { "" }
+    $DetectionFile = if ($IsWinget) { New-WingetPackageScripts -WingetId $Package -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $App.displayName -IconBase64 $AppIcon }
+    else { New-ChocoPackageScripts -ChocoName $Package -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $App.displayName -IconBase64 $AppIcon }
     $IntuneWinFile = New-PackTunePackage -WorkPath $WorkPath
 
     # Content first, then the detection rule: until the rule changes, devices keep the old state
@@ -2690,6 +2704,7 @@ function New-PackTuneAppFromCatalog {
 # One app list for both sources, the PackTune Runtime dependency app, release via supersedence
 . (Join-Path $PSScriptRoot "PackTune-Sources.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Runtime.ps1")
+. (Join-Path $PSScriptRoot "PackTune-Toast.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Release.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Custom.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Store.ps1")

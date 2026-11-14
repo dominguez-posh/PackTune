@@ -141,7 +141,9 @@ function New-WingetPackageScripts {
         [Parameter(Mandatory = $true)][string]$WingetId,
         [Parameter(Mandatory = $true)][string]$SourcePath,
         [Parameter(Mandatory = $true)]$Policy,
-        [string]$DisplayName = ""
+        [string]$DisplayName = "",
+        # The icon of the package (PNG or JPEG, base64), shown in the notifications on the device
+        [string]$IconBase64 = ""
     )
 
     # Plain ASCII on purpose: Windows PowerShell reads BOM-less files as ANSI
@@ -299,7 +301,9 @@ try {
     foreach ($File in "update.ps1", "notify.ps1", "probe.ps1") {
         Remove-Item -LiteralPath (Join-Path $AppRoot $File) -Force -ErrorAction SilentlyContinue
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $File) -Destination $AppRoot -Force -ErrorAction Stop
-    }
+    }    # The icon of the package for the notifications of the user (optional)
+    Remove-Item -LiteralPath (Join-Path $AppRoot "icon.png") -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath (Join-Path $PSScriptRoot "icon.png")) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot "icon.png") -Destination $AppRoot -Force -ErrorAction SilentlyContinue }
     Write-ProtectedFile (Join-Path $AppRoot "config.json") (@{ Id = $Id; SafeId = $SafeId; TaskId = $SafeId; TaskPath = $TaskPath; Version = $Version; Mode = $Mode; GraceHours = $GraceHours; DisplayName = $DisplayName; Schedule = $Sched } | ConvertTo-Json -Depth 4)
     foreach ($File in "state.json", "retry.json", "restart.json") { Remove-Item -Path (Join-Path $AppRoot $File) -Force -ErrorAction SilentlyContinue }
     if ($Applied -and $Version) { Write-ProtectedFile $VersionFile $Version }
@@ -455,7 +459,7 @@ exit 1
     Set-Content -Path (Join-Path $SourcePath "update.ps1") -Value $UpdateScript -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "notify.ps1") -Value (Get-UpdateNotifyScript -TaskPath "\PackTune\Winget\") -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "probe.ps1") -Value (Get-ScreenProbeScript) -Encoding ASCII
-    $DetectionFile = Join-Path (Split-Path $SourcePath) "detection.ps1"
+    if ($IconBase64) { try { [IO.File]::WriteAllBytes((Join-Path $SourcePath "icon.png"), [Convert]::FromBase64String($IconBase64)) } catch { } }    $DetectionFile = Join-Path (Split-Path $SourcePath) "detection.ps1"
     Set-Content -Path $DetectionFile -Value $DetectionScript -Encoding ASCII
     return $DetectionFile
 
@@ -546,7 +550,7 @@ function New-PackTuneWingetApp {
 
                 Write-Host "Creating the install and detection script"
                 $WorkPath = New-PackTuneWorkFolder -Name ("winget-" + ($Id -replace '[^A-Za-z0-9._-]', '_'))
-                $DetectionFile = New-WingetPackageScripts -WingetId $Id -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $AppName
+                $DetectionFile = New-WingetPackageScripts -WingetId $Id -SourcePath (Join-Path $WorkPath "source") -Policy $Policy -DisplayName $AppName -IconBase64 $Icon
                 $IntuneWinFile = New-PackTunePackage -WorkPath $WorkPath
 
                 $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }
