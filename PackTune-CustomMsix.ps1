@@ -341,13 +341,14 @@ function Get-PackTuneMsixLogoBase64 {
 function Add-PackTuneCustomMsixIntuneApp {
     param(
         [Parameter(Mandatory = $true)]$Build, [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)]$Package, [Parameter(Mandatory = $true)][string]$DisplayName,
-        [string]$Description, [string]$Publisher, [string]$IconBase64, [string]$Manifest, [string]$Architecture = $script:Settings.Architecture, [string]$MinimumWindows = "W10_1809"
+        [string]$Description, [string]$Publisher, [string]$IconBase64, [string]$Manifest, [string]$ExtraNotes, [string]$Architecture = $script:Settings.Architecture, [string]$MinimumWindows = "W10_1809"
     )
     $DetectionFile = $Package.DetectionFile
     $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }
     $RequirementRule = Invoke-IntuneModule { New-IntuneWin32AppRequirementRule -Architecture $Architecture -MinimumSupportedWindowsRelease $MinimumWindows }
     $Notes = "$($script:CustomMarker)msix;app=$AppId;ver=$($Build.Version);identity=$($Build.PackageName);thumb=$($Build.Thumbprint)"
     if ($Manifest) { $Notes += ";manifest=$(ConvertTo-PackTuneManifestAnchor $Manifest)" }
+    if ($ExtraNotes) { $Notes += ";$ExtraNotes" }
     $AppParams = @{
         FilePath = $Package.Package.Path; DisplayName = $DisplayName; Description = $(if ($Description) { $Description } else { $DisplayName }); Publisher = $(if ($Publisher) { $Publisher } else { "-" })
         AppVersion = $Build.Version; Notes = $Notes; InstallExperience = "system"; RestartBehavior = "suppress"; DetectionRule = $DetectionRule; RequirementRule = $RequirementRule
@@ -497,8 +498,9 @@ function Export-PackTuneCustomApp {
     Assert-PackTuneConnection
     Update-PackTuneToken
     $Apps = @(Get-PackTuneCustomApps | Where-Object { $_.AppId -eq $AppId })
-    $State = Get-PackTuneStoreState
-    if ($State.State -ne "Ready") { throw "The package store is not ready: $($State.Message)" }
+    $Repo = @($Apps | Where-Object { $_.Repo } | Select-Object -First 1).Repo
+    $State = if ($Repo) { $null } else { Get-PackTuneStoreState }
+    if (-not $Repo -and $State.State -ne "Ready") { throw "The package store is not ready: $($State.Message)" }
     if (-not $Version) {
         $Latest = @($Apps | Sort-Object { try { [version]$_.Version } catch { [version]"0.0" } } -Descending) | Select-Object -First 1
         $Version = if ($Latest) { $Latest.Version } else { (@(Get-PackTuneStoreVersions -AppId $AppId -Store $State.Store | Where-Object Complete | Sort-Object { try { [version]$_.Version } catch { [version]"0.0" } } -Descending) | Select-Object -First 1).Version }
@@ -507,6 +509,8 @@ function Export-PackTuneCustomApp {
     $Known = @($Apps | Where-Object { $_.Version -eq $Version }) | Select-Object -First 1
     # Fail closed: without the Intune app of this version (or without manifest= in its notes) nothing vouches for the store
     if (-not $Known) { throw "There is no Intune app of $AppId $Version, so the stored files cannot be checked against Intune: nothing was downloaded." }
+    # An app moved to a repository is read from there (the notes say which one), with the same anchor
+    if ($Known.Repo) { return (Save-PackTuneRepoVersion -Repository $Known.Repo -AppId $AppId -Version $Version -Destination $Destination -ExpectedManifest ([string]$Known.Manifest)) }
     Save-PackTuneStoreVersion -AppId $AppId -Version $Version -Destination $Destination -ExpectedManifest ([string]$Known.Manifest) -Store $State.Store
 }#Downloads a stored version for editing
 
