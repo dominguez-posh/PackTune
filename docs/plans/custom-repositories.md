@@ -1,6 +1,6 @@
 # Plan: custom package repositories on GitHub
 
-Status: proposal for the user, no code yet. Security-relevant (trust in third-party content that becomes an app for all devices, credentials of the user).
+Status: built on branch feature/repositories (issue #21); the user approved all recommendations of section 14. Differences from the plan: PAT first (device flow and GitHub App later), tokens in DPAPI only (Keevault later), large files keep the store's manifest byte for byte and are found as release assets of the same file name (the index lists them under `assets`) so the Intune anchor does not change, Moved versions still need approval before a new deployment, the interface lives as a section of the Settings page. See docs/REPOSITORIES.md. Security-relevant (trust in third-party content that becomes an app for all devices, credentials of the user).
 Branch: docs/plan-repositories. Issue: to be opened when work starts. Builds on `docs/plans/custom-applications.md` (package store, manifest, MSI/MSIX rules, certificates).
 
 ## 0. Summary and recommendations

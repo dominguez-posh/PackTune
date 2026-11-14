@@ -131,3 +131,22 @@ function Invoke-PackTuneGitHub {
         default { throw "fake GitHub: $Method $url" }
     }
 }
+
+function Initialize-FakeGitHubSmoke {
+    # A public repository "demo/packages" with one app version, the same in every runspace (deterministic bytes, demo data only)
+    New-FakeRepo -FullName 'demo/packages' -Id 7701
+    $app = 'demo-tool-0a1b2c3d'; $ver = '1.0.0'
+    $files = [ordered]@{}
+    $files['installer.zip'] = [byte[]](1..200 | ForEach-Object { $_ % 251 })
+    $files['package.intunewin'] = [byte[]](1..300 | ForEach-Object { ($_ * 3) % 251 })
+    $files['recipe.json'] = [Text.Encoding]::UTF8.GetBytes('{"format":"PackTune.Recipe","kind":"msi","app":"demo-tool-0a1b2c3d","name":"Demo Tool","version":"1.0.0","publisher":"Demo Ltd","msi":"demo.msi","arguments":""}')
+    $sha = [Security.Cryptography.SHA256]::Create()
+    $entries = foreach ($n in $files.Keys) { [ordered]@{ name = $n; sha256 = (-join ($sha.ComputeHash([byte[]]$files[$n]) | ForEach-Object { $_.ToString('X2') })); size = $files[$n].Length } }
+    $manifest = [Text.Encoding]::UTF8.GetBytes(([ordered]@{ format = 'PackTune.Store'; version = 1; app = $app; appVersion = $ver; kind = 'msi'; created = '2026-11-01T00:00:00Z'; files = @($entries) } | ConvertTo-Json -Depth 6))
+    $hash = -join ($sha.ComputeHash($manifest) | ForEach-Object { $_.ToString('x2') })
+    $index = [ordered]@{ format = 1; name = 'Demo packages'; apps = @([ordered]@{ id = $app; name = 'Demo Tool'; publisher = 'Demo Ltd'; kind = 'msi'; versions = @([ordered]@{ version = $ver; path = "apps/$app/$ver"; manifest = $hash; released = '2026-11-01' }) }) }
+    $put = @{ 'packtune.json' = [Text.Encoding]::UTF8.GetBytes(($index | ConvertTo-Json -Depth 8)); "apps/$app/$ver/manifest.json" = $manifest }
+    foreach ($n in $files.Keys) { $put["apps/$app/$ver/$n"] = $files[$n] }
+    Add-FakeCommit -Repo $script:Gh.Repos['demo/packages'] -Files $put -Message 'Add Demo Tool 1.0.0' | Out-Null
+}
+if ($env:PACKTUNE_FAKE_GITHUB) { Initialize-FakeGitHubSmoke }

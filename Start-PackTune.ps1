@@ -4272,10 +4272,160 @@ function Update-SettingsView {
     $ui.TxtDefaultSchedule.Text = "$($t.When). $($t.Conditions)."
     $script:SandboxState = $null; Update-Readiness; Update-SandboxButtons
     Update-ModuleState
+    try { Update-RepoView } catch { }
 }
 $ui.CmbArchitecture.ItemsSource = @('x64x86', 'x64', 'x86', 'arm64', 'AllWithARM64')
 $ui.CmbAssignment.ItemsSource = @('Available', 'Required', 'None')
 $ui.CmbPreferredSource.ItemsSource = @('winget', 'Chocolatey')
+
+#region Repositories (section of the Settings page; custom repositories on GitHub, PackTune-Repos.ps1)
+$script:RepoList = @()
+$script:RepoApps = @()
+$script:RepoMoveItems = @()
+$script:RepoRows = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+$ui.LstRepoApps.ItemsSource = $script:RepoRows
+function Get-SelectedRepoEntry { $i = $ui.LstRepos.SelectedIndex; if ($i -ge 0 -and $i -lt @($script:RepoList).Count) { @($script:RepoList)[$i] } }
+function Get-SelectedRepoApp { $row = $ui.LstRepoApps.SelectedItem; if ($row) { $row.Data } }
+function Update-RepoApps {
+    $script:RepoRows.Clear()
+    foreach ($a in @($script:RepoApps | Where-Object { $_ })) {
+        $colors = if ($a.Approved) { $script:PillColors['ok'] } else { $script:PillColors['warn'] }
+        $stale = if ($a.Stale) { "  $([char]0x00B7)  stale (GitHub not reachable)" } else { '' }
+        $script:RepoRows.Add((New-Row (@{
+                        Data = $a; Title = $a.Name; Sub = "$($a.Source)  $([char]0x00B7)  $($a.Publisher)$stale"
+                        Kind = "$($a.Kind.ToUpper()) $($a.Latest)"; KindBg = $colors[0]; KindFg = $colors[1]
+                        Assigned = $(if ($a.Approved) { 'Approved' } else { 'Needs approval' })
+                    } + (Get-TileStyle $a.Name))))
+    }
+    $sel = Get-SelectedRepoEntry
+    $ui.TxtRepoAppsEmpty.Text = if (-not $sel) { 'Select a repository.' } elseif ($script:RepoRows.Count) { '' } else { 'No applications in this repository (or it has not been read yet: Refresh).' }
+    $ui.BtnRepoApprove.IsEnabled = [bool]$script:RepoRows.Count
+    $ui.BtnRepoDeploy.IsEnabled = [bool]$script:RepoRows.Count -and (Test-SignedIn)
+}
+function Update-RepoView {
+    $keep = $ui.LstRepos.SelectedIndex
+    $script:RepoList = @(Get-PackTuneRepositories)
+    $dot = [char]0x00B7
+    $ui.LstRepos.ItemsSource = @($script:RepoList | ForEach-Object { "$(Get-PackTuneRepoLabel $_)  $dot  $($_.Owner)/$($_.Repo)  $dot  $(if ($_.Private) { 'private' } else { 'public' })$(if ($_.ThirdParty) { ', third-party source (read only)' })$(if ($_.RequireSigned) { ', verified commits required' })" })
+    if ($keep -ge 0 -and $keep -lt @($script:RepoList).Count) { $ui.LstRepos.SelectedIndex = $keep }
+    $ui.TxtRepoEmpty.Visibility = ConvertTo-Vis (-not @($script:RepoList).Count)
+    $has = [bool](Get-SelectedRepoEntry)
+    $ui.BtnRepoRefresh.IsEnabled = $has; $ui.BtnRepoRemove.IsEnabled = $has
+    $own = $has -and -not (Get-SelectedRepoEntry).ThirdParty
+    $ui.PwdRepoWrite.IsEnabled = $own; $ui.BtnRepoGrantWrite.IsEnabled = $own
+    $ui.BtnRepoMove.IsEnabled = $own -and (Test-SignedIn)
+    $moveApps = @($script:CustomApps | Where-Object { $_ -and -not $_.Repo -and $_.AppId } | Group-Object AppId | ForEach-Object { $_.Group[0] })
+    $script:RepoMoveItems = $moveApps
+    $ui.CmbRepoMove.ItemsSource = @($moveApps | ForEach-Object { "$($_.DisplayName) ($($_.AppId))" })
+    if ($moveApps.Count -and $ui.CmbRepoMove.SelectedIndex -lt 0) { $ui.CmbRepoMove.SelectedIndex = 0 }
+    Update-RepoApps
+}
+function Start-RepoRefresh {
+    $sel = Get-SelectedRepoEntry
+    if (-not $sel) { Update-RepoApps; return }
+    $key = "$($sel.Owner)/$($sel.Repo)"
+    $ui.TxtRepoWarnings.Text = ''
+    [void](Start-UiTask -Kind 'repoapps' -Title "Reading the repository $key" -Display "Repository $key" -Hidden -Pool $script:UserPool -Arguments @{ Repository = $key } -Work 'param($Repository) [pscustomobject]@{ Apps = @(Get-PackTuneRepositoryApps -Repository $Repository -Refresh); Warnings = @(Get-PackTuneRepoWarnings -Repository $Repository) }' -OnDone {
+            param($Result, $Job)
+            if ($Job.Status -eq 'succeeded' -and $Result) {
+                $script:RepoApps = @($Result.Apps | Where-Object { $_ })
+                $ui.TxtRepoWarnings.Text = (@($Result.Warnings) -join "`n")
+            }
+            else { $script:RepoApps = @(); Write-UiLog 'The repository could not be read, see above.' 'Warning' }
+            Update-RepoApps
+        })
+}
+$ui.LstRepos.Add_SelectionChanged({ try { $script:RepoApps = @(); Update-RepoView; Start-RepoRefresh } catch { Show-Error $_.Exception.Message } })
+Add-Click $ui.BtnRepoRefresh { Start-RepoRefresh }
+Add-Click $ui.BtnRepoAdd {
+    $address = $ui.TxtRepoAddress.Text.Trim()
+    if (-not $address) { throw 'Enter the repository as owner/name or its github.com address.' }
+    $null = ConvertTo-PackTuneRepoKey $address
+    $repoArgs = @{ Repository = $address; Token = $ui.PwdRepoToken.Password; Own = [bool]$ui.ChkRepoOwn.IsChecked; Signed = [bool]$ui.ChkRepoSigned.IsChecked }
+    $ui.PwdRepoToken.Clear()
+    [void](Start-UiTask -Kind 'repoadd' -Title "Connecting $address" -Display "Repository $address" -Pool $script:UserPool -Arguments $repoArgs -Work 'param($Repository, $Token, $Own, $Signed) $null = Add-PackTuneRepository -Repository $Repository -Token $Token -Own:$Own -RequireSignedCommits:$Signed' -OnDone {
+            param($Result, $Job)
+            if ($Job.Status -eq 'succeeded') { $ui.TxtRepoAddress.Text = ''; Show-Toast 'Repository connected.' 'ok' }
+            Update-RepoView
+            if ($Job.Status -eq 'succeeded') { $ui.LstRepos.SelectedIndex = @($script:RepoList).Count - 1 }
+        })
+}
+Add-Click $ui.BtnRepoRemove {
+    $sel = Get-SelectedRepoEntry
+    if (-not $sel) { return }
+    if (-not (Confirm-Action "Disconnect '$($sel.Owner)/$($sel.Repo)' from PackTune?`n`nThe stored token is removed. Apps already deployed from it stay in Intune; your approvals are kept as a record." 'Remove repository' 'Remove' 'Keep')) { return }
+    Remove-PackTuneRepository "$($sel.Owner)/$($sel.Repo)"
+    $script:RepoApps = @(); Update-RepoView
+}
+function Format-RepoApprovalText($Request) {
+    $c = $Request.Commit
+    $files = (@($Request.Files | ForEach-Object { "  $($_.Name)  ($([Math]::Round($_.Size / 1KB)) KB, $($_.Status))`n    SHA256 $($_.Sha256)" }) -join "`n")
+    $title = "$($Request.Name) $($Request.Version) from $($Request.Label) ($($Request.Repository))"
+    if ($Request.ThirdParty) { $title += ' - THIRD-PARTY SOURCE' }
+    $compare = if ($Request.PreviousVersion) { "Changes against the approved version $($Request.PreviousVersion):" } else { 'First approval of this app:' }
+    @($title, "Commit $($c.Sha.Substring(0, 12)) by $($c.Author) on $($c.Date)", "Message: $($c.Message)", "Signature: $(if ($c.Verified) { 'verified by GitHub' } else { 'NOT verified' })",
+        "Manifest SHA256 $($Request.Manifest)", $compare, $files, 'Approving lets this exact content be deployed to your devices.') -join "`n"
+}
+Add-Click $ui.BtnRepoApprove {
+    $app = Get-SelectedRepoApp
+    if (-not $app) { return }
+    [void](Start-UiTask -Kind 'repoapprove' -Title "Reading $($app.Name) $($app.Latest) for approval" -Display "Approval $($app.Name)" -Hidden -Pool $script:UserPool -Arguments @{ Repository = $app.Repository; AppId = $app.AppId; Version = $app.Latest } -Work 'param($Repository, $AppId, $Version) Get-PackTuneRepoApprovalRequest -Repository $Repository -AppId $AppId -Version $Version' -OnDone {
+            param($Result, $Job)
+            if ($Job.Status -ne 'succeeded' -or -not $Result) { Write-UiLog 'The approval could not be prepared, see above.' 'Warning'; return }
+            $req = $Result
+            if ($req.Blocked) { Show-Toast "Cannot be approved: $($req.Blocked)" 'bad'; Write-UiLog "[$($req.Name)] $($req.Blocked)" 'Error'; return }
+            if (-not (Confirm-Action (Format-RepoApprovalText $req) "Approve $($req.Name) $($req.Version)?" 'Approve' 'Cancel')) { return }
+            [void](Start-UiTask -Kind 'repoapprove' -Title "Approving $($req.Name) $($req.Version)" -Display "Approval $($req.Name)" -Pool $script:UserPool -Arguments @{ Request = $req } -Work 'param($Request) $null = Approve-PackTuneRepoVersion -Request $Request' -OnDone {
+                    param($Result2, $Job2)
+                    if ($Job2.Status -eq 'succeeded') { Show-Toast 'Approved. The version can be deployed now.' 'ok' }
+                    Start-RepoRefresh
+                })
+        })
+}
+Add-Click $ui.BtnRepoDeploy {
+    $app = Get-SelectedRepoApp
+    if (-not $app) { return }
+    if (-not $app.Approved) { throw "$($app.Name) $($app.Latest) needs your approval first (Review and approve)." }
+    if (-not (Confirm-Action "Deploy '$($app.Name) $($app.Latest)' from $($app.Source) to Intune?`n`nA Win32 app is created with the approved files; the notes record the repository, commit and who approved it." 'Deploy' 'Deploy' 'Cancel')) { return }
+    Update-UiToken
+    [void](Start-UiTask -Kind 'custom' -Title "Deploying $($app.Name) $($app.Latest) from $($app.Repository)" -Display $app.Name -NeedsAuth -Arguments @{ Repository = $app.Repository; AppId = $app.AppId; Version = $app.Latest } -Work 'param($Repository, $AppId, $Version) New-PackTuneRepoApp -Repository $Repository -AppId $AppId -Version $Version' -OnDone {
+            param($Result, $Job)
+            if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] deployed from the repository." 'Success'; Show-Toast "$($Job.Display) was deployed." 'ok' }
+            $script:CustomApps = $null; Start-RepoRefresh
+        })
+}
+Add-Click $ui.BtnRepoGrantWrite {
+    $sel = Get-SelectedRepoEntry
+    if (-not $sel) { return }
+    $token = $ui.PwdRepoWrite.Password
+    if (-not $token) { throw 'Paste a fine-grained token with Contents: write for this repository only.' }
+    $ui.PwdRepoWrite.Clear()
+    [void](Start-UiTask -Kind 'repowrite' -Title "Checking the write token for $($sel.Owner)/$($sel.Repo)" -Display 'Write access' -Pool $script:UserPool -Arguments @{ Repository = "$($sel.Owner)/$($sel.Repo)"; Token = $token } -Work 'param($Repository, $Token) Grant-PackTuneRepoWrite -Repository $Repository -Token $Token' -OnDone {
+            param($Result, $Job)
+            if ($Job.Status -eq 'succeeded') { Show-Toast 'Write access stored (this Windows user only).' 'ok' }
+        })
+}
+Add-Click $ui.BtnRepoMove {
+    $sel = Get-SelectedRepoEntry
+    $i = $ui.CmbRepoMove.SelectedIndex
+    if (-not $sel -or $i -lt 0 -or $i -ge @($script:RepoMoveItems).Count) { throw 'Select a repository and a custom application first (open the Custom page once to load the list).' }
+    $app = @($script:RepoMoveItems)[$i]
+    $key = "$($sel.Owner)/$($sel.Repo)"
+    if (-not (Confirm-Action "Copy all versions of '$($app.DisplayName)' from the package store to ${key}?`n`nEvery version is checked against its manifest, committed to the repository, read back and compared. SharePoint is not changed; you are asked about removing it at the end." 'Move to repository' 'Copy' 'Cancel')) { return }
+    Update-UiToken
+    [void](Start-UiTask -Kind 'repomove' -Title "Moving $($app.DisplayName) to $key" -Display "Move $($app.DisplayName)" -NeedsAuth -Arguments @{ AppId = $app.AppId; Repository = $key } -Work 'param($AppId, $Repository) Move-PackTuneCustomAppToRepository -AppId $AppId -Repository $Repository' -OnDone {
+            param($Result, $Job)
+            $script:CustomApps = $null
+            if ($Job.Status -ne 'succeeded' -or -not $Result) { return }
+            $versions = @($Result.Verified)
+            Show-Toast "$($Job.Display): $(@($Result.Copied).Count) copied, $(@($Result.Skipped).Count) already there, $($versions.Count) verified." 'ok'
+            $ask = "All $($versions.Count) version(s) of '$($app.DisplayName)' are in $key and verified.`n`nRemove them from the package store now?`n`nVersions: $($versions -join ', ')`nSharePoint keeps them in its recycle bin for 93 days; the repository keeps the history.`n`nThe default is Keep."
+            if ($versions.Count -and (Confirm-Action $ask 'Remove from SharePoint?' 'Remove from SharePoint' 'Keep')) {
+                [void](Start-UiTask -Kind 'repomove' -Title "Removing $($app.DisplayName) from the package store" -Display "Remove from store $($app.DisplayName)" -NeedsAuth -Arguments @{ AppId = $app.AppId } -Work 'param($AppId) $s = Get-PackTuneStoreState; if ($s.State -ne "Ready") { throw "The package store is not ready." }; Remove-PackTuneStoreApp -AppId $AppId -Store $s.Store' -OnDone { param($R2, $J2) if ($J2.Status -eq 'succeeded') { Show-Toast 'Removed from the package store.' 'ok' } })
+            }
+        })
+}
+#endregion
 
 function Save-Settings {
     $defaults = Read-PolicyControls 'Default'

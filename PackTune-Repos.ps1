@@ -877,3 +877,6 @@ function Test-PackTuneRepositoryClone {
 Set-Alias -Name Check-PackTuneRepository -Value Test-PackTuneRepositoryClone
 
 #endregion
+
+# Test hook (like PACKTUNE_SANDBOX_LAUNCHER): the GUI smoke test replaces the transport with the fake GitHub of Tests\Fakes
+if ($env:PACKTUNE_FAKE_GITHUB -and (Test-Path -LiteralPath $env:PACKTUNE_FAKE_GITHUB)) { . $env:PACKTUNE_FAKE_GITHUB }
