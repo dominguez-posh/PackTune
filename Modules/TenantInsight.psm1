@@ -562,6 +562,34 @@ function Set-InsightStatusScript {
     [pscustomobject]@{ Created = $true; Id = $Id; Message = $(if ($Existing) { 'updated' } else { 'created' }) + ', assigned to all devices, hourly' }
 }
 
+function Initialize-InsightStatusReport {
+    <#
+        Sets up the status report in steps and reports each one as a log line ("Step 2/5 running: ..."; the interface turns them into its
+        step list): Remediations available in the tenant (the Windows license confirmation of the Intune admin center), the script,
+        its hourly assignment to all devices, a final check. The permission (step 1) is checked by the caller before. Returns Created, Id,
+        Message and LicenseLikely (a refusal that is most likely the license confirmation).
+    #>
+    param([Parameter(Mandatory)]$Context)
+    Write-Host 'Step 2/5 running: Checking that Intune allows Remediations in this tenant'
+    $Availability = Test-InsightRemediationsAvailable $Context
+    if (-not $Availability.Available) {
+        Write-Host "Step 2/5 error: $($Availability.Reason)"
+        return [pscustomobject]@{ Created = $false; Id = $null; Message = $Availability.Reason; LicenseLikely = [bool]($Availability.Reason -match '(?i)licen|forbidden|verboten|\b403\b') }
+    }
+    Write-Host 'Step 2/5 done: Remediations are available'
+    Write-Host 'Step 3/5 running: Creating the status script (detection only, runs as SYSTEM)'
+    try { $Result = Set-InsightStatusScript -Context $Context }
+    catch { Write-Host "Step 3/5 error: $(($_.Exception.Message -replace '\s+', ' ').Trim())"; throw }
+    if (-not $Result.Created) { Write-Host "Step 3/5 error: $($Result.Message)"; return [pscustomobject]@{ Created = $false; Id = $null; Message = $Result.Message; LicenseLikely = $false } }
+    Write-Host 'Step 3/5 done: Script is in Intune'
+    Write-Host 'Step 4/5 done: Assigned to all devices, every hour'
+    Write-Host 'Step 5/5 running: Checking the result'
+    $State = Get-InsightStatusScriptState $Context
+    if (-not $State) { Write-Host 'Step 5/5 error: The script was not found after creating it'; throw 'The status script was not found after creating it.' }
+    Write-Host 'Step 5/5 done: The status report is set up'
+    $Result
+}
+
 function Get-InsightDeviceRunStates {
     <#
         Reads what the devices reported (beta: deviceHealthScripts/{id}/deviceRunStates, with the managed device).
@@ -648,4 +676,4 @@ Export-ModuleMember -Function Set-TenantInsightHooks, New-InsightGraphContext, I
 Get-InsightTokenScopes, Test-InsightReadiness, Get-InsightGrantedScopes, Get-InsightCommandInfo, Get-InsightClassification, Get-InsightTenantApps,
 Set-InsightAppTakeOver, Export-InsightManagedApps, Read-InsightExportFile, Test-InsightFeedUrl, Get-InsightOtherTenantContext, New-InsightRecreatedApps,
 Get-InsightErrorCause, Get-InsightAppInstallStatus, Get-InsightStatusScriptText, Test-InsightRemediationsAvailable, Get-InsightStatusScriptState,
-Set-InsightStatusScript, Get-InsightDeviceRunStates, ConvertFrom-InsightRunState, Merge-InsightStatus, Get-InsightDiagnosticsInfo, Expand-InsightLogs
+Set-InsightStatusScript, Initialize-InsightStatusReport, Get-InsightDeviceRunStates, ConvertFrom-InsightRunState, Merge-InsightStatus, Get-InsightDiagnosticsInfo, Expand-InsightLogs

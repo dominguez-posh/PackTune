@@ -1133,6 +1133,33 @@
                 </Grid>
             </Border>
 
+            <!-- Steps of a longer setup (status report): one step-list control for every multi-step job -->
+            <Border x:Name="DlgSteps" Style="{StaticResource Dialog}" Width="640" Visibility="Collapsed">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <StackPanel Margin="28,22,28,10">
+                        <TextBlock x:Name="TxtStepsTitle" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="TxtStepsSub" Style="{StaticResource Subtitle}" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="420">
+                        <StackPanel Margin="28,0,28,8">
+                            <ProgressBar x:Name="BarSteps" Height="6" Minimum="0" Maximum="5" Value="0"/>
+                            <StackPanel x:Name="ListSteps" Margin="0,12,0,0"/>
+                            <Border x:Name="BoxStepsNote" Visibility="Collapsed" Background="{StaticResource WarningBg}" CornerRadius="8" Padding="12,10" Margin="0,12,0,0">
+                                <TextBlock x:Name="TxtStepsNote" TextWrapping="Wrap" Foreground="{StaticResource Warning}" FontSize="13"/>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+                    <Border Grid.Row="2" Style="{StaticResource DialogFooter}" Padding="28,14">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button x:Name="BtnStepsOpen" Content="Open the admin center page" Visibility="Collapsed" Margin="0,0,8,0" Padding="16,8"/>
+                            <Button x:Name="BtnStepsAgain" Content="Check again" Visibility="Collapsed" Margin="0,0,8,0" Padding="16,8" Style="{StaticResource PrimaryButton}"/>
+                            <Button x:Name="BtnStepsClose" Content="Close" Padding="16,8"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
+
             <!-- Package store -->
             <Border x:Name="DlgStore" Style="{StaticResource Dialog}" Width="720" Visibility="Collapsed">
                 <Grid>
@@ -1152,6 +1179,11 @@
                             <WrapPanel Margin="0,8,0,0">
                                 <Button x:Name="BtnStoreSetup" Content="Set up the PackTune site (administrator) ..." Margin="0,0,8,6"/>
                             </WrapPanel>
+                            <StackPanel x:Name="PanelStoreSteps" Visibility="Collapsed" Margin="0,8,0,0">
+                                <ProgressBar x:Name="BarStoreSteps" Height="6" Minimum="0" Maximum="7" Value="0"/>
+                                <StackPanel x:Name="ListStoreSteps" Margin="0,10,0,0"/>
+                                <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="You can close this window: the setup continues in Activity with the same steps."/>
+                            </StackPanel>
                             <Expander Header="Advanced" Margin="0,10,0,0" x:Name="ExpStoreAdvanced">
                                 <StackPanel Margin="0,8,0,0">
                                     <TextBlock Text="Address of another site (leave empty for the standard site)" Style="{StaticResource FieldLabel}" Margin="0,0,0,4"/>
