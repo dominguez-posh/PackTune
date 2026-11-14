@@ -3822,8 +3822,9 @@ function Update-TenantButtons {
     $stillInstalled = $script:DeviceCounts[[string]$app.Id] -and -not $script:DeviceCounts[[string]$app.Id].Error -and [int]$script:DeviceCounts[[string]$app.Id].Installed -gt 0 -and -not $app.IsDependency
     $ui.BtnTenantSetUninstall.Visibility = ConvertTo-Vis ([bool]$stillInstalled -and @([string]$app.Intents -split ',') -notcontains 'uninstall')
     $ui.BtnTenantSetUninstall.IsEnabled = (Test-SignedIn) -and -not (Test-TaskRunning 'assign')
-    $ui.GbTenantPolicy.Visibility = ConvertTo-Vis (-not $isDep)
-    $ui.BtnTenantApply.Visibility = ConvertTo-Vis (-not $isDep)
+    $noPolicy = $isDep -or [bool]$app.IsCustom
+    $ui.GbTenantPolicy.Visibility = ConvertTo-Vis (-not $noPolicy)
+    $ui.BtnTenantApply.Visibility = ConvertTo-Vis (-not $noPolicy)
     Update-SandboxButtons
     $ui.BtnTenantTest.Visibility = ConvertTo-Vis (-not $noPolicy)
     $ui.BtnTenantTestMenu.Visibility = ConvertTo-Vis (-not $noPolicy)
