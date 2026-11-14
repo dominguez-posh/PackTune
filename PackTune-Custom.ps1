@@ -471,7 +471,7 @@ function Test-PackTuneCustomApp {
         Tests an MSI app in Windows Sandbox with the test lab of PackTune: the package scripts exactly as deployed (Install,
         Detect, Uninstall with one click each, as SYSTEM). Returns the verdict.
     #>
-    param([Parameter(Mandatory = $true)][string]$MsiPath, [hashtable]$Properties = @{}, [switch]$AutoRun)
+    param([Parameter(Mandatory = $true)][string]$MsiPath, [hashtable]$Properties = @{}, [string]$PreviousMsiPath, [hashtable]$PreviousProperties = @{}, [switch]$AutoRun)
     $Info = Get-PackTuneMsiInfo -Path $MsiPath
     $AppId = Get-PackTuneCustomAppId $Info
     $Scripts = Get-PackTuneCustomMsiScripts -Info $Info -AppId $AppId -ExtraArguments (ConvertTo-PackTuneMsiArguments $Properties)
@@ -484,9 +484,24 @@ function Test-PackTuneCustomApp {
     $LabFiles = Join-Path $WorkPath "lab"
     New-Item -ItemType Directory -Path $LabFiles -Force | Out-Null
     Copy-LabPackageFiles -SourcePath $SourcePath -Destination $LabFiles
-    Write-Host "Opening the test lab in Windows Sandbox for $($Info.Name): run Install, Detect, Uninstall there, then report the result"
-    $Result = Start-PackTuneWin32Lab -DisplayName "$($Info.Name) (custom MSI)" -Version $Info.Version -SourcePath $LabFiles -AutoRun:$AutoRun `
-        -Scripts @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $Scripts.Detection }
+    $LabParams = @{ Scripts = @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $Scripts.Detection } }
+    if ($PreviousMsiPath) {
+        # A previous version of the app (new version of a custom application): played first, then the update
+        $PreviousInfo = Get-PackTuneMsiInfo -Path $PreviousMsiPath
+        $PreviousScripts = Get-PackTuneCustomMsiScripts -Info $PreviousInfo -AppId $AppId -ExtraArguments (ConvertTo-PackTuneMsiArguments $PreviousProperties)
+        $PreviousSource = Join-Path $WorkPath "previous"
+        New-Item -ItemType Directory -Path $PreviousSource -Force | Out-Null
+        Set-Content -Path (Join-Path $PreviousSource "install.ps1") -Value $PreviousScripts.Install -Encoding ASCII
+        Copy-Item -LiteralPath $PreviousInfo.Path -Destination (Join-Path $PreviousSource $PreviousInfo.FileName) -Force
+        $PreviousFiles = Join-Path $WorkPath "lab-previous"
+        New-Item -ItemType Directory -Path $PreviousFiles -Force | Out-Null
+        Copy-LabPackageFiles -SourcePath $PreviousSource -Destination $PreviousFiles
+        $LabParams.PreviousScripts = @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $PreviousScripts.Detection }
+        $LabParams.PreviousSourcePath = $PreviousFiles
+        $LabParams.PreviousVersion = $PreviousInfo.Version
+    }
+    Write-Host "Opening the test lab in Windows Sandbox for $($Info.Name): detect, install$(if ($PreviousMsiPath) { " (previous version first, then the update)" }), detect, uninstall, detect"
+    $Result = Start-PackTuneWin32Lab -DisplayName "$($Info.Name) (custom MSI)" -Version $Info.Version -SourcePath $LabFiles -AutoRun:$AutoRun @LabParams
     Write-Host "Test result: $($Result.Verdict). $($Result.Message)"
     [pscustomobject]@{ Package = $Info.Name; Verdict = $Result.Verdict; Message = $Result.Message; JobPath = $Result.JobPath }
 }#Tests an MSI app in Windows Sandbox

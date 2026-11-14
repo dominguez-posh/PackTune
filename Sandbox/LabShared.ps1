@@ -99,3 +99,73 @@ function Test-LabSuccessCode {
     param([int]$ExitCode, [int[]]$SuccessCodes = @(0, 1707, 3010, 1641))
     $SuccessCodes -contains $ExitCode
 }
+
+# ---------------------------------------------------------------- the sequence and its verdict (also checked outside the sandbox)
+
+function New-LabPlan {
+    # The steps of a run, in the order Intune goes through them: detection before the install (a detected app is not installed
+    # at all), install, detection, with a previous version the update path (previous version in, detected, update, detected),
+    # uninstall, detection. Target tells which package folder the step uses: 'previous' or 'new'.
+    param([string]$Version = '', [string]$PreviousVersion = '', [bool]$HasPrevious = $false)
+    $steps = New-Object System.Collections.ArrayList
+    $add = {
+        param($Kind, $Target, $Title, $Expect, $ExpectDetected)
+        [void]$steps.Add([pscustomobject]@{ Index = $steps.Count + 1; Kind = $Kind; Target = $Target; Title = $Title; Expect = $Expect; ExpectDetected = $ExpectDetected
+            State = 'NotRun'; ExitCode = $null; Detected = $null; Detail = ''; Output = ''; Seconds = $null; User = ''; Screenshot = ''; Finding = '' })
+    }
+    $first = if ($HasPrevious) { 'previous' } else { 'new' }
+    & $add 'Detect' $first 'Detect before the install' 'not detected' $false
+    if ($HasPrevious) {
+        & $add 'Install' 'previous' "Install the previous version$(if ($PreviousVersion) { " $PreviousVersion" })" 'success code' $null
+        & $add 'Detect' 'previous' 'Detect the previous version' 'detected' $true
+        & $add 'Install' 'new' "Update to $(if ($Version) { $Version } else { 'the new version' })" 'success code' $null
+        & $add 'Detect' 'new' 'Detect after the update' 'detected' $true
+    }
+    else {
+        & $add 'Install' 'new' "Install$(if ($Version) { " $Version" })" 'success code' $null
+        & $add 'Detect' 'new' 'Detect after the install' 'detected' $true
+    }
+    & $add 'Uninstall' 'new' 'Uninstall' 'success code' $null
+    & $add 'Detect' 'new' 'Detect after the uninstall' 'not detected' $false
+    , @($steps)
+}
+
+function Set-LabStepResult {
+    # Judges one finished step against what Intune expects: exit code of an install/uninstall, detection (script rule: exit code 0
+    # and output on STDOUT). Detail always says expected and actual; a step that failed ends a run.
+    param([Parameter(Mandatory = $true)]$Step, [Parameter(Mandatory = $true)]$Result)
+    $Step.Seconds = $Result.Seconds; $Step.User = $Result.User; $Step.Output = $Result.Output; $Step.ExitCode = $Result.ExitCode
+    $took = if ($null -ne $Result.Seconds) { " in $($Result.Seconds) s" } else { '' }
+    if ($Result.PSObject.Properties['Cancelled'] -and $Result.Cancelled) {
+        $Step.State = 'Failed'; $Step.Detail = "Expected: $($Step.Expect). Actual: cancelled$took."
+    }
+    elseif ($Step.Kind -eq 'Detect') {
+        $stdout = if ($Result.PSObject.Properties['StdOut']) { $Result.StdOut } else { $Result.Output }
+        $detected = ($Result.ExitCode -eq 0) -and [bool]$stdout
+        $Step.Detected = $detected
+        $Step.State = if ($detected -eq $Step.ExpectDetected) { 'Passed' } else { 'Failed' }
+        $Step.Detail = "Expected: $($Step.Expect). Actual: $(if ($detected) { 'detected' } else { 'not detected' }) (exit code $($Result.ExitCode))$took."
+        if ($Step.State -eq 'Failed' -and $Step.Index -eq 1 -and $detected) {
+            $Step.Finding = 'Already detected before the install: Intune would skip the install.'
+            $Step.Detail = "Expected: not detected. Actual: detected (exit code $($Result.ExitCode))$took. Already detected: Intune would skip the install."
+        }
+    }
+    else {
+        $Step.State = if (Test-LabSuccessCode $Result.ExitCode) { 'Passed' } else { 'Failed' }
+        $Step.Detail = "Expected: $($Step.Expect). Actual: exit code $($Result.ExitCode)$took$(if ($Result.User) { " as $($Result.User)" })" + $(switch ($Result.ExitCode) { 3010 { ' (soft reboot required)' } 1641 { ' (hard reboot initiated)' } default { '' } }) + '.'
+    }
+    $Step
+}
+
+function Get-LabSummary {
+    # Verdict of a run: Passed when every step passed; Failed at the first step that did not, with its cause; Failed when the run stopped early.
+    param([Parameter(Mandatory = $true)]$Steps)
+    $bad = @($Steps | Where-Object { $_.State -eq 'Failed' }) | Select-Object -First 1
+    if ($bad) {
+        $cause = if ($bad.Finding) { $bad.Finding } else { $bad.Detail }
+        return [pscustomobject]@{ Verdict = 'Failed'; Message = "Failed at step $($bad.Index) of $(@($Steps).Count) ($($bad.Title)): $cause" }
+    }
+    $open = @($Steps | Where-Object { $_.State -ne 'Passed' }) | Select-Object -First 1
+    if ($open) { return [pscustomobject]@{ Verdict = 'Failed'; Message = "Stopped before step $($open.Index) of $(@($Steps).Count) ($($open.Title))." } }
+    [pscustomobject]@{ Verdict = 'Passed'; Message = "All $(@($Steps).Count) steps passed: $((@($Steps) | ForEach-Object { $_.Title.ToLower() }) -join ', ')." }
+}

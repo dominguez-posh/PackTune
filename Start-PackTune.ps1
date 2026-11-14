@@ -1777,8 +1777,8 @@ Add-Click $ui.BtnCustomTest {
     if (Test-TaskRunning 'test') { throw 'A sandbox test is already running (Windows Sandbox runs one at a time).' }
     $props = ConvertFrom-CustomProps $ui.TxtCustomProps.Text
     $name = $script:CustomInfo.Name
-    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: run Install, Detect and Uninstall in the sandbox, then report the result there" -Display "Sandbox: $name" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props } `
-        -Work 'param($Msi, $Props) Test-PackTuneCustomApp -MsiPath $Msi -Properties $Props' -OnDone {
+    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props } `
+        -Work 'param($Msi, $Props) Test-PackTuneCustomApp -MsiPath $Msi -Properties $Props -AutoRun' -OnDone {
         param($Result, $Job)
         $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
         if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Display)] the sandbox test could not run, see above." 'Error' }
@@ -3463,8 +3463,8 @@ function Start-PackageTest {
     if ($Source -eq 'Winget' -and -not $script:ModuleState.Winget) { throw 'winget packages need the Microsoft.WinGet.Client module: install it under Settings > Components.' }
     $name = if ($Title) { $Title } else { $Package }
     $arguments = @{ Package = $Package; Source = $Source; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours }
-    $work = 'param($Package, $Source, $Version, $UpdateMode, $GraceHours) Test-PackTunePackage -ChocoName $Package -Source $Source -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours'
-    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: run Install, Detect and Uninstall in the sandbox, then report the result there" -Display "Sandbox: $name" -Package $Package -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
+    $work = 'param($Package, $Source, $Version, $UpdateMode, $GraceHours) Test-PackTunePackage -ChocoName $Package -Source $Source -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours -AutoRun'
+    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name" -Package $Package -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
         param($Result, $Job)
         $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
         if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Package)] the sandbox test could not run, see above." 'Error' }
