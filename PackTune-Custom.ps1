@@ -61,7 +61,7 @@ function Save-PackTuneMsiIcon {
         $Size = [int]$Record.GetType().InvokeMember("DataSize", "GetProperty", $null, $Record, 2)
         if ($Size -le 0 -or $Size -gt 2MB) { return $null }
         $Text = [string]$Record.GetType().InvokeMember("ReadStream", "InvokeMethod", $null, $Record, @(2, $Size, 2))
-        [IO.File]::WriteAllBytes($Destination, [Text.Encoding]::GetEncoding(28591).GetBytes($Text))
+        [IO.File]::WriteAllBytes($Destination, [Text.Encoding]::Default.GetBytes($Text))
         return $Destination
     }
     catch { return $null }
