@@ -856,7 +856,20 @@ function Invoke-ChocoFeed {
     param([Parameter(Mandatory = $true)][string]$Query)
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $Uri = if ($Query -match '^https?://') { $Query } else { $script:Settings.MetadataFeed.TrimEnd("/") + "/" + $Query }
-    $Response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
+    # The community feed limits requests: on 429, 503 or a timeout wait (Retry-After, else 5, 10, 20 s) and ask again
+    $Response = $null
+    for ($Attempt = 1; $null -eq $Response; $Attempt++) {
+        try { $Response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop }
+        catch {
+            $Code = 0; $Wait = 0
+            try { $Code = [int]$_.Exception.Response.StatusCode; $Wait = [int]($_.Exception.Response.Headers["Retry-After"]) } catch { }
+            $Transient = $Code -in 429, 502, 503, 504 -or ($Code -eq 0 -and $_.Exception.Message -match "(?i)timed out|timeout|temporarily")
+            if (-not $Transient -or $Attempt -ge 4) { throw }
+            if ($Wait -le 0) { $Wait = 5 * [Math]::Pow(2, $Attempt - 1) }
+            Write-Verbose "The feed answered $Code, waiting $Wait s (attempt $Attempt)"
+            Start-Sleep -Seconds ([Math]::Min(60, $Wait))
+        }
+    }
     $Xml = [xml]$Response.Content
     foreach ($Entry in @($Xml.feed.entry)) {
         if ($null -eq $Entry) { continue }
@@ -873,6 +886,7 @@ function Invoke-ChocoFeed {
             SoftwareLicense = Get-FeedText $Properties "LicenseUrl"
             IconUrl         = Get-FeedText $Properties "IconUrl"
             Downloads       = Get-FeedText $Properties "DownloadCount"
+            Tags            = Get-FeedText $Properties "Tags"
             IsLatest        = (Get-FeedText $Properties "IsLatestVersion") -eq "true"
             LicenseNote     = Get-ChocoLicenseNote $Id
         }

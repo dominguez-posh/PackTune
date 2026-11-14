@@ -248,8 +248,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         if (-not (Test-Idle 'meta') -and $s.Waited -lt 1500) { return $false }
         Update-CatalogRows; Update-AppList
         $cards = @($script:CardCollection)
-        Test-Smoke 'one list shows every catalog app' ($cards.Count -eq $script:Catalog.Count) "$($cards.Count) of $($script:Catalog.Count)"
-        Test-Smoke 'category chips with counts (All + categories)' ($script:Chips.Count -ge 5 -and $script:Chips['All'].Content -like "All*$($script:Catalog.Count)") ($script:Chips['All'].Content)
+        Test-Smoke 'one list shows every catalog app' ($cards.Count -eq ($script:Catalog.Count + @($script:PopularRows).Count)) "$($cards.Count) of $($script:Catalog.Count) curated + $(@($script:PopularRows).Count) popular"
+        Test-Smoke 'category chips with counts (All + categories)' ($script:Chips.Count -ge 5 -and $script:Chips['All'].Content -like "All*$($script:Catalog.Count + @($script:PopularRows).Count)") ($script:Chips['All'].Content)
         Test-Smoke 'default view: All sources selected, no source switch in the header' ($ui.FltAll.IsChecked -and $script:SourceFilter -eq 'All')
         $zip = $script:SourceRows | Where-Object { $_.CatalogId -eq '7zip.install' } | Select-Object -First 1
         Test-Smoke '7-Zip has both sources with versions' ($zip.Sources.Count -eq 2 -and $zip.ChocoVersion -and $zip.WingetVersion) ($zip | Select-Object ChocoVersion, WingetVersion, Recommended | ConvertTo-Json -Compress)
@@ -261,7 +261,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         # source filter keeps the exclusive semantics of the backend
         foreach ($f in 'Winget', 'Chocolatey', 'Both') {
             $ui["Flt$(if ($f -eq 'Chocolatey') { 'Choco' } else { $f })"].IsChecked = $true
-            $expected = @(Select-PackTuneSourceApps -Apps $script:SourceRows -Filter $f).Count
+            $expected = @(Select-PackTuneSourceApps -Apps (@($script:SourceRows) + @($script:PopularRows)) -Filter $f).Count
             Test-Smoke "source filter $f shows $expected apps" ($script:CardCollection.Count -eq $expected) $script:CardCollection.Count
         }
         $ui.FltAll.IsChecked = $true
@@ -503,6 +503,94 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.TxtFilter.Text = ''
         $script:SearchRows = @(); $script:SearchTerm = ''
         Update-AppList
+        $true } }
+    @{ Name = 'popular list, refresh and add application'; Phase = 0; Do = {
+        param($s)
+        if ($s.Phase -eq 0) {
+            $s.Phase = 1
+            Show-Page 'Apps'
+            Test-Smoke 'the select-all button is gone, Clear stays' (-not $ui.ContainsKey('BtnSelectShown') -and $ui.BtnClearSelection) ''
+            Test-Smoke 'the automatic refresh was skipped (last full refresh less than an hour ago)' (-not $script:Refreshing -and (Get-SmokeLog) -notmatch 'Updating the versions of the listed apps') ''
+            return $false
+        }
+        if ($s.Phase -eq 1) {
+            if (-not (Test-Idle 'popular') -or -not (Test-Idle 'meta')) { return $false }
+            $s.Phase = 2
+            $pop = @($script:PopularRows)
+            Test-Smoke 'popular list: fixture packages merged, infrastructure dropped' ($pop.Count -eq 3 -and -not @($pop | Where-Object ChocoId -like 'chocolatey*').Count) ($pop.ChocoId -join ',')
+            $np = $pop | Where-Object ChocoId -eq 'notepad3'
+            Test-Smoke 'popular: winget id only where verified (Notepad3 yes, AkelPad no)' ($np.WingetId -eq 'Rizonesoft.Notepad3' -and -not ($pop | Where-Object ChocoId -eq 'akelpad').WingetId) ''
+            Test-Smoke 'Popular chip with its count, My apps chip present' ($script:Chips['Popular'].Content -like 'Popular*3' -and $script:Chips.ContainsKey('My apps') -and $script:Chips.ContainsKey('Other')) $script:Chips['Popular'].Content
+            $script:Chips['Popular'].IsChecked = $true
+            Update-AppList
+            Test-Smoke 'Popular chip shows only the popular apps' ($script:CardCollection.Count -eq 3) $script:CardCollection.Count
+            Save-SmokeShot '30-popular'
+            $script:Chips['All'].IsChecked = $true
+            $ui.SortDownloads.IsChecked = $true
+            Update-AppList
+            $titles = @($script:CardCollection | ForEach-Object { $_['Title'] })
+            Test-Smoke 'sort by downloads puts the most downloaded popular app first among those with a count' ($titles.IndexOf('Notepad3') -ge 0 -and $titles.IndexOf('Notepad3') -lt $titles.IndexOf('AkelPad')) ($titles[0..5] -join ',')
+            $ui.SortDefault.IsChecked = $true
+            # Refresh versions: forced, with progress, rows updated in place
+            $script:RefreshItemLimit = 6
+            $s.Key = (Get-AppKey $np)
+            $s.Row = $script:CardRows[$s.Key]
+            Test-Smoke 'Refresh versions button is there and enabled' ($ui.BtnRefreshApps.IsEnabled -and $ui.BtnRefreshApps.Content -eq 'Refresh versions') ''
+            & $script:ClickActions[$ui.BtnRefreshApps]
+            Test-Smoke 'refresh runs: button busy, progress hint "Updating versions n/m"' (-not $ui.BtnRefreshApps.IsEnabled -and (Get-RefreshProgress) -match '^Updating versions \d+/\d+$') (Get-RefreshProgress)
+            return $false
+        }
+        if ($s.Phase -eq 2) {
+            if (-not (Test-Idle 'popular') -or -not (Test-Idle 'meta') -or $script:Refreshing) { return $false }
+            $s.Phase = 3
+            Update-AppList
+            Test-Smoke 'refresh done: button enabled again, stamp written, no progress hint' ($ui.BtnRefreshApps.IsEnabled -and -not $script:Refreshing -and (Test-Path (Join-Path $env:LOCALAPPDATA 'PackTune\last-refresh.txt')) -and -not (Get-RefreshProgress)) ''
+            Test-Smoke 'rows were updated in place (same card object)' ([object]::ReferenceEquals($s.Row, $script:CardRows[$s.Key])) ''
+            $script:RefreshItemLimit = 0
+            # Add application: live search with debounce, results by downloads, add, remove
+            & $script:ClickActions[$ui.BtnAddApp]
+            Test-Smoke 'Add application opens the dialog' ($ui.DlgAddApp.Visibility -eq 'Visible') ''
+            $ui.TxtAddSearch.Text = 'vlc'
+            Test-Smoke 'typing arms the debounce timer, no search yet' ($script:AddTimer.IsEnabled -and -not (Test-TaskRunning 'addsearch')) ''
+            $script:AddTimer.Stop()
+            Start-AddSearch 'vlc'
+            Start-AddSearch 'notepad'      # typed meanwhile: only the latest text is searched afterwards
+            Test-Smoke 'a second request while one runs is remembered, not started' ($script:AddPending -eq 'notepad') $script:AddPending
+            return $false
+        }
+        if ($s.Phase -eq 3) {
+            if (-not (Test-Idle 'addsearch')) { return $false }
+            $s.Phase = 4
+            $names = @($script:AddRows | ForEach-Object { $_['Title'] })
+            Test-Smoke 'the answer of the stale term is dropped, the latest term is shown' ($names.Count -gt 0 -and @($names | Where-Object { $_ -like '*otepad*' }).Count -gt 0) ($names -join ', ')
+            $counts = @($script:AddResultRows | ForEach-Object { [double]$_.Downloads })
+            $sorted = $true; for ($i = 1; $i -lt $counts.Count; $i++) { if ($counts[$i] -gt $counts[$i - 1]) { $sorted = $false } }
+            Test-Smoke 'results are sorted by relevance (downloads, uncounted last)' ($counts.Count -gt 1 -and $sorted) ($counts -join ',')
+            Save-SmokeShot '31-add-application'
+            $ui.LstAddResults.UpdateLayout()
+            $btn = $null
+            foreach ($card in $script:AddRows) { if ($card['CanAdd'] -eq 'True') { $s.Pick = $card; break } }
+            $container = $ui.LstAddResults.ItemContainerGenerator.ContainerFromItem($s.Pick)
+            if ($container) { $container.ApplyTemplate(); $btn = Find-VisualChild $container ([System.Windows.Controls.Button]) }
+            Test-Smoke 'result row has its Add button' ($null -ne $btn -and $btn.Uid -eq 'add') ''
+            if ($btn) { $btn.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, $btn))) }
+            $s.PickId = $s.Pick.Data.ChocoId; $s.PickWinget = $s.Pick.Data.WingetId
+            $mine = @(Get-PackTuneMyApps)
+            Test-Smoke 'Add puts the app into my-apps.json and into the list at once' ($mine.Count -eq 1 -and (Test-Path (Join-Path $env:LOCALAPPDATA 'PackTune\my-apps.json')) -and @($script:MyRows).Count -eq 1 -and $script:Chips['My apps'].Content -like 'My apps*1') ($mine | ConvertTo-Json -Compress)
+            Test-Smoke 'the row in the dialog now says In list' ($s.Pick['AddText'] -eq 'In list') $s.Pick['AddText']
+            & $script:ClickActions[$ui.BtnAddClose]
+            $script:Chips['My apps'].IsChecked = $true
+            Update-AppList
+            Test-Smoke 'My apps chip shows the added app' ($script:CardCollection.Count -eq 1) $script:CardCollection.Count
+            $src = $script:CardCollection[0].Data
+            Show-AppDetails $src
+            Test-Smoke 'details offer Remove from my apps for it' ($ui.BtnDetailRemoveMine.Visibility -eq 'Visible') ''
+            & $script:ClickActions[$ui.BtnDetailRemoveMine]
+            Test-Smoke 'removing takes it off the list and the file, the details close' (@(Get-PackTuneMyApps).Count -eq 0 -and @($script:MyRows).Count -eq 0 -and $ui.PanelDetails.Visibility -eq 'Collapsed') ''
+            $script:Chips['All'].IsChecked = $true
+            Update-AppList
+            return $true
+        }
         $true } }
     @{ Name = 'winget deploy and runtime dependency'; Phase = 0; Do = {
         param($s)

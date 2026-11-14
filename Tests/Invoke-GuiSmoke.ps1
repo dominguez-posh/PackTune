@@ -33,6 +33,17 @@ if (Test-Path $cache) { Copy-Item $cache (Join-Path $appData 'IntuneChocoDeploym
 $icons = Join-Path $realRoot 'iconcache'
 if (Test-Path $icons) { Copy-Item $icons (Join-Path $appData 'IntuneChocoDeployment\iconcache') -Recurse }
 
+# The last full refresh was just now: the automatic refresh at the start is skipped (60 minute window)
+(Get-Date).ToUniversalTime().ToString('o') | Set-Content (Join-Path $appData 'IntuneChocoDeployment\last-refresh.txt')
+# Packages of the popular list instead of the community feed (the top-200 query itself is checked in Check-Sources)
+$fixture = Join-Path $OutDir 'popular-fixture.json'
+@(
+    @{ Name = 'chocolatey-core.extension'; Title = 'Chocolatey Core'; Version = '1.4'; Downloads = '900'; Tags = 'chocolatey'; Authors = 'Chocolatey'; SoftwareSite = 'https://chocolatey.org'; Description = 'Library' }
+    @{ Name = 'notepad3'; Title = 'Notepad3'; Version = '6.25.822.1'; Downloads = '5000'; Tags = 'editor'; Authors = 'Rizonesoft'; SoftwareSite = 'https://www.rizonesoft.com'; Description = 'Editor' }
+    @{ Name = 'akelpad'; Title = 'AkelPad'; Version = '4.9.9'; Downloads = '3000'; Tags = 'editor text'; Authors = 'Alexey'; SoftwareSite = 'https://example.org'; Description = 'Editor' }
+    @{ Name = 'zzzapp'; Title = 'ZZZ App'; Version = '1.0'; Downloads = '100'; Tags = 'zzz'; Authors = 'Nobody'; SoftwareSite = 'https://example.org'; Description = 'App' }
+) | ConvertTo-Json | Set-Content $fixture -Encoding UTF8
+
 # Stand-in for the Microsoft sign-in: /authorize redirects straight back with a code, /token hands out tokens
 # (name "Test Admin", after a renewal "Test Admin renewed"). Runs in its own runspace while the GUI process works.
 $probe = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
@@ -112,6 +123,7 @@ $psi.RedirectStandardError = $true
 $psi.EnvironmentVariables['LOCALAPPDATA'] = $appData
 $psi.EnvironmentVariables['PSModulePath'] = (Join-Path $PSScriptRoot 'Fakes') + ';' + "$env:USERPROFILE\Documents\WindowsPowerShell\Modules;$env:ProgramFiles\WindowsPowerShell\Modules;$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules"
 $psi.EnvironmentVariables['PACKTUNE_SMOKE'] = $Driver
+$psi.EnvironmentVariables['PACKTUNE_POPULAR_FIXTURE'] = $fixture
 $psi.EnvironmentVariables['PACKTUNE_SMOKE_OUT'] = $OutDir
 $psi.EnvironmentVariables['PACKTUNE_SMOKE_AUTHORITY'] = "http://localhost:$authorityPort"
 $process = [System.Diagnostics.Process]::Start($psi)

@@ -54,10 +54,13 @@ The readiness list checks the IntuneWin32App module, the app registration, the s
 
 ![Apps](docs/screenshots/apps.png)
 
-One list for both sources, from the curated list in `catalog.json` and the search.
+One list for both sources: the curated list in `catalog.json`, the 200 most downloaded Chocolatey packages, and the apps you added yourself.
 
 - **Source filter**: All sources, winget, Chocolatey, or Both (apps available from both).
 - **Recommended** marks the source with the higher version. Equal or unknown versions give no recommendation.
+- **Popular** (filter chip): the top 200 Chocolatey packages by download count, read with one small paged query of the community feed (cached for 24 hours; the feed answers with versions, so no lookup per package). A winget package is shown for one of them only when it clearly is the same product (same name, and the publisher appears in the package); otherwise it stays Chocolatey only. Infrastructure and library packages, deprecated packages, `x.install` next to `x`, and apps the curated list has are left out. The category comes from the package tags, or "Other". **Most downloaded** sorts by relevance.
+- **Add application** opens a search of winget and Chocolatey while you type (most downloaded first, with icon, sources, versions and the Recommended tag). **Add** puts the app into **My apps** (`%LOCALAPPDATA%\PackTune\my-apps.json`: names and package ids only); **Remove from my apps** in the details takes it off again without touching Intune.
+- **Refresh versions** reads the infos of all listed apps and the popular list again now, ignoring the cache; the feed is asked slowly and retried with a wait when it limits the requests. The same refresh runs in the background at every start, but not more often than once an hour; the list shows the cached data at once and updates in place ("Updating versions 120/290").
 - **Search repositories** searches the whole Chocolatey community repository or winget.
 - Select several apps (Ctrl or Shift click), choose the assignment, the install source and **Review and deploy**. The details panel shows links, a license note where one is known, a custom icon (PNG, JPEG, SVG, ICO) and **Test in sandbox**.
 

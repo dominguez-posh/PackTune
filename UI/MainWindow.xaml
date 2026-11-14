@@ -123,6 +123,26 @@
             </Border>
         </DataTemplate>
 
+        <DataTemplate x:Key="AddRowTemplate">
+            <Grid Margin="0,8">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                <Border Style="{StaticResource MonoTile}" Width="40" Height="40" Margin="0,0,12,0" Background="{Binding [TileBg]}" VerticalAlignment="Center">
+                    <Grid>
+                        <TextBlock Text="{Binding [Mono]}" FontWeight="Bold" FontSize="15" Foreground="{Binding [TileFg]}" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="{Binding [MonoVis]}"/>
+                        <Image Source="{Binding [Icon]}" Margin="5" RenderOptions.BitmapScalingMode="HighQuality"/>
+                    </Grid>
+                </Border>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="{Binding [Title]}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                    <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource TagTemplate}">
+                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                    </ItemsControl>
+                    <TextBlock Text="{Binding [Sub]}" FontSize="12" Foreground="{StaticResource MutedText}" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+                <Button Grid.Column="2" Uid="add" Content="{Binding [AddText]}" IsEnabled="{Binding [CanAdd]}" Padding="16,6" MinWidth="84" VerticalAlignment="Center" AutomationProperties.Name="Add to my apps"/>
+            </Grid>
+        </DataTemplate>
+
         <DataTemplate x:Key="ImportRowTemplate">
             <Grid Margin="0,9" Opacity="{Binding [Opacity]}">
                 <Grid.ColumnDefinitions>
@@ -316,7 +336,6 @@
                                         <TextBlock Text="Apps" Style="{StaticResource PageTitle}"/>
                                         <TextBlock x:Name="TxtAppsSubtitle" Style="{StaticResource Subtitle}" Text="Curated apps from winget and Chocolatey in one list. Type to filter, or search both repositories."/>
                                     </StackPanel>
-                                    <Button x:Name="BtnSelectShown" Grid.Column="1" VerticalAlignment="Bottom" Content="Select all shown"/>
                                 </Grid>
                                 <WrapPanel Grid.Row="1" Orientation="Horizontal" Margin="0,16,0,0">
                                     <Border Background="White" BorderBrush="{StaticResource Border}" BorderThickness="1,1,1,2" CornerRadius="6" Width="420" Height="40" Margin="0,0,10,8">
@@ -328,12 +347,20 @@
                                         </Grid>
                                     </Border>
                                     <Button x:Name="BtnSearchRepos" Margin="0,0,12,8" Content="Search repositories" Tag="&#xE721;"/>
+                                    <Button x:Name="BtnAddApp" Margin="0,0,12,8" Content="Add application" Tag="&#xE710;" ToolTip="Search winget and Chocolatey and add an app to your list"/>
+                                    <Button x:Name="BtnRefreshApps" Margin="0,0,12,8" Content="Refresh versions" Tag="&#xE72C;" ToolTip="Reload the versions and the popular apps now, ignoring the 24 hour cache"/>
                                     <Border Style="{StaticResource Segmented}" Margin="0,0,12,8" AutomationProperties.Name="Available via">
                                         <StackPanel Orientation="Horizontal">
                                             <RadioButton x:Name="FltAll" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="All sources" IsChecked="True"/>
                                             <RadioButton x:Name="FltWinget" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="winget"/>
                                             <RadioButton x:Name="FltChoco" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="Chocolatey"/>
                                             <RadioButton x:Name="FltBoth" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="Both"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Segmented}" Margin="0,0,12,8" AutomationProperties.Name="Sort">
+                                        <StackPanel Orientation="Horizontal">
+                                            <RadioButton x:Name="SortDefault" GroupName="Sort" Style="{StaticResource SegmentItem}" Content="Curated first" IsChecked="True"/>
+                                            <RadioButton x:Name="SortDownloads" GroupName="Sort" Style="{StaticResource SegmentItem}" Content="Most downloaded"/>
                                         </StackPanel>
                                     </Border>
                                     <TextBlock x:Name="TxtAppsCount" Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="0,0,0,8"/>
@@ -380,6 +407,7 @@
                                             <Button x:Name="BtnCustomIcon" Style="{StaticResource SmallButton}" Content="Choose icon file ..." Margin="0,0,8,0"/>
                                             <Button x:Name="BtnCustomIconRemove" Style="{StaticResource SmallButton}" Content="Remove" Visibility="Collapsed"/>
                                         </StackPanel>
+                                        <Button x:Name="BtnDetailRemoveMine" Margin="0,18,0,0" Content="Remove from my apps" Tag="&#xE74D;" Visibility="Collapsed" ToolTip="Takes the app off this list only; nothing in Intune changes"/>
                                         <Button x:Name="BtnDetailTest" Margin="0,18,0,0" Content="Test in sandbox" Tag="&#xE768;"/>
                                         <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Runs this app in a fresh Windows Sandbox. No sign-in needed, nothing is changed in Intune."/>
                                     </StackPanel>
@@ -905,6 +933,38 @@
                                 <Button x:Name="BtnScheduleCancel" Content="Cancel" Margin="0,0,8,0" Padding="16,8"/>
                                 <Button x:Name="BtnScheduleApply" Style="{StaticResource PrimaryButton}" Padding="18,8" Content="Apply in Intune"/>
                             </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <!-- Add application -->
+            <Border x:Name="DlgAddApp" Style="{StaticResource Dialog}" Width="780" Visibility="Collapsed">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <StackPanel Margin="28,22,28,10">
+                        <TextBlock Text="Add application" FontSize="20" FontWeight="SemiBold"/>
+                        <TextBlock Style="{StaticResource Subtitle}" Text="Searches winget and Chocolatey while you type, most downloaded first. An added app stays in your list under My apps; removing it later does not touch Intune."/>
+                        <Border Background="White" BorderBrush="{StaticResource Border}" BorderThickness="1,1,1,2" CornerRadius="6" Height="40" Margin="0,14,0,0">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                <TextBlock Text="&#xE721;" Style="{StaticResource Glyph}" FontSize="14" Foreground="{StaticResource MutedText}" Margin="12,0,10,0"/>
+                                <TextBox x:Name="TxtAddSearch" Grid.Column="1" BorderThickness="0" Background="Transparent" Padding="0,0,8,0" AutomationProperties.Name="Search applications"/>
+                                <TextBlock x:Name="HintAddSearch" Grid.Column="1" Text="Name of the app, e.g. obsidian, 7-zip, vlc" Foreground="#767676" VerticalAlignment="Center" IsHitTestVisible="False"/>
+                            </Grid>
+                        </Border>
+                    </StackPanel>
+                    <Border Grid.Row="1" Margin="28,0,28,8" BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="0,1,0,0">
+                        <Grid>
+                            <ListBox x:Name="LstAddResults" Style="{StaticResource PlainList}" ItemTemplate="{StaticResource AddRowTemplate}" MaxHeight="420" Focusable="False"/>
+                            <TextBlock x:Name="TxtAddEmpty" Style="{StaticResource Hint}" FontSize="13" Margin="0,16"/>
+                        </Grid>
+                    </Border>
+                    <Border Grid.Row="2" Style="{StaticResource DialogFooter}" Padding="28,14">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <TextBlock x:Name="TxtAddStatus" Style="{StaticResource Hint}" VerticalAlignment="Center" FontSize="13" Margin="0,0,16,0"/>
+                            <Button x:Name="BtnAddClose" Grid.Column="1" Content="Close" Padding="16,8"/>
                         </Grid>
                     </Border>
                 </Grid>
