@@ -1379,7 +1379,7 @@ function Get-AppMeta($Row, [string]$Source) {
     $id = Get-AppId $Row $Source
     if ($id) { $script:Shared.Meta[(Get-MetaKey $id $Source)] }
 }
-function Get-SourceLabel([string]$Source) { if ($Source -eq 'Winget') { 'winget' } else { 'Chocolatey' } }
+function Get-SourceLabel([string]$Source, $App) { if ($Source -eq 'Custom') { if ($App -and $App.CustomKind -eq 'msix') { 'Custom MSIX' } else { 'Custom MSI' } } elseif ($Source -eq 'Winget') { 'winget' } else { 'Chocolatey' } }
 
 function Update-CatalogRows {
     $script:SourceRows = @(Get-PackTuneSourceApps -Cache $script:Shared.Meta -NoFetch)
@@ -3191,17 +3191,26 @@ function Start-TenantRefresh {
     if (Test-TaskRunning 'tenant') { return }
     $ui.TxtTenantCount.Text = 'Reading the apps in the tenant ...'
     Update-UiToken
-    $work = @'
+    $work = 'param($Fake)
+$Ctx = if ($Fake) { New-InsightGraphContext -Invoke ([scriptblock]::Create($Fake)) } else { New-InsightGraphContext }
 Get-PackTuneTenantApps | ForEach-Object {
-    $Intents = ''
-    try { $Intents = (@(Get-PackTuneAppIntents -AppId $_.Id) -join ',') } catch { }
+    $Intents = ''''
+    try { $Intents = (@(Get-PackTuneAppIntents -AppId $_.Id -Context $Ctx) | Select-Object -Unique) -join '','' } catch { }
     [pscustomobject]@{
         Id = [string]$_.Id; DisplayName = [string]$_.DisplayName; Package = [string]$_.Package; Source = [string]$_.Source; IsChocolatey = [bool]$_.IsChocolatey; Created = [string]$_.Created
         Version = [string]$_.Version; UpdateMode = [string]$_.UpdateMode; GraceHours = [int]$_.GraceHours; HasPolicy = [bool]$_.HasPolicy; Intents = $Intents; Schedule = $_.Schedule
     }
 }
-'@
-    [void](Start-UiTask -Kind 'tenant' -Title 'Reading the apps this tool created in the tenant' -Display 'Tenant apps' -Hidden -NeedsAuth -Work $work -OnDone {
+# Custom applications (MSI / MSIX, marker custom=...) are listed here too
+Get-PackTuneCustomApps | ForEach-Object {
+    $Intents = ''''
+    try { $Intents = (@(Get-PackTuneAppIntents -AppId $_.Id -Context $Ctx) | Select-Object -Unique) -join '','' } catch { }
+    [pscustomobject]@{
+        Id = [string]$_.Id; DisplayName = [string]$_.DisplayName; Package = ''''; Source = ''Custom''; IsChocolatey = $false; IsCustom = $true; CustomKind = [string]$_.Kind; CustomAppId = [string]$_.AppId; Created = [string]$_.Created
+        Version = [string]$_.Version; UpdateMode = ''''; GraceHours = 0; HasPolicy = $false; Intents = $Intents; Schedule = $null
+    }
+}'
+    [void](Start-UiTask -Kind 'tenant' -Title 'Reading the apps this tool created in the tenant' -Display 'Tenant apps' -Hidden -NeedsAuth -Arguments @{ Fake = $script:InsightFake } -Work $work -OnDone {
         param($Result, $Job)
         if ($Job.Status -eq 'failed') {
             $ui.TxtTenantCount.Text = if ($script:GraphDown -and @($script:TenantApps).Count) { "$(@($script:TenantApps).Count) app(s) - last known list, not current" } elseif ($script:GraphDown) { "Can't read the tenant right now - see the banner" } else { 'Could not read the tenant, see Activity' }
@@ -3240,7 +3249,7 @@ function Get-ShortCountError([string]$Raw) {
 }
 function Start-CountsTask {
     # Intune's install summary per app (one small call each, DeviceManagementApps.Read.All), a short cache so the list does not hammer Graph
-    $ids = @($script:TenantApps | Where-Object { -not $_.IsChocolatey -and $_.Package } | ForEach-Object { $_.Id } | Where-Object {
+    $ids = @($script:TenantApps | Where-Object { -not $_.IsChocolatey -and ($_.Package -or $_.IsCustom) } | ForEach-Object { $_.Id } | Where-Object {
         $c = $script:DeviceCounts[$_]; -not $c -or $c.Error -or -not $c.Fetched -or ((Get-Date) - [datetime]$c.Fetched).TotalSeconds -gt $script:CountsCacheSeconds })
     if ($ids.Count -eq 0 -or (Test-TaskRunning 'counts')) { return }
     $work = '
@@ -3272,6 +3281,14 @@ function Update-TenantSummary($App) {
     $ui.TxtSumInstalled.Text = [string]$c.Installed; $ui.TxtSumFailed.Text = [string]$c.Failed; $ui.TxtSumPending.Text = [string]$c.Pending; $ui.TxtSumNotInstalled.Text = [string]$c.NotInstalled
     if ($c.Failed) { $ui.TxtSumFailed.Foreground = ConvertTo-Brush '#A11D1D' }
     $ui.TxtSumInfo.Text = "From Intune's install summary, read $(([datetime]$c.Fetched).ToString('HH:mm'))$(if ($c.NotApplicable) { ", $($c.NotApplicable) not applicable" })."
+}
+Add-Click $ui.BtnTenantCustomPage {
+    $app = Get-SelectedTenantApp
+    if (-not $app -or -not $app.IsCustom) { return }
+    $script:CustomPendingSelect = [string]$app.Id
+    Show-Page 'Custom'
+    $row = @($script:CustomRows | Where-Object { $_.Data.Id -eq $app.Id }) | Select-Object -First 1
+    if ($row) { $ui.LstCustom.SelectedItem = $row }
 }
 Add-Click $ui.BtnSumStatus { $app = Get-SelectedTenantApp; if ($app) { Show-Page 'Status' } }
 
@@ -3319,7 +3336,7 @@ function Update-TenantRows {
         $count = $script:DeviceCounts[$app.Id]
         $isDep = $app.IsChocolatey -or $app.IsDependency
         $title = if ($app.IsOld) { "$($app.DisplayName) (old)" } elseif ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
-        $sub = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($app.IsDependency) { 'Dependency of all apps: Chocolatey and winget for SYSTEM' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" }
+        $sub = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($app.IsDependency) { 'Dependency of all apps: Chocolatey and winget for SYSTEM' } else { if ($app.IsCustom) { "$(Get-SourceLabel $app.Source $app) $([char]0x00B7) your own application" } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" } }
         if ($app.JustCreated) { $sub = "$sub $([char]0x00B7) just created, confirming in Intune ..." }
         $ok = if ($count -and -not $count.Error) { "$($count.Installed) installed" } elseif ($count -and $count.Error) { Get-ShortCountError $count.Error } elseif ($isDep) { '' } else { '...' }
         $bad = if ($count -and -not $count.Error) { @($(if ($count.Failed) { "$($count.Failed) failed" }), $(if ($count.Pending) { "$($count.Pending) pending" })) | Where-Object { $_ } | Select-Object -First 2 } else { '' }
@@ -3602,25 +3619,29 @@ function Update-TenantButtons {
     $ui.BoxTenantIcon.Background = ConvertTo-Brush $t.TileBg; $ui.TxtTenantMono.Text = $t.Mono; $ui.TxtTenantMono.Foreground = ConvertTo-Brush $t.TileFg
     $tenantIcon = Get-TenantAppIcon $app; $ui.ImgTenant.Source = ConvertTo-ImageSource $tenantIcon; $ui.TxtTenantMono.Visibility = ConvertTo-Vis (-not $tenantIcon)
     $ui.TxtTenantAppTitle.Text = if ($app.IsOld) { "$($app.DisplayName) (old)" } elseif ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
-    $ui.TxtTenantAppSub.Text = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($isDep) { 'Dependency of every app, updated daily' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source) $([char]0x00B7) $(Get-IntentText $app)" }
+    $ui.TxtTenantAppSub.Text = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($isDep) { 'Dependency of every app, updated daily' } elseif ($app.IsCustom) { "$(Get-SourceLabel $app.Source $app) $([char]0x00B7) $(Get-IntentText $app)" } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source) $([char]0x00B7) $(Get-IntentText $app)" }
     Update-TenantSummary $app
     Update-TenantAssign $app
+    $ui.BoxTenantCustom.Visibility = ConvertTo-Vis ([bool]$app.IsCustom)
     $busy = Test-TaskRunning 'policy'
     $reading = (Test-TaskRunning 'tenant')
     $ui.BtnTenantOpen.IsEnabled = -not $reading
     $ui.BtnTenantOpen.ToolTip = if ($reading) { 'Updating the list ...' } else { $null }
-    $ui.BtnTenantRemove.IsEnabled = (Test-SignedIn) -and -not $reading -and -not (Test-TaskRunning 'remove') -and -not $app.IsDependency
+    $ui.BtnTenantRemove.IsEnabled = (Test-SignedIn) -and -not $reading -and -not (Test-TaskRunning 'remove') -and -not $app.IsDependency -and -not $app.IsCustom
+    $ui.BtnTenantRemove.Visibility = ConvertTo-Vis (-not $app.IsCustom)
+    $noPolicy = $isDep -or [bool]$app.IsCustom
     $ui.BtnTenantRemove.ToolTip = if ($reading) { 'Updating the list ...' } else { $null }
-    $ui.GbTenantPolicy.Visibility = ConvertTo-Vis (-not $isDep)
-    $ui.BtnTenantApply.Visibility = ConvertTo-Vis (-not $isDep)
+    $ui.GbTenantPolicy.Visibility = ConvertTo-Vis (-not $noPolicy)
+    $ui.BtnTenantApply.Visibility = ConvertTo-Vis (-not $noPolicy)
     Update-SandboxButtons
-    $ui.BtnTenantTest.Visibility = ConvertTo-Vis (-not $isDep)
-    $ui.BtnTenantRelease.Visibility = ConvertTo-Vis ($app.UpdateAvailable -and -not $isDep)
-    $ui.TxtTenantAvailableNote.Visibility = ConvertTo-Vis ((-not $isDep) -and (@([string]$app.Intents -split ',') -contains 'available') -and (@([string]$app.Intents -split ',') -notcontains 'required'))
+    $ui.BtnTenantTest.Visibility = ConvertTo-Vis (-not $noPolicy)
+    $ui.BtnTenantTestMenu.Visibility = ConvertTo-Vis (-not $noPolicy)
+    $ui.BtnTenantRelease.Visibility = ConvertTo-Vis ($app.UpdateAvailable -and -not $noPolicy)
+    $ui.TxtTenantAvailableNote.Visibility = ConvertTo-Vis ((-not $noPolicy) -and (@([string]$app.Intents -split ',') -contains 'available') -and (@([string]$app.Intents -split ',') -notcontains 'required'))
     $noRuntime = @($script:WingetNoRuntime | Where-Object { $_.Id -eq $app.Id }).Count -gt 0
     $ui.TxtDependencyNote.Visibility = ConvertTo-Vis ($noRuntime -or $reading)
     $ui.TxtDependencyNote.Text = if ($reading) { 'Updating the list ...' } elseif ($noRuntime) { 'This app still uses the old dependency apps. Switch to PackTune Runtime (banner above the list) moves it over.' } else { '' }
-    if ($isDep) { $script:TenantPolicyApp = ''; return }
+    if ($noPolicy) { $script:TenantPolicyApp = ''; return }
     $ui.BtnTenantApply.IsEnabled = (Test-SignedIn) -and -not $busy
     $ui.BtnTenantRelease.IsEnabled = (Test-SignedIn) -and -not $busy
     $ui.BtnTenantRelease.Content = if ($app.UpdateAvailable) { "Release $($app.LatestVersion)" } else { 'Release update' }

@@ -10,9 +10,36 @@
     Loaded by PackTune-Main.ps1.
 #>
 
+function ConvertTo-PackTuneAssignment {
+    <# One assignment in one shape, whichever way it was read: Graph (mobileAppAssignment: intent, target with @odata.type and groupId,
+       settings.notifications) or the IntuneWin32App module (Intent, Type, GroupID, Notifications). #>
+    param([Parameter(Mandatory = $true)]$Assignment)
+    $A = $Assignment
+    $Type = if ($A.target -and $A.target.'@odata.type') { [string]$A.target.'@odata.type' } elseif ($A.Type) { [string]$A.Type } else { '' }
+    $Intent = if ($A.intent) { [string]$A.intent } elseif ($A.Intent) { [string]$A.Intent } else { '' }
+    $Group = if ($A.target -and $A.target.groupId) { [string]$A.target.groupId } elseif ($A.GroupID) { [string]$A.GroupID } else { $null }
+    $Notify = if ($A.settings -and $A.settings.notifications) { [string]$A.settings.notifications } elseif ($A.Notifications) { [string]$A.Notifications } else { $null }
+    [pscustomobject]@{ Type = $Type; Intent = $Intent.ToLower(); GroupID = $Group; Notifications = $Notify; Id = [string]$A.id }
+}
+
+function Get-PackTuneAppAssignments {
+    <# The assignments of an app, normalized. From Graph (GET .../mobileApps/{id}/assignments: the list call does not carry them for Win32 apps)
+       with a real sign-in or an explicit -Context; otherwise from the module. #>
+    param([Parameter(Mandatory = $true)][string]$AppId, $Context)
+    $UseGraph = $Context -or ([string]$Global:AccessToken.access_token -like 'ey*' -and (Get-Command New-InsightGraphContext -ErrorAction SilentlyContinue))
+    if ($UseGraph) {
+        try {
+            if (-not $Context) { $Context = New-InsightGraphContext }
+            return @(Invoke-InsightGraph $Context GET "/beta/deviceAppManagement/mobileApps/$AppId/assignments" -All | Where-Object { $_ } | ForEach-Object { ConvertTo-PackTuneAssignment $_ })
+        }
+        catch { Write-Verbose "Assignments of $AppId could not be read from Graph ($($_.Exception.Message)), trying the module" }
+    }
+    @(@(Invoke-IntuneModule { Get-IntuneWin32AppAssignment -ID $AppId }) | Where-Object { $_ } | ForEach-Object { ConvertTo-PackTuneAssignment $_ })
+}
+
 function Get-PackTuneAppIntents {
-    param([Parameter(Mandatory = $true)][string]$AppId)
-    @(@(Invoke-IntuneModule { Get-IntuneWin32AppAssignment -ID $AppId }) | Where-Object { $_ } | ForEach-Object { [string]$_.Intent })
+    param([Parameter(Mandatory = $true)][string]$AppId, $Context)
+    @(Get-PackTuneAppAssignments -AppId $AppId -Context $Context | ForEach-Object { $_.Intent } | Where-Object { $_ })
 }#Intents (required, available, uninstall) of the assignments of an app
 
 function Get-PackTuneReleasePath {
@@ -87,7 +114,7 @@ function Complete-PackTuneSupersedingApp {
 
         # Same assignments as the old app. Available ones switch on auto-update of superseded apps (only possible now,
         # because the module needs the supersedence to exist).
-        $Assignments = @(Invoke-IntuneModule { Get-IntuneWin32AppAssignment -ID $AppId } | Where-Object { $_ })
+        $Assignments = @(Get-PackTuneAppAssignments -AppId $AppId)
         foreach ($Assignment in $Assignments) {
             $Params = @{ ID = $New.id; Intent = [string]$Assignment.Intent; Notification = $(if ($Assignment.Notifications) { [string]$Assignment.Notifications } else { "showAll" }) }
             # The module only accepts the auto-update setting for Available assignments

@@ -1456,6 +1456,40 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Switch-Tenant 'contoso.onmicrosoft.com' '11111111-2222-3333-4444-555555555555'
         $script:TenantGuidLookup = $null
         $true } }
+    @{ Name = 'custom applications in In tenant, assignment reader'; Phase = 0; Do = {
+        param($s)
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle)) { return $false }
+                # Realistic Graph payloads (mobileAppAssignment) and the module's shape read the same way
+                $graph = @(
+                    @{ '@odata.type' = '#microsoft.graph.mobileAppAssignment'; id = 'a1'; intent = 'available'; source = 'direct'; target = @{ '@odata.type' = '#microsoft.graph.allLicensedUsersAssignmentTarget' }; settings = @{ '@odata.type' = '#microsoft.graph.win32LobAppAssignmentSettings'; notifications = 'showAll' } }
+                    @{ '@odata.type' = '#microsoft.graph.mobileAppAssignment'; id = 'a2'; intent = 'required'; source = 'direct'; target = @{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = 'g-1' } }
+                    @{ '@odata.type' = '#microsoft.graph.mobileAppAssignment'; id = 'a3'; intent = 'uninstall'; source = 'direct'; target = @{ '@odata.type' = '#microsoft.graph.allDevicesAssignmentTarget' } })
+                $n = @($graph | ForEach-Object { ConvertTo-PackTuneAssignment ([pscustomobject]($_ | ConvertTo-Json -Depth 5 | ConvertFrom-Json)) })
+                $mod = ConvertTo-PackTuneAssignment ([pscustomobject]@{ Intent = 'Available'; Type = '#microsoft.graph.allLicensedUsersAssignmentTarget'; GroupID = $null; Notifications = 'hideAll' })
+                Test-Smoke 'assignment reader: Graph payloads (all users available, group required, all devices uninstall) and the module shape give the same normalized assignment' ($n[0].Intent -eq 'available' -and $n[0].Type -like '*allLicensedUsersAssignmentTarget' -and $n[0].Notifications -eq 'showAll' -and $n[1].Intent -eq 'required' -and $n[1].GroupID -eq 'g-1' -and $n[2].Type -like '*allDevicesAssignmentTarget' -and $mod.Intent -eq 'available' -and $mod.Type -like '*allLicensedUsers*') (($n | ForEach-Object { "$($_.Intent)/$($_.Type)" }) -join ' | ')
+                $ctx = New-InsightGraphContext -Invoke { param($m, $p, $b) @{ value = @(@{ id = 'x1'; intent = 'available'; target = @{ '@odata.type' = '#microsoft.graph.allLicensedUsersAssignmentTarget' } }, @{ id = 'x2'; intent = 'required'; target = @{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = 'g' } }) } }
+                $intents = @(Get-PackTuneAppIntents -AppId 'any' -Context $ctx)
+                Test-Smoke 'Intents of an app read from Graph (mobileApps/{id}/assignments), not "None"' ($intents -contains 'available' -and $intents -contains 'required') ($intents -join ',')
+                $script:TenantApps = $null; Start-TenantRefresh
+                $s.Phase = 1; return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                Show-Page 'Tenant'
+                $custom = @($script:TenantRowList | Where-Object { $_.Data.IsCustom })
+                Test-Smoke 'In tenant lists the custom applications too, with the source label Custom MSI / Custom MSIX, version and assignment' ($custom.Count -ge 1 -and @($custom | Where-Object { $_['Sub'] -like 'Custom MS*' }).Count -eq $custom.Count -and $custom[0]['Assigned'] -ne $null) (($custom | ForEach-Object { "$($_['Title'])|$($_['Sub'])|$($_['Version'])|$($_['Assigned'])" }) -join '; ')
+                if ($custom.Count) {
+                    $ui.LstTenant.SelectedItem = $custom[0]
+                    Test-Smoke 'panel of a custom app: counts and assignment switch like other apps, policy / sandbox / remove replaced by the link to the Custom page' ($ui.BoxTenantCustom.Visibility -eq 'Visible' -and $ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.BoxTenantSummary.Visibility -eq 'Visible' -and $ui.GbTenantPolicy.Visibility -eq 'Collapsed' -and $ui.BtnTenantTest.Visibility -eq 'Collapsed' -and $ui.BtnTenantRemove.Visibility -eq 'Collapsed')
+                    & $script:ClickActions[$ui.BtnTenantCustomPage]
+                    Test-Smoke 'the link opens the Custom page with that app selected' ($script:CurrentPage -eq 'Custom' -and $ui.LstCustom.SelectedItem -and $ui.LstCustom.SelectedItem.Data.Id -eq $custom[0].Data.Id)
+                }
+                Show-Page 'Tenant'
+                $true
+            }
+        } } }
     @{ Name = 'install summary card and assignment for all users'; Phase = 0; Do = {
         param($s)
         $dir = $env:LOCALAPPDATA
@@ -1491,7 +1525,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             3 {
                 if (-not (Test-Idle)) { return $false }
                 $app = Get-SelectedTenantApp
-                Test-Smoke 'assignment section shows the current state (none yet in the fake Graph), groups info present' ($ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.RbAsgNone.IsChecked -and $ui.TxtAsgInfo.Text -like '*all-users assignment*') $ui.TxtAsgInfo.Text
+                Test-Smoke 'assignment section reads the real state (Available for all users, as deployed), groups info present' ($ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.RbAsgAvailable.IsChecked -and $ui.TxtAsgInfo.Text -like '*all-users assignment*') $ui.TxtAsgInfo.Text
                 # The segmented control fits the panel at the smallest window width and 100/125/150%
                 $bad = New-Object System.Collections.ArrayList
                 $w0 = $window.Width

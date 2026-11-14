@@ -639,6 +639,13 @@
                                                     <Button x:Name="BtnSumStatus" Content="Per device details ..." HorizontalAlignment="Left" Margin="0,8,0,0" Padding="14,5"/>
                                                 </StackPanel>
                                             </Border>
+                                            <Border x:Name="BoxTenantCustom" Visibility="Collapsed" Background="#F7F7F7" CornerRadius="8" Padding="14,10" Margin="0,16,0,0">
+                                                <StackPanel>
+                                                    <TextBlock Text="Your own application" Style="{StaticResource FieldLabel}"/>
+                                                    <TextBlock Style="{StaticResource Hint}" TextWrapping="Wrap" Text="New version, Export, Test in sandbox and Remove are on the Custom page: they need the package store and the sandbox."/>
+                                                    <Button x:Name="BtnTenantCustomPage" Content="Manage on the Custom page ..." HorizontalAlignment="Left" Margin="0,8,0,0" Padding="14,5"/>
+                                                </StackPanel>
+                                            </Border>
                                             <StackPanel x:Name="GbTenantAssign" Margin="0,18,0,0">
                                                 <TextBlock Text="Assignment (all users)" Style="{StaticResource FieldLabel}"/>
                                                 <Border x:Name="BoxAssignSeg" Style="{StaticResource Segmented}" HorizontalAlignment="Stretch" AutomationProperties.Name="Assignment for all users">
