@@ -1299,6 +1299,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $ui.CmbPreferredSource.SelectedIndex = 1; Save-Settings
         $true } }
     @{ Name = 'account of another tenant (Keevault choice)'; Do = {
+        $script:TenantGuidLookup = { param($d) switch ($d) { 'contoso.onmicrosoft.com' { 'c0ffee00-0000-4000-8000-000000000001' } 'contoso.com' { 'c0ffee00-0000-4000-8000-000000000001' } 'fabrikam.onmicrosoft.com' { 'fab00000-0000-4000-8000-000000000002' } default { $null } } }
         $same = Resolve-AccountTenant 'admin@contoso.onmicrosoft.com'
         Test-Smoke 'account of the tenant signs in there' ($same.TenantID -eq 'contoso.onmicrosoft.com' -and $same.ClientID -eq '11111111-2222-3333-4444-555555555555')
         try { [void](Resolve-AccountTenant 'adm@fabrikam.onmicrosoft.com'); Test-Smoke 'unknown tenant stops with a reason' $false }
@@ -1309,6 +1310,18 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'known tenant uses its own app registration' ($back.TenantID -eq 'contoso.onmicrosoft.com' -and $back.ClientID -eq '11111111-2222-3333-4444-555555555555') "$($back.TenantID) / $($back.ClientID)"
         Switch-Tenant $back.TenantID $back.ClientID
         Test-Smoke 'tenant switched back' ($script:Settings.TenantID -eq 'contoso.onmicrosoft.com' -and $script:Settings.ClientID -eq '11111111-2222-3333-4444-555555555555')
+        # Tenant identity is the GUID: the same tenant by domain, other domain or GUID keeps the app registration
+        $s2 = Get-PackTuneSettings; $s2.TenantID = 'contoso.com'; $s2.ClientID = '11111111-2222-3333-4444-555555555555'; $s2.TenantClients = 'contoso.com=11111111-2222-3333-4444-555555555555'; $s2.TenantAliases = ''
+        [void](Save-PackTuneSettings -Settings $s2); $script:Settings = Get-PackTuneSettings
+        $r1 = Resolve-AccountTenant 'admin@contoso.onmicrosoft.com'
+        Test-Smoke 'same tenant under another domain name: no switch, ClientID kept' ($r1.ClientID -eq '11111111-2222-3333-4444-555555555555' -and $script:Settings.TenantID -eq 'contoso.com' -and $script:Settings.ClientID) "$($r1.TenantID) / $($r1.ClientID) / $($script:Settings.TenantID)"
+        Switch-Tenant 'c0ffee00-0000-4000-8000-000000000001' ''
+        Test-Smoke 'switch to the same tenant by GUID changes nothing (ClientID not cleared)' ($script:Settings.TenantID -eq 'contoso.com' -and $script:Settings.ClientID -eq '11111111-2222-3333-4444-555555555555')
+        Test-Smoke 'domain and GUID are remembered as one tenant; the registration is also kept under the GUID (migration)' ((Get-PackTuneTenantGuid 'contoso.com' -NoLookup) -eq 'c0ffee00-0000-4000-8000-000000000001' -and (Get-PackTuneTenantClient 'c0ffee00-0000-4000-8000-000000000001') -eq '11111111-2222-3333-4444-555555555555' -and $script:Settings.TenantClients -like '*c0ffee00-0000-4000-8000-000000000001=*') $script:Settings.TenantAliases
+        $threw = $false; try { [void](Resolve-AccountTenant 'adm@fabrikam.onmicrosoft.com') } catch { $threw = $true }
+        Test-Smoke 'a really other tenant still switches (no registration there yet)' ($threw -and $script:Settings.TenantID -eq 'fabrikam.onmicrosoft.com' -and -not $script:Settings.ClientID)
+        Switch-Tenant 'contoso.onmicrosoft.com' '11111111-2222-3333-4444-555555555555'
+        $script:TenantGuidLookup = $null
         $true } }
     @{ Name = 'buttons are not clipped (100%, 125%, 150%)'; Do = {
         function Find-Clipped($e, $list) {

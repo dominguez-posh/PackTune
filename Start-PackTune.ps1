@@ -3948,7 +3948,7 @@ function Connect-Intune {
             $pump = { $window.Dispatcher.Invoke([action] {}, [System.Windows.Threading.DispatcherPriority]::Background) }
             $token = Connect-PackTuneWithKeevault -TenantID $tenant -ClientID $clientId -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -UserDataFolder $script:SignInSession -Scopes (Get-PackTuneSignInScopes -Consent:$Consent) -Prompt $prompt -Owner $window -OnWait $pump -OnAccount { param($User) Resolve-AccountTenant $User }
             Set-PackTuneToken -TokenResponse $token -TenantID $token.SignInTenantID -ClientID $token.SignInClientID
-            if ($token.SignInTenantID -ne $tenant) { Switch-Tenant $token.SignInTenantID $token.SignInClientID }
+            if (-not (Test-PackTuneSameTenant $token.SignInTenantID $tenant)) { Switch-Tenant $token.SignInTenantID $token.SignInClientID }
             $script:Shared.Auth = Get-PackTuneAuthState
             Complete-SignIn 'via Keevault'
         }
@@ -4008,7 +4008,7 @@ function Resolve-AccountTenant([string]$User) {
     # another tenant is used when it is known, otherwise the tool switches and offers to create one.
     $tenant = [string]$script:Settings.TenantID
     $domain = Get-AccountDomain $User
-    if (-not $domain -or $tenant -match '^[0-9a-f-]{36}$' -or $domain -eq $tenant.ToLower()) { return @{ TenantID = $tenant; ClientID = $script:Settings.ClientID } }
+    if (-not $domain -or (Test-PackTuneSameTenant $tenant $domain)) { return @{ TenantID = $tenant; ClientID = $script:Settings.ClientID } }
     $known = Get-PackTuneTenantClient $domain
     if ($known) {
         Write-UiLog "$User belongs to ${domain}: signing in there with its app registration ($known)."
@@ -4019,6 +4019,11 @@ function Resolve-AccountTenant([string]$User) {
 }
 
 function Switch-Tenant([string]$TenantID, [string]$ClientID) {
+    if (Test-PackTuneSameTenant $TenantID $script:Settings.TenantID) {
+        # The same tenant under another name: nothing to switch, the app registration stays
+        Write-UiLog "$TenantID is the tenant already in use ($($script:Settings.TenantID)): kept, app registration unchanged."
+        return
+    }
     $s = Get-PackTuneSettings; $s.TenantID = $TenantID; $s.ClientID = $ClientID
     [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings
     $script:TenantApps = $null; $script:CustomApps = $null; $script:TenantPackages = @{}
@@ -4035,6 +4040,8 @@ function Complete-SignIn([string]$How) {
     $script:TenantApps = $null
     Update-ConnectionStatus
     $identity = Get-PackTuneIdentity
+    # Tenant identity is the GUID: remember which domain names belong to it (settings tenant, account domain)
+    try { if ($identity.TenantId) { Register-PackTuneTenantAlias -Guid ([string]$identity.TenantId) -Name @([string]$script:Settings.TenantID, (Get-AccountDomain ([string]$identity.Account))); $script:Settings = Get-PackTuneSettings } } catch { }
     Save-GrantedScopes
     Write-UiLog "Signed in $How as $($identity.Account) (tenant $($identity.TenantId))." 'Success'
     Start-TenantRefresh

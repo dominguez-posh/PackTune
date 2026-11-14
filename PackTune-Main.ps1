@@ -73,6 +73,8 @@ $script:DefaultSettings = [ordered]@{
     # App registrations of all tenants used so far, "tenant=client id;..." (signing in with an account of another
     # tenant switches to that tenant and its app registration)
     TenantClients         = ""
+    # Tenant identity is the tenant GUID: "guid=domain1|domain2;..." (every domain name a tenant was reached by)
+    TenantAliases         = ""
     # Defaults for new apps, changeable per app afterwards:
     #   Off      no automatic updates; a version released in this tool is installed right away by Intune
     #   Startup  update at every startup (random delay above)
@@ -179,10 +181,74 @@ function ConvertFrom-TenantClients([string]$Text) {
     return $Map
 }
 
+$script:TenantGuidLookup = $null   # tests: scriptblock (domain) -> guid
+function ConvertFrom-TenantAliases([string]$Text) {
+    $Map = @{}
+    foreach ($Pair in ($Text -split ";")) {
+        $Guid, $Names = $Pair -split "=", 2
+        if ($Guid -and $Names) { $Map[$Guid.Trim().ToLower()] = @($Names -split "\|" | Where-Object { $_ } | ForEach-Object { $_.Trim().ToLower() }) }
+    }
+    return $Map
+}
+function Get-PackTuneTenantGuid {
+    <# The tenant GUID of a tenant given by GUID or any of its domain names: from the remembered aliases, else from the public
+       OpenID configuration of the domain (no sign-in needed; the issuer carries the GUID). $null when it cannot be told. #>
+    param([Parameter(Mandatory = $true)][string]$Tenant, [switch]$NoLookup)
+    $Key = $Tenant.Trim().ToLower()
+    if ($Key -match '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$') { return $Key }
+    foreach ($Entry in (ConvertFrom-TenantAliases $script:Settings.TenantAliases).GetEnumerator()) { if ($Entry.Value -contains $Key) { return $Entry.Key } }
+    if ($NoLookup) { return $null }
+    $Found = $null
+    try {
+        if ($script:TenantGuidLookup) { $Found = & $script:TenantGuidLookup $Key }
+        else {
+            $Config = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$Key/v2.0/.well-known/openid-configuration" -TimeoutSec 8
+            if ([string]$Config.issuer -match '/([0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12})/') { $Found = $Matches[1] }
+        }
+    }
+    catch { $Found = $null }
+    if ($Found) { Register-PackTuneTenantAlias -Guid ([string]$Found) -Name $Key }
+    if ($Found) { return ([string]$Found).ToLower() }
+    return $null
+}
+function Register-PackTuneTenantAlias {
+    <# Remembers that a domain name (and the GUID itself) belong to one tenant, and moves an app registration saved under a domain
+       to the GUID as well (migration of older settings). Saves only when something is new. #>
+    param([Parameter(Mandatory = $true)][string]$Guid, [string[]]$Name)
+    $Guid = $Guid.ToLower()
+    if ($Guid -notmatch '^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$') { return }
+    $Aliases = ConvertFrom-TenantAliases $script:Settings.TenantAliases
+    $List = @($Aliases[$Guid] | Where-Object { $_ })
+    $New = @($Name | Where-Object { $_ -and $_ -notmatch '^[0-9a-f]{8}-' } | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $List -notcontains $_ })
+    $Clients = ConvertFrom-TenantClients $script:Settings.TenantClients
+    $Migrate = $false
+    if (-not $Clients.ContainsKey($Guid)) { foreach ($N in @($List) + $New) { if ($Clients.ContainsKey($N)) { $Migrate = $true; break } } }
+    if (-not $New.Count -and -not $Migrate) { return }
+    $Aliases[$Guid] = @($List + $New | Select-Object -Unique)
+    $S = Get-PackTuneSettings
+    $S.TenantAliases = (@($Aliases.Keys | Sort-Object | ForEach-Object { "$_=$($Aliases[$_] -join '|')" })) -join ";"
+    if ($Migrate) { foreach ($N in @($List) + $New) { if ($Clients.ContainsKey($N)) { $Clients[$Guid] = $Clients[$N]; break } }; $S.TenantClients = (@($Clients.Keys | Sort-Object | ForEach-Object { "$_=$($Clients[$_])" })) -join ";" }
+    $null = Save-PackTuneSettings -Settings $S
+}
+function Test-PackTuneSameTenant {
+    <# Two tenant names (GUID or domain) are the same tenant when they are equal or resolve to one GUID. Unknown = not the same. #>
+    param([string]$A, [string]$B)
+    if (-not $A -or -not $B) { return $false }
+    if ($A.Trim().ToLower() -eq $B.Trim().ToLower()) { return $true }
+    $GuidA = Get-PackTuneTenantGuid $A; $GuidB = Get-PackTuneTenantGuid $B
+    return [bool]($GuidA -and $GuidB -and $GuidA -eq $GuidB)
+}
 function Get-PackTuneTenantClient {
     param([Parameter(Mandatory = $true)][string]$TenantID)
-    return (ConvertFrom-TenantClients $script:Settings.TenantClients)[$TenantID.ToLower()]
-}#The client id of the app registration used in that tenant before, or $null
+    $Clients = ConvertFrom-TenantClients $script:Settings.TenantClients
+    $Key = $TenantID.ToLower()
+    if ($Clients.ContainsKey($Key)) { return $Clients[$Key] }
+    $Guid = Get-PackTuneTenantGuid $TenantID
+    if (-not $Guid) { return $null }
+    if ($Clients.ContainsKey($Guid)) { return $Clients[$Guid] }
+    foreach ($Name in @((ConvertFrom-TenantAliases $script:Settings.TenantAliases)[$Guid])) { if ($Name -and $Clients.ContainsKey($Name)) { return $Clients[$Name] } }
+    return $null
+}#The client id of the app registration used in that tenant before (by name or GUID), or $null
 
 $script:Settings = Get-PackTuneSettings
 
