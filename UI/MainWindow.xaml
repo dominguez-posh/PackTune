@@ -62,6 +62,13 @@
             </Button>
         </DataTemplate>
 
+        <!-- One line of the app grid: the cards of a line share the width. Lines are what the list virtualizes, so only the lines on screen exist. -->
+        <DataTemplate x:Key="AppLineTemplate">
+            <ItemsControl ItemsSource="{Binding Items}" ItemTemplate="{StaticResource AppCardTemplate}" Focusable="False">
+                <ItemsControl.ItemsPanel><ItemsPanelTemplate><UniformGrid Rows="1" Columns="{Binding [Cols]}"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+            </ItemsControl>
+        </DataTemplate>
+
         <DataTemplate x:Key="TenantRowTemplate">
             <Grid MinHeight="58">
                 <Grid.ColumnDefinitions>
@@ -386,11 +393,21 @@
                                     <TextBlock x:Name="TxtAppsCount" Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="0,0,0,8"/>
                                 </WrapPanel>
                                 <WrapPanel x:Name="PanelChips" Grid.Row="2" Margin="0,14,0,6"/>
-                                <ScrollViewer x:Name="AppsScroll" Grid.Row="3" Style="{StaticResource PageScroll}">
-                                    <ItemsControl x:Name="CardList" ItemTemplate="{StaticResource AppCardTemplate}" Margin="0,0,0,130">
-                                        <ItemsControl.ItemsPanel><ItemsPanelTemplate><WrapPanel x:Name="CardGrid" ItemWidth="320"/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
-                                    </ItemsControl>
-                                </ScrollViewer>
+                                <ItemsControl x:Name="CardList" Grid.Row="3" ItemTemplate="{StaticResource AppLineTemplate}" Padding="0,0,0,130" Focusable="False"
+                                              VirtualizingStackPanel.IsVirtualizing="True" VirtualizingStackPanel.VirtualizationMode="Recycling" ScrollViewer.CanContentScroll="True">
+                                    <ItemsControl.Template>
+                                        <ControlTemplate TargetType="ItemsControl">
+                                            <ScrollViewer x:Name="AppsScroll" Style="{StaticResource PageScroll}" CanContentScroll="True" Focusable="False">
+                                                <ItemsPresenter Margin="{TemplateBinding Padding}"/>
+                                            </ScrollViewer>
+                                        </ControlTemplate>
+                                    </ItemsControl.Template>
+                                    <ItemsControl.ItemsPanel><ItemsPanelTemplate><VirtualizingStackPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                                </ItemsControl>
+                                <StackPanel x:Name="AppsLoading" Grid.Row="3" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,40,0,0" Visibility="Collapsed">
+                                    <ProgressBar IsIndeterminate="True" Width="220" Height="4" Margin="0,0,0,12"/>
+                                    <TextBlock x:Name="TxtAppsLoading" Text="Loading apps ..." HorizontalAlignment="Center" Foreground="{StaticResource MutedText}"/>
+                                </StackPanel>
                             </Grid>
 
                             <!-- Details side panel -->

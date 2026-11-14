@@ -2514,6 +2514,8 @@ function Test-PackTunePackage {
         [ValidateRange(1, 2160)][int]$GraceHours = $script:Settings.GraceHours,
         [ValidateSet("Chocolatey", "Winget")][string]$Source = "Chocolatey",
         $Schedule = (Get-ChocoScheduleDefaults),
+        # An older version that is installed first: the lab then plays the update path (previous version in, detected, update, detected)
+        [string]$FromVersion = "",
         [switch]$AutoRun
     )
     $IsWinget = $Source -eq "Winget"
@@ -2572,9 +2574,24 @@ exit $LASTEXITCODE
     New-Item -ItemType Directory -Path $LabFiles -Force | Out-Null
     Copy-LabPackageFiles -SourcePath $SourcePath -Destination $LabFiles
 
-    Write-Host "Opening the test lab in Windows Sandbox for $($Info.Title): run Install, Detect, Uninstall there, then report the result"
-    $Result = Start-PackTuneWin32Lab -DisplayName "$($Info.Title) ($Source)" -Version $(if ($Version) { $Version } else { $Info.Version }) -SourcePath $LabFiles -AutoRun:$AutoRun `
-        -Scripts @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $LabDetect }
+    $LabParams = @{ Scripts = @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $LabDetect } }
+    if ($FromVersion) {
+        # The previous version: its own package files and detection, the same lab scripts
+        $PreviousPolicy = New-PackTuneAppPolicy -Package $Package -Version $FromVersion -UpdateMode $UpdateMode -GraceHours $GraceHours -PackageSource $(if ($IsWinget) { "" } else { $script:Settings.PackageSource }) `
+            -UpdateDelayMinMinutes $script:Settings.UpdateDelayMinMinutes -UpdateDelayMaxMinutes $script:Settings.UpdateDelayMaxMinutes -Schedule $Schedule
+        $PreviousSource = Join-Path $WorkPath "source-previous"
+        $PreviousDetection = if ($IsWinget) { New-WingetPackageScripts -WingetId $Package -SourcePath $PreviousSource -Policy $PreviousPolicy -DisplayName $Info.Title }
+        else { New-ChocoPackageScripts -ChocoName $Package -SourcePath $PreviousSource -Policy $PreviousPolicy -DisplayName $Info.Title }
+        $PreviousFiles = Join-Path $WorkPath "lab-previous"
+        New-Item -ItemType Directory -Path $PreviousFiles -Force | Out-Null
+        Copy-LabPackageFiles -SourcePath $PreviousSource -Destination $PreviousFiles
+        $LabParams.PreviousScripts = @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = (Get-Content -Path $PreviousDetection -Raw) }
+        $LabParams.PreviousSourcePath = $PreviousFiles
+        $LabParams.PreviousVersion = $FromVersion
+    }
+
+    Write-Host "Opening the test lab in Windows Sandbox for $($Info.Title): detect, install$(if ($FromVersion) { " (version $FromVersion first, then the update)" }), detect, uninstall, detect"
+    $Result = Start-PackTuneWin32Lab -DisplayName "$($Info.Title) ($Source)" -Version $(if ($Version) { $Version } else { $Info.Version }) -SourcePath $LabFiles -AutoRun:$AutoRun @LabParams
     Write-Host "Test result: $($Result.Verdict). $($Result.Message)"
     [pscustomobject]@{ Package = $Package; Source = $Source; Verdict = $Result.Verdict; Message = $Result.Message; JobPath = $Result.JobPath }
 }#Tests a package in Windows Sandbox (test lab of PackTune)

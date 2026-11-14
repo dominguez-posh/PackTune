@@ -715,25 +715,38 @@ function Invoke-PackTuneMsixCapture {
 
 function Start-PackTuneWin32Lab {
     <#
-        Opens the test lab in a fresh sandbox for a package: Install, Detect, Uninstall and Detect again, as SYSTEM like the Intune
-        Management Extension. -Scripts holds Install.ps1, Uninstall.ps1 and Detect.ps1 (the commands the lab runs), -SourcePath
-        a folder with the other package files; both end up in one folder in the sandbox. You run the steps there (or the lab runs
-        them all with -AutoRun) and report the result. Returns Verdict (Passed or Failed), Message, Result and JobPath.
+        Opens the test lab in a fresh sandbox and plays the package through the paths Intune takes, as SYSTEM like the Intune
+        Management Extension: detect before the install (expected: not detected; a detected app would not be installed), install,
+        detect, and with a previous version (-PreviousScripts, -PreviousSourcePath) first that one in and detected, then the update
+        and its detection, then uninstall and detect (expected: not detected). Every step shows exit code, duration, expected and
+        actual. -Scripts holds Install.ps1, Uninstall.ps1 and Detect.ps1 (the commands the lab runs), -SourcePath a folder with the
+        other package files; both end up in one folder in the sandbox. You run the steps there, or the lab runs them all with
+        -AutoRun in order and stops at the first unexpected result. Returns Verdict (Passed, or Failed at step N with the cause),
+        Message, Result and JobPath.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$DisplayName, [string]$Version = '', [Parameter(Mandatory = $true)][hashtable]$Scripts,
-        [string]$SourcePath, [switch]$AutoRun, [Nullable[bool]]$Networking, [int]$TimeoutMinutes
+        [string]$SourcePath, [hashtable]$PreviousScripts, [string]$PreviousSourcePath, [string]$PreviousVersion = '',
+        [switch]$AutoRun, [Nullable[bool]]$Networking, [int]$TimeoutMinutes
     )
     foreach ($Required in 'Install.ps1', 'Uninstall.ps1', 'Detect.ps1') { if (-not $Scripts.ContainsKey($Required)) { throw "The lab needs the script $Required." } }
+    $HasPrevious = [bool]$PreviousScripts
+    if ($HasPrevious) { foreach ($Required in 'Install.ps1', 'Uninstall.ps1', 'Detect.ps1') { if (-not $PreviousScripts.ContainsKey($Required)) { throw "The previous version needs the script $Required." } } }
     if (-not $TimeoutMinutes) { $TimeoutMinutes = if ($AutoRun) { [int]$script:Options.JobTimeoutMinutes } else { 480 } }
     if ($null -eq $Networking) { $Networking = [bool]$script:Options.Networking }
     Write-SandboxLog 'Step 1 of 4: preparing the test (creating the sandbox files).'
-    $Job = New-SandboxJob -Mode Lab -Name $DisplayName -Data @{ AutoClose = $false; AutoRun = [bool]$AutoRun; DisplayName = $DisplayName; Version = $Version }
+    $Job = New-SandboxJob -Mode Lab -Name $DisplayName -Data @{ AutoClose = $false; AutoRun = [bool]$AutoRun; DisplayName = $DisplayName; Version = $Version; HasPrevious = $HasPrevious; PreviousVersion = $PreviousVersion }
     $Source = Join-Path $Job 'input\source'
     New-Item -ItemType Directory -Path $Source -Force | Out-Null
     if ($SourcePath) { Copy-Item -Path (Join-Path $SourcePath '*') -Destination $Source -Recurse -Force }
     foreach ($Name in $Scripts.Keys) { Set-Content -Path (Join-Path $Source $Name) -Value $Scripts[$Name] -Encoding UTF8 }
-    Write-SandboxLog "Opening the test lab in Windows Sandbox for $DisplayName$(if ($Version) { " $Version" }): Install, Detect, Uninstall$(if (-not $AutoRun) { ', then report the result there' })."
+    if ($HasPrevious) {
+        $Previous = Join-Path $Job 'input\source-previous'
+        New-Item -ItemType Directory -Path $Previous -Force | Out-Null
+        if ($PreviousSourcePath) { Copy-Item -Path (Join-Path $PreviousSourcePath '*') -Destination $Previous -Recurse -Force }
+        foreach ($Name in $PreviousScripts.Keys) { Set-Content -Path (Join-Path $Previous $Name) -Value $PreviousScripts[$Name] -Encoding UTF8 }
+    }
+    Write-SandboxLog "Opening the test lab in Windows Sandbox for $DisplayName$(if ($Version) { " $Version" }): detect, install$(if ($HasPrevious) { ' (previous version, then the update)' }), detect, uninstall, detect$(if (-not $AutoRun) { ', then report the result there' })."
     $Wsb = New-SandboxConfig -JobPath $Job -Networking ([bool]$Networking) -NoToolchain
     Write-SandboxLog 'Step 2 of 4: starting Windows Sandbox (the window opens in a moment).'
     Start-SandboxProcess -WsbPath $Wsb
