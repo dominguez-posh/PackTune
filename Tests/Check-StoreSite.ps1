@@ -70,6 +70,7 @@ $script:WebUrl = 'https://contoso.sharepoint.com/sites/PackTune'
 $script:Slept = New-Object System.Collections.ArrayList
 $script:FailMember = $false
 $script:Created = $null
+$script:Perms = @(); $script:DropGrant = $false; $script:PatchTries = 0; $script:PatchFails = 0
 function Wait-PackTuneStore([int]$Seconds) { [void]$script:Slept.Add($Seconds) }
 function Invoke-PackTuneAdminGraph {
     param([string]$Token, [string]$Method = 'GET', [string]$Path, $Body)
@@ -79,13 +80,18 @@ function Invoke-PackTuneAdminGraph {
         '^GET /groups\?\$filter=mailNickname' { return [pscustomobject]@{ value = @($(if ($script:GroupExists) { [pscustomobject]$script:GroupExists })) } }
         '^GET /me' { return [pscustomobject]@{ id = 'user-1'; displayName = 'Ada Admin' } }
         '^POST /groups$' { $script:Created = $Body; return [pscustomobject]@{ id = 'group-1'; displayName = $Body.displayName } }
-        '^PATCH /groups/' { return $null }
+        '^PATCH /groups/' { $script:PatchTries++; if ($script:PatchTries -le $script:PatchFails) { throw 'Graph PATCH failed (404): Resource not found' }; return $null }
         '^GET /groups/([^/]+)/sites/root' { $script:SitePolls++; if ($script:SitePolls -lt $script:SiteReadyAfter) { throw 'Graph GET failed (404): The site is not ready' }; return [pscustomobject]@{ id = 'site-9'; webUrl = $script:WebUrl } }
         '^GET /groups\?\$filter=displayName' { return [pscustomobject]@{ value = @([pscustomobject]@{ id = 'group-admins'; displayName = 'Intune Admins' }) } }
         '^POST /groups/[^/]+/members/\$ref' { if ($script:FailMember) { throw 'Graph POST failed (400): not allowed' }; return $null }
         '^GET /sites/site-9/drives' { return [pscustomobject]@{ value = @($script:Drives) } }
         '^POST /sites/site-9/lists$' { $script:Drives += [pscustomobject]@{ id = 'd9'; name = $Body.displayName }; return [pscustomobject]@{ id = 'list-9' } }
-        '^POST /sites/site-9/permissions$' { return $null }
+        '^POST /sites/site-9/permissions$' {
+            if (-not $script:DropGrant) { $script:Perms += @{ id = "perm-$($script:Perms.Count + 1)"; roles = @($Body.roles); grantedToIdentitiesV2 = @(@{ application = @{ id = $Body.grantedToIdentities[0].application.id; displayName = $Body.grantedToIdentities[0].application.displayName } }) } }
+            return $null
+        }
+        '^GET /sites/site-9/permissions$' { return [pscustomobject]@{ value = @($script:Perms | ForEach-Object { [pscustomobject]$_ }) } }
+        '^DELETE /sites/site-9/permissions/(.+)$' { $id = $Matches[1]; $script:Perms = @($script:Perms | Where-Object { $_.id -ne $id }); return $null }
         default { throw "fake admin Graph: $Method $Path" }
     }
 }
@@ -129,8 +135,66 @@ Test-Check 'setup: an Entra group that cannot be added is a warning, the store i
 $threw = $false; try { $null = Initialize-PackTuneStoreSite -Token 'x' -SiteName 'bad name' } catch { $threw = $true }
 Test-Check 'setup: an invalid site name is refused' $threw
 Set-Tenant 'contoso.com'; $Global:AccessToken = $null
-$threw = $false; try { $null = Initialize-PackTuneStoreSite -Token 'x' } catch { $threw = $_.Exception.Message -like '*SharePoint address of the tenant*' }
+$threw = $false; try { $null = Initialize-PackTuneStoreSite -Token 'x' -ClientID $client } catch { $threw = $_.Exception.Message -like '*SharePoint address of the tenant*' }
 Test-Check 'setup: without a known SharePoint host it says to use the advanced address' $threw
+
+# --- the permission goes to PackTune's OWN app registration, read back; the setup app of Microsoft never holds it
+$setupId = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
+$s = Get-PackTuneSettings; $s.ClientID = $client; $s.TenantID = 'contoso.onmicrosoft.com'; [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings; $script:StoreHost = $null
+Test-Check 'client id: the settings of PackTune give its own app registration' ((Get-PackTuneAppClientId) -eq $client)
+$s.ClientID = $setupId; [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings
+$Global:AccessToken = [pscustomobject]@{ ClientID = $client; access_token = 'x.e30.y' }
+$msgFirst = ''; try { $null = Get-PackTuneAppClientId } catch { $msgFirst = $_.Exception.Message }
+Test-Check 'client id: when the settings hold the setup app of Microsoft it is refused, whatever the sign-in says' ($msgFirst -like 'App registration missing - set it up first*')
+$Global:AccessToken = $null
+$msg = ''; try { $null = Get-PackTuneAppClientId } catch { $msg = $_.Exception.Message }
+Test-Check 'client id: only the setup app known -> an error, nothing is granted to it' ($msg -like 'App registration missing*') $msg
+$s.ClientID = $client; [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings
+$script:Perms = @(); $script:SiteExists = $true; $script:Drives = @(); $script:Calls.Clear()
+$r = Initialize-PackTuneStoreSite -Token 'admin-token'
+Test-Check 'setup: without -ClientID the permission goes to the app registration of the settings, listed back with its name' ($r.State -eq 'Ready' -and @($script:Perms).Count -eq 1 -and $script:Perms[0].grantedToIdentitiesV2[0].application.id -eq $client -and $script:Perms[0].grantedToIdentitiesV2[0].application.displayName -eq 'PackTune' -and @($script:Calls | Where-Object { $_.Method -eq 'GET' -and $_.Path -eq '/sites/site-9/permissions' }).Count -ge 1)
+$msg = ''; try { $null = Initialize-PackTuneStoreSite -Token 'admin-token' -ClientID $setupId } catch { $msg = $_.Exception.Message }
+Test-Check 'setup: the setup app of Microsoft is refused as holder of the permission' ($msg -like '*not to the setup app of Microsoft*' -and @($script:Perms | Where-Object { $_.grantedToIdentitiesV2[0].application.id -eq $setupId }).Count -eq 0) $msg
+$script:Perms = @(); $script:DropGrant = $true
+$msg = ''; try { $null = Initialize-PackTuneStoreSite -Token 'admin-token' -ClientID $client } catch { $msg = $_.Exception.Message }
+Test-Check 'setup: a permission the site does not list afterwards is an error (read back)' ($msg -like '*does not list PackTune*when read back*') $msg
+$script:DropGrant = $false
+# an earlier version granted the setup app: found, reported, removed on request
+$script:Perms = @(@{ id = 'perm-old'; roles = @('write'); grantedToIdentitiesV2 = @(@{ application = @{ id = $setupId; displayName = 'PackTune' } }) })
+$r = Initialize-PackTuneStoreSite -Token 'admin-token' -ClientID $client
+Test-Check 'repair: the site where the setup app holds a permission reports it, PackTune gets its own permission' ($r.WrongGrants -eq 1 -and @($r.Warnings | Where-Object { $_ -like '*setup app of Microsoft holds a permission*' }).Count -eq 1 -and @($script:Perms | Where-Object { $_.grantedToIdentitiesV2[0].application.id -eq $client }).Count -eq 1)
+$null = @(Remove-PackTuneStoreWrongGrants -Token 'admin-token' -SiteId 'site-9')
+Test-Check 'repair: removing the wrong grant takes only the setup app off, PackTune keeps its own' (@($script:Perms | Where-Object { $_.grantedToIdentitiesV2[0].application.id -eq $setupId }).Count -eq 0 -and @($script:Perms | Where-Object { $_.grantedToIdentitiesV2[0].application.id -eq $client }).Count -eq 1)
+$script:Perms = @()
+$g = Grant-PackTuneStoreAccess -SiteUrl 'https://contoso.sharepoint.com/sites/PackTune' -ClientID $client -Token 'admin-token'
+Test-Check 'grant only (Grant access): own client id, read back, result says whether a wrong grant exists' ($g.ClientId -eq $client -and $g.WrongGrants -eq 0 -and @($script:Perms).Count -eq 1)
+$msg = ''; try { $null = Grant-PackTuneStoreAccess -SiteUrl 'https://contoso.sharepoint.com/sites/PackTune' -ClientID $setupId -Token 'admin-token' } catch { $msg = $_.Exception.Message }
+Test-Check 'grant only: the setup app as target is refused' ($msg -like '*not to the setup app of Microsoft*') $msg
+
+# --- hiding the group from the address lists: retried (replication), information when it never works
+$script:SiteExists = $false; $script:GroupExists = $null; $script:SitePolls = 0; $script:SiteReadyAfter = 1; $script:Perms = @(); $script:Drives = @(); $script:Slept.Clear(); $script:PatchTries = 0; $script:PatchFails = 2
+$r = Initialize-PackTuneStoreSite -Token 'admin-token' -ClientID $client
+Test-Check 'hide from address lists: a 404 right after the group was made is retried with a growing pause and then works' ($script:PatchTries -eq 3 -and ($script:Slept -join ',') -like '2,4*' -and @($r.Steps | Where-Object { $_ -like 'The group is hidden from the address lists' }).Count -eq 1 -and @($r.Warnings).Count -eq 0)
+$script:SiteExists = $false; $script:GroupExists = $null; $script:SitePolls = 0; $script:Perms = @(); $script:Drives = @(); $script:PatchTries = 0; $script:PatchFails = 99
+$r = Initialize-PackTuneStoreSite -Token 'admin-token' -ClientID $client
+Test-Check 'hide from address lists: when it never works it is information in the steps, not a warning, the setup goes on' ($r.State -eq 'Ready' -and @($r.Warnings).Count -eq 0 -and @($r.Steps | Where-Object { $_ -like 'Info: the group could not be hidden from the address lists*' }).Count -eq 1 -and $script:PatchTries -eq 5)
+
+# --- the readiness check: mapped causes, a short timeout
+$script:StoreTimeoutSec = 300
+$seenTimeout = 0
+function Invoke-PackTuneStoreGraph {
+    param([string]$Method = 'GET', [string]$Path, [string]$Absolute, $Body, [string]$InFile, [byte[]]$Bytes, [string]$OutFile, [hashtable]$Headers = @{})
+    $script:seenTimeout = $script:StoreTimeoutSec
+    throw $script:GraphError
+}
+$script:GraphError = 'SharePoint GET failed (403): Access denied'
+$st = Get-PackTuneStoreState
+Test-Check 'check: a 403 says PackTune has no access yet and an administrator confirms it once (the Grant access case)' ($st.State -eq 'NoAccess' -and $st.Message -like '*no access to the site yet - an administrator confirms it once*Grant access*')
+Test-Check 'check: the request has a short timeout (30 s), restored afterwards' ($script:seenTimeout -eq 30 -and $script:StoreTimeoutSec -eq 300)
+$script:GraphError = 'Der Remotename konnte nicht aufgel?st werden'
+Test-Check 'check: a network error is its own short cause' ((Get-PackTuneStoreState).Message -like '*cannot be reached*')
+$script:GraphError = 'The operation has timed out.'
+Test-Check 'check: a timeout is its own short cause' ((Get-PackTuneStoreState).Message -like '*did not answer in time*')
 
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed) { "$script:Failed check(s) failed."; exit 1 }

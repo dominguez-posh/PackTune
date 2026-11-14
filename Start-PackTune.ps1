@@ -655,6 +655,12 @@ $timer.Add_Tick({
             if ($script:CurrentPage -eq 'Apps') { Update-AppList }
             if (-not (Test-TaskRunning 'meta')) { Complete-MetaPrefetch }
         }
+    # A store check that does not answer: after 90 seconds the item says so instead of "Checking ..." for ever
+    if (-not $script:StoreCheckTimedOut -and @($script:Tasks | Where-Object { $_.Job.Kind -eq 'storecheck' -and $_.Job.Started -and ((Get-Date) - $_.Job.Started).TotalSeconds -gt 90 }).Count) {
+        $script:StoreCheckTimedOut = $true
+        $script:StoreState = [pscustomobject]@{ State = 'NoAccess'; Message = 'SharePoint did not answer in time. It is checked again at the next start or with Check.'; SiteUrl = $null }
+        Update-Readiness
+    }
         if ($script:Tick % 240 -eq 0 -and $script:Shared.Auth) { Update-ConnectionStatus }
     }
     catch { Write-UiLog ($_.Exception.Message) 'Error' }
@@ -2265,6 +2271,7 @@ function Save-StoreSiteUrl([string]$Url, [string]$Name) {
 }
 function Start-StoreCheck {
     if (-not (Test-SignedIn) -or (Test-TaskRunning 'storecheck')) { return }
+    $script:StoreCheckTimedOut = $false
     # Tests: no request to Microsoft Graph from the smoke run
     if ($env:PACKTUNE_SMOKE) { $script:StoreState = if ($script:StoreSmokeState) { $script:StoreSmokeState } else { [pscustomobject]@{ State = 'Missing'; Message = 'The PackTune site does not exist in this tenant yet (smoke test). An administrator sets it up once (Set up).'; SiteUrl = 'https://contoso.sharepoint.com/sites/PackTune' } }; Update-Readiness; Update-CustomRows; return }
     Update-UiToken
@@ -2281,10 +2288,10 @@ function Start-StoreCheck {
 }
 function Get-StoreReadinessItems {
     $items = @()
-    $items += if (-not (Test-SignedIn)) { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Text = 'Keeps every version of a custom application in a private SharePoint library, so it can be updated and edited from any PC. Sign in first.' } }
-              elseif (-not $script:StoreState) { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'storecheck'); Text = 'Checking the package store ...'; Fix = 'Check'; Action = { Start-StoreCheck } } }
-              elseif ($script:StoreState.State -eq 'Ready') { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'ok'; Optional = $true; Text = $script:StoreState.Message } }
-              else { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Text = $script:StoreState.Message; Fix = $(if ($script:StoreState.State -in 'Missing', 'NotConfigured', 'NoLibrary') { 'Set up' } else { 'Details' }); Action = { Show-StoreDialog } } }
+    $items += if (-not (Test-SignedIn)) { @{ Key = 'store'; Title = 'Package store (for custom applications)'; State = 'warn'; Optional = $true; Text = 'Keeps every version of a custom application in a private SharePoint library, so it can be updated and edited from any PC. Sign in first.' } }
+              elseif (-not $script:StoreState) { @{ Key = 'store'; Title = 'Package store (for custom applications)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'storecheck'); Text = 'Checking the package store ...'; Fix = 'Check'; Action = { Start-StoreCheck } } }
+              elseif ($script:StoreState.State -eq 'Ready') { @{ Key = 'store'; Title = 'Package store (for custom applications)'; State = 'ok'; Optional = $true; Text = $script:StoreState.Message } }
+              else { @{ Key = 'store'; Title = 'Package store (for custom applications)'; State = 'warn'; Optional = $true; Text = $script:StoreState.Message; Fix = $(if ($script:StoreState.State -in 'Missing', 'NotConfigured', 'NoLibrary') { 'Set up' } elseif ($script:StoreState.State -eq 'NoAccess') { 'Grant access' } else { 'Details' }); Action = $(if ($script:StoreState.State -eq 'NoAccess') { { Start-StoreGrant } } else { { Show-StoreDialog } }) } }
     return $items
 }
 function Update-StoreDialog {
@@ -2336,10 +2343,10 @@ function Start-StoreSetup([string]$SiteName) {
     $script:StoreSteps = New-StepModel @('Sign in (administrator)', 'Create the Microsoft 365 group PackTune', 'Wait for the SharePoint site', 'Add members', 'Create the library', 'Grant PackTune access to the site', 'Check')
     $ui.PanelStoreSteps.Visibility = 'Visible'
     Set-ButtonBusy $ui.BtnStoreSetup $true 'Setting up ...'; $ui.BtnStoreSetup.IsEnabled = $false
-    $setupJob = (Start-UiTask -Kind 'store' -Title 'Setting up the PackTune site (this can take a few minutes while Microsoft 365 makes the site)' -Display 'Package store' -Pool $script:UserPool -Arguments @{ Token = $access; Client = $script:Settings.ClientID; Name = $SiteName; Group = $group; Library = $script:Settings.StoreLibrary } `
-        -Work 'param($Token, $Client, $Name, $Group, $Library) $p = @{ Token = $Token; ClientID = $Client; Library = $Library }; if ($Name) { $p.SiteName = $Name }; if ($Group) { $p.AdminGroup = $Group }; $r = Initialize-PackTuneStoreSite @p; foreach ($s in $r.Steps) { Write-Host $s }; foreach ($w in $r.Warnings) { Write-Warning $w }; $r | Select-Object State, SiteUrl, SiteName, FallbackName, Message' -OnDone {
+    $setupJob = (Start-UiTask -Kind 'store' -Title 'Setting up the PackTune site (this can take a few minutes while Microsoft 365 makes the site)' -Display 'Package store' -Pool $script:UserPool -Arguments @{ Token = $access; Client = (Get-PackTuneAppClientId); Name = $SiteName; Group = $group; Library = $script:Settings.StoreLibrary } `
+        -Work 'param($Token, $Client, $Name, $Group, $Library) $p = @{ Token = $Token; ClientID = $Client; Library = $Library }; if ($Name) { $p.SiteName = $Name }; if ($Group) { $p.AdminGroup = $Group }; $r = Initialize-PackTuneStoreSite @p; foreach ($s in $r.Steps) { Write-Host $s }; foreach ($w in $r.Warnings) { Write-Warning $w }; $r | Select-Object State, SiteUrl, SiteName, SiteId, FallbackName, WrongGrants, Message' -OnDone {
         param($Result, $Job)
-        $script:StoreSetupToken = $null
+        $setupToken = $script:StoreSetupToken; $script:StoreSetupToken = $null
         Set-ButtonBusy $ui.BtnStoreSetup $false ''; Update-StoreDialog
         $r = @($Result | Where-Object { $_ -and $_.State }) | Select-Object -First 1
         if ($Job.Status -ne 'succeeded' -or -not $r) { Show-Toast 'The PackTune site could not be set up, see Activity.' 'bad'; $script:StoreState = $null; Start-StoreCheck; return }
@@ -2355,27 +2362,43 @@ function Start-StoreSetup([string]$SiteName) {
         Write-UiLog "[Package store] $($r.Message)" 'Success'; Write-UiLog $script:StoreGrantConsentNote 'Warning'
         Show-Toast 'The PackTune site is set up.' 'ok'
         $script:StoreState = $null; Start-StoreCheck
+        if ($r.WrongGrants -gt 0) { Confirm-WrongGrantRemoval ([string]$r.SiteId) $setupToken }
     })
     Add-StepBinding $script:StoreSteps $setupJob $ui.ListStoreSteps $ui.BarStoreSteps
     Set-StepState $script:StoreSteps 1 'done' 'Signed in as administrator'
     Show-StepList $script:StoreSteps $ui.ListStoreSteps $ui.BarStoreSteps
 }
 Add-Click $ui.BtnStoreSetup { Start-StoreSetup '' }
-Add-Click $ui.BtnStoreGrant {
+function Confirm-WrongGrantRemoval($SiteId, $Token) {
+    # An earlier version gave the site permission to the setup app of Microsoft instead of PackTune: offered for removal (PackTune does not need it)
+    if (-not $SiteId -or -not $Token) { return }
+    if (-not (Confirm-Action "The setup app of Microsoft ('Microsoft Graph Command Line Tools') still holds a permission on the PackTune site. PackTune put it there by mistake in an earlier version and does not need it.`n`nRemove it now? It uses the sign-in you just made.`n`nRemove: take the permission of the setup app off the site.`nKeep: leave it." 'Wrong site permission' 'Remove' 'Keep')) { return }
+    [void](Start-UiTask -Kind 'store' -Title 'Removing the permission of the setup app from the PackTune site' -Display 'Package store' -Pool $script:UserPool -Arguments @{ Token = $Token; SiteId = $SiteId } -Work 'param($Token, $SiteId) Remove-PackTuneStoreWrongGrants -Token $Token -SiteId $SiteId | Out-Null' -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'succeeded') { Write-UiLog '[Package store] the permission of the setup app was removed from the site.' 'Success' } else { Show-Toast 'The permission of the setup app could not be removed, see Activity.' 'bad' }
+    })
+}
+function Start-StoreGrant {
+    # The administrator confirms PackTune's access to the site once: sign-in through the setup app, then the permission for PackTune's OWN app registration
     if (-not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permission Sites.FullControl.All, which PackTune uses for this one grant only.`n`n$($script:StoreGrantConsentNote)`n`nContinue?" 'Grant access to the SharePoint site' 'Continue' 'Cancel')) { return }
+    $client = Get-PackTuneAppClientId
     $token = $null
     try { $token = Get-EmbeddedToken -TenantID $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'organizations' }) -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Sites.FullControl.All') -Hint 'Sign in with an administrator account: it grants PackTune access to this one SharePoint site.' }
     catch { if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Show-SignInCancelled }; return }
     $role = if ($script:StoreState -and $script:StoreState.State -eq 'NoLibrary') { 'manage' } else { 'write' }
     $access = if ($token) { [string]$token.access_token } else { '' }
-    [void](Start-UiTask -Kind 'store' -Title "Granting PackTune access to the SharePoint site (role $role)" -Display 'Package store' -Pool $script:UserPool -Arguments @{ Site = $script:Settings.StoreSiteUrl; Client = $script:Settings.ClientID; Token = $access; Role = $role } `
-        -Work 'param($Site, $Client, $Token, $Role) if (-not $Site) { $Site = Get-PackTuneStoreSiteUrl }; $p = @{ SiteUrl = $Site; ClientID = $Client; Role = $Role }; if ($Token) { $p.Token = $Token }; Grant-PackTuneStoreAccess @p | Out-Null' -OnDone {
+    $script:StoreSetupToken = $access
+    [void](Start-UiTask -Kind 'store' -Title "Granting PackTune access to the SharePoint site (role $role)" -Display 'Package store' -Pool $script:UserPool -Arguments @{ Site = $script:Settings.StoreSiteUrl; Client = $client; Token = $access; Role = $role } `
+        -Work 'param($Site, $Client, $Token, $Role) if (-not $Site) { $Site = Get-PackTuneStoreSiteUrl }; $p = @{ SiteUrl = $Site; ClientID = $Client; Role = $Role }; if ($Token) { $p.Token = $Token }; Grant-PackTuneStoreAccess @p' -OnDone {
         param($Result, $Job)
+        $tok = $script:StoreSetupToken; $script:StoreSetupToken = $null
+        $r = @($Result | Where-Object { $_ -and $_.SiteId }) | Select-Object -First 1
         if ($Job.Status -eq 'succeeded') { Write-UiLog 'PackTune has access to the SharePoint site now.' 'Success'; Write-UiLog $script:StoreGrantConsentNote 'Warning'; Show-Toast 'Access to the SharePoint site granted.' 'ok' }
         $script:StoreState = $null; Start-StoreCheck
+        if ($Job.Status -eq 'succeeded' -and $r -and $r.WrongGrants -gt 0) { Confirm-WrongGrantRemoval ([string]$r.SiteId) $tok }
     })
 }
-
+Add-Click $ui.BtnStoreGrant { Start-StoreGrant }
 # ---------------------------------------------------------------- add application: live search in both repositories
 $script:AddRows = New-Object System.Collections.ObjectModel.ObservableCollection[object]
 $ui.LstAddResults.ItemsSource = $script:AddRows
@@ -3221,6 +3244,7 @@ Get-PackTuneTenantApps | ForEach-Object {
         Start-DependencyCheck
         Start-RuntimeCheck
         Start-StatusCheck
+        if (-not $script:StoreState) { Start-StoreCheck }
         Start-CountsTask
         Start-SupersededCheck
         Update-Readiness

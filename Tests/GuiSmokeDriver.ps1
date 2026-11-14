@@ -295,6 +295,23 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $script:RemovedApps.Clear(); $script:PendingApps.Clear(); $script:CustomApps = $null
         $script:TenantApps = $origApps; $script:TenantPackages = $origPackages; $script:RecentDeploys = $origRecent; Update-TenantRows -Force
         $true } }
+    @{ Name = 'store readiness item'; Do = {
+        $saved = $script:StoreState
+        $script:StoreState = [pscustomobject]@{ State = 'NoAccess'; Message = 'PackTune has no access to the site yet - an administrator confirms it once (Grant access).'; SiteUrl = 'https://contoso.sharepoint.com/sites/PackTune' }
+        $item = @(Get-StoreReadinessItems)[0]
+        Test-Smoke 'store item: named for what it is needed for, offers Grant access when PackTune has no access' ($item.Title -eq 'Package store (for custom applications)' -and $item.Fix -eq 'Grant access' -and $item.Text -like '*an administrator confirms it once*')
+        $script:StoreState = [pscustomobject]@{ State = 'Missing'; Message = 'The PackTune site does not exist in this tenant yet.'; SiteUrl = $null }
+        Test-Smoke 'store item: a site that is not there offers Set up' (@(Get-StoreReadinessItems)[0].Fix -eq 'Set up')
+        $script:StoreState = $null
+        $script:StoreCheckTimedOut = $false
+        $script:Tasks.Add(@{ Job = [pscustomobject]@{ Kind = 'storecheck'; Started = (Get-Date).AddMinutes(-3) }; Hidden = $true; Handle = [pscustomobject]@{ IsCompleted = $false } }) | Out-Null
+        $timer.Stop(); $timer.Start()
+        $window.Dispatcher.Invoke([System.Action]{ }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+        $deadline = (Get-Date).AddSeconds(5); while (-not $script:StoreCheckTimedOut -and (Get-Date) -lt $deadline) { $window.Dispatcher.Invoke([System.Action]{ Start-Sleep -Milliseconds 300 }, [System.Windows.Threading.DispatcherPriority]::Background) }
+        $script:Tasks.RemoveAt($script:Tasks.Count - 1)
+        Test-Smoke 'store check that does not answer: after 90 s the item says so instead of Checking for ever' ($script:StoreCheckTimedOut -and $script:StoreState -and $script:StoreState.Message -like '*did not answer in time*')
+        $script:StoreState = $saved
+        $true } }
     @{ Name = 'graph outage text'; Do = {
         Test-Smoke 'a 403 "Remediations not available" is no Graph outage (the .NET text mentions the remote server)' (-not (Test-GraphReadFailureText 'The remote server returned an error: (403) Forbidden.') -and -not (Test-GraphReadFailureText 'Der Remoteserver hat einen Fehler zur?ckgegeben: (403) Unzul?ssig') -and -not (Test-GraphReadFailureText 'Authorization_RequestDenied: Insufficient privileges') -and -not (Test-GraphReadFailureText 'The remote server returned an error: (400) Bad Request'))
         Test-Smoke 'network and server errors still are' ((Test-GraphReadFailureText 'The remote name could not be resolved: graph.microsoft.com') -and (Test-GraphReadFailureText 'The remote server returned an error: (503) Server Unavailable') -and (Test-GraphReadFailureText 'Der Remotename konnte nicht aufgel?st werden') -and (Test-GraphReadFailureText 'The operation has timed out'))
@@ -766,7 +783,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if ($s.Phase -eq 2) {
-            if (-not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
+            if (-not (Test-Idle 'removeinfo') -or -not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
             $s.Phase = 3
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'deploy: the app is in Intune with the custom marker and the Available assignment' ($fake.Count -eq 1 -and $fake[0].displayName -eq 'Smoke Tool' -and $fake[0].assignment -eq 'available' -and $fake[0].notes -like '*ver=1.0.0;product={BBBBBBBB-0000-0000-0000-000000000001}*') (($fake | ForEach-Object notes) -join ';')
@@ -788,7 +805,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if ($s.Phase -eq 3) {
-            if (-not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
+            if (-not (Test-Idle 'removeinfo') -or -not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
             $s.Phase = 4
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             $new = $fake | Where-Object { $_.displayVersion -eq '2.0.0' }
@@ -800,7 +817,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if ($s.Phase -eq 4) {
-            if (-not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
+            if (-not (Test-Idle 'removeinfo') -or -not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'remove: one custom app is gone from Intune and from the list' ($fake.Count -eq 1 -and $script:CustomRows.Count -eq 1 -and $ui.PanelCustomDetails.Visibility -eq 'Collapsed') ($fake | ForEach-Object displayVersion)
             Remove-Item $s.Dir -Recurse -Force -ErrorAction SilentlyContinue
