@@ -1255,11 +1255,13 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if (-not (Test-Idle)) { return $false }
-        Test-Smoke 'status page shows the counters' ($ui.TxtStatOk.Text -eq '2' -and $ui.TxtStatWait.Text -eq '1' -and $ui.TxtStatFail.Text -eq '1' -and $ui.TxtStatStale.Text -eq '1') "$($ui.TxtStatOk.Text)/$($ui.TxtStatWait.Text)/$($ui.TxtStatFail.Text)/$($ui.TxtStatStale.Text)"
-        Test-Smoke 'device table lists the devices, failed first' ($script:DeviceRowList.Count -eq 4 -and $script:DeviceRowList[0]['Title'] -eq 'PC-0142' -and $script:DeviceRowList[0]['Status'] -eq 'Failed') (($script:DeviceRowList | ForEach-Object { $_['Title'] + ':' + $_['Status'] }) -join ', ')
-        Test-Smoke 'cause comes from the device report' ($script:DeviceRowList[0]['Cause'] -like '*rate limit*') $script:DeviceRowList[0]['Cause']
+        Test-Smoke 'status page shows the counters' ($ui.TxtStatOk.Text -eq '2' -and $ui.TxtStatWait.Text -eq '1' -and $ui.TxtStatFail.Text -eq '3' -and $ui.TxtStatStale.Text -eq '1') "$($ui.TxtStatOk.Text)/$($ui.TxtStatWait.Text)/$($ui.TxtStatFail.Text)/$($ui.TxtStatStale.Text)"
+        Test-Smoke 'device table lists the devices, failed first' ($script:DeviceRowList.Count -eq 6 -and $script:DeviceRowList[0]['Title'] -eq 'NB-0420' -and $script:DeviceRowList[2]['Title'] -eq 'PC-0777' -and $script:DeviceRowList[0]['Status'] -eq 'Failed') (($script:DeviceRowList | ForEach-Object { $_['Title'] + ':' + $_['Status'] }) -join ', ')
+        $pc = @($script:DeviceRowList | Where-Object { $_['Title'] -eq 'PC-0142' })[0]
+        Test-Smoke 'with the status script: the cause comes from the device report, the sub line names the device log' ($pc['Cause'] -like '*rate limit*' -and $ui.TxtStatusSub.Text -like '*plus the update log*') $pc['Cause']
+        $ui.LstDevices.SelectedItem = $pc
         Test-Smoke 'device log shows the reported lines and the retry hint' ($ui.BoxDeviceLog.Visibility -eq 'Visible' -and $ui.TxtDeviceLog.Text -like '*rate limit*' -and $ui.TxtRetryHint.Text -like '*retries by itself*') $ui.TxtDeviceLog.Text
-        $info = Get-InsightDiagnosticsInfo -ManagedDeviceId $script:DeviceRowList[0].Data.DeviceId -Package '7zip.install'
+        $info = Get-InsightDiagnosticsInfo -ManagedDeviceId $pc.Data.DeviceId -Package '7zip.install'
         Test-Smoke 'diagnostics point to the Intune admin center device page' ($info.Url -like '*intune.microsoft.com*md-1*' -and $info.Hint -like '*Collect diagnostics*') $info.Url
         Test-Smoke 'status script present: no banner' ($ui.BoxStatusScript.Visibility -eq 'Collapsed')
         Save-SmokeShot '11-status'
@@ -1280,6 +1282,14 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             0 {
                 Test-Smoke 'no license: marked not available, banner offers Set up' ($script:StatusScript.State -eq 'NotAvailable' -and $ui.BoxStatusScript.Visibility -eq 'Visible' -and $ui.BtnStatusScript.Visibility -eq 'Visible' -and $ui.TxtStatusScript.Text -like '*Remediations*') $ui.TxtStatusScript.Text
                 $item = Get-ReadinessItems | Where-Object Key -eq 'status'
+                # Without Remediations: the page reads Intune's install report and says what the exit codes mean (rows as the fake Graph returns them)
+                $fst = Get-InsightAppInstallStatus -Context (New-InsightGraphContext -Invoke ([scriptblock]::Create($script:InsightFake))) -AppId 'any'
+                Show-StatusRows $fst
+                Update-StatusBanner
+                $by = @{}; foreach ($r in $script:DeviceRowList) { $by[[string]$r['Title']] = $r }
+                Test-Smoke 'without Remediations: failed devices first, each with the cause of its exit code (PackTune code, winget hash result as Graph reports it, installer 1603)' ($script:DeviceRowList[0]['Status'] -eq 'Failed' -and $script:DeviceRowList[1]['Status'] -eq 'Failed' -and $script:DeviceRowList[2]['Status'] -eq 'Failed' -and $by['PC-0142']['Cause'] -like '*package source cannot be reached*' -and $by['PC-0142']['Code'] -eq 'exit 61011' -and $by['PC-0777']['Cause'] -like '*hash does not match*' -and $by['NB-0420']['Cause'] -like '*fatal error during installation*') (($script:DeviceRowList | ForEach-Object { "$($_['Title']):$($_['Status']):$($_['Code']):$($_['Cause'])" }) -join ' | ')
+                Test-Smoke 'without Remediations: the page says Status from Intune''s install report, and in one line what is missing (history, last successful update) and why (license)' ($ui.TxtStatusSub.Text -like "Status from Intune's install report*" -and $ui.TxtStatusScript.Text -like '*history*last successful update*' -and $ui.TxtStatusScript.Text -like '*license*') "$($ui.TxtStatusSub.Text) || $($ui.TxtStatusScript.Text)"
+                Save-SmokeShot '12b-status-install-report'
                 Test-Smoke 'start page: optional item says why and has a Set up button' ($item.Text -like 'Not available yet*' -and $item.Fix -eq 'Set up' -and $item.Action) $item.Text
                 Save-SmokeShot '12-status-degraded'
                 # Missing scope: the setup runs the normal consent sign-in first (prompt=consent), then the 403 license case

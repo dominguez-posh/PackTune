@@ -150,7 +150,7 @@ Opened with **Devices** on an app in *In tenant*.
 
 - **Counts and rows**: installed and current, waiting for install, failed, and no report for 7 days, with one row per device (status, version, cause, last report). The install status comes from Intune.
 - **Device log**: each device writes the result of its last attempt (`last-result.json`) and its update log. The status report is a Remediations detection script that Intune runs on all devices every hour; it lists failed apps first with their cause. **Set up status report** creates it.
-- **Licensing**: Remediations need Windows Enterprise E3/E5 (Microsoft 365 F3/E3/E5), Education A3/A5, or Windows VDA per user. Without them the install status still works, and the page says so.
+- **Licensing**: Remediations need Windows Enterprise E3/E5 (Microsoft 365 F3/E3/E5), Education A3/A5, or Windows VDA per user. Without them the page switches by itself to **Status from Intune's install report** (Intune P1 is enough, e.g. Business Premium): one row per device, failed first, with the cause taken from the exit code of `install.ps1` that Intune reports (see [Exit codes](#exit-codes-of-the-device-scripts)). What is missing then: the history and the last successful update of each device, because only Remediations read the device log. The page says so in one line.
 - **Causes** are short texts for common exit and error codes from the documented Windows, winget and Intune codes. The mapping is not verified against a live tenant.
 - **Full log**: **Open in Intune admin center to collect diagnostics** opens the device. Run *Collect diagnostics* there, download the package, and look for `PackTune-<package>.log` (`IntuneChocoDeployment-<package>.log` on devices that did not run the new scripts yet) in the `IntuneManagementExtension\Logs` folder.
 
@@ -240,6 +240,32 @@ Users cannot create anything in `%ProgramFiles%`. The folders belong to SYSTEM, 
 
 Every update setting (version, mode, grace period, package source, delays, schedule and the device script revision) is hashed into a fingerprint, which is part of the detection rule. The device's `policy.txt` must match it. A change in Intune therefore makes detection fail, Intune runs `install.ps1` again, and that applies the new policy. Changes to the device scripts raise the revision, which changes the fingerprint for every app.
 
+### Exit codes of the device scripts
+
+Intune's Win32 install status shows the exit code of `install.ps1` per device and app. So that the code says why, every install, update and uninstall script exits with a PackTune code (61001 to 61099) for its own causes. They are clear of Intune's default return codes (0 and 1707 success, 3010 soft reboot, 1641 hard reboot, 1618 retry) and are never added to an app's return code list, so Intune counts each as a failure. `1618` stays the code for "another installation runs on the device" (the mutex wait). When an installer, choco or winget fails without a more specific cause, the script exits with its real exit code (1603, 0x8A15..., ...); PackTune turns the common ones into a short text.
+
+| Code | Name | Cause |
+| --- | --- | --- |
+| 61001 | ChocoMissing | Chocolatey is not installed on the device |
+| 61002 | WingetMissing | winget (App Installer) is not installed on the device |
+| 61003 | RuntimeBroken | choco or winget is installed but does not run |
+| 61010 | SourceNotFound | the package was not found in the package source |
+| 61011 | SourceUnreachable | the package source cannot be reached from the device |
+| 61012 | DownloadFailed | the download of the installer failed |
+| 61013 | HashMismatch | the installer does not match its checksum or signature |
+| 61014 | DiskFull | not enough free disk space |
+| 61015 | PackageManagerFailed | choco reported a failure without a more specific cause (see the device log) |
+| 61016 | NoMachineInstaller | the package has no installer for all users of the device (machine scope) |
+| 61020 | FolderProtect | the PackTune folder on the device could not be protected |
+| 61021 | HelpersCopy | the update helpers could not be copied on the device |
+| 61022 | TaskRegister | the update tasks could not be registered on the device |
+| 61023 | PolicyWrite | the policy marker could not be written on the device |
+| 61030 | LockForeign | the PackTune lock on the device belongs to someone else, nothing was installed |
+
+The table lives in one place, `PackTune-ExitCodes.ps1`: the device scripts get it as text and PackTune reads the causes from it (`Tests\Check-ExitCodes.ps1` checks that both agree and that this table is complete). The causes of choco come from its output (not found, unreachable, checksum, download, disk space); the winget ones from its documented results (`0x8A150008`, `0x8A15000F`, `0x8A150010`, `0x8A150011`, `0x8A150014`).
+
+**Upgrading:** the codes change the device scripts, so the device script revision is raised to 10. That changes the policy fingerprint of every app: devices run install.ps1 once more after the update (nothing is reinstalled, the update tasks and the marker are written again).
+
 ### One operation at a time
 
 All choco and winget operations of a device (install, update, uninstall, both sources) share the mutex `Global\PackTune`. During the transition they take `Global\IntuneChocoDeployment` as well (in this order), so scripts of the old and the new version never run side by side. A second operation waits up to 30 minutes for it and then exits with code 1618, which Intune retries. The mutex is created for SYSTEM and Administrators only. If one with that name exists already and belongs to someone else, nothing is installed (fail closed) and the cause is logged.
@@ -324,6 +350,7 @@ Run in Windows PowerShell 5.1 from the repository folder. None of them contacts 
 - `Tests\Check-Toast.ps1`: the device notifications (generated scripts, escaped toast XML, the activation that only maps to fixed actions, toast or window route, the whole flow with stand-ins).
 - `Tests\Check-StoreSite.ps1`: the standard store site (address from the initial domain, discovery found / no access / missing, the one-time setup against a fake Graph with polling, members, library and grant, the conflicts).
 - `Tests\Check-Sandbox.ps1`: the sandbox module without a sandbox (the lab sequence and its stop-on-unexpected verdict, fake launcher, a real single-use certificate that is removed again, fake signtool, toolchain hashes, entry point rules, registry restore of the update capture). `Tests\Check-Custom.ps1`, `Check-CustomMsix.ps1`, `Check-Store.ps1`: custom applications (MSI read from a Property table, the device scripts, certificate per version made and removed around the capture, deployment, new version, export, delete) and the package store against a fake SharePoint in memory (upload sessions, manifest, tamper tests, zip slip). `Tests\Spike-MsixWin32.ps1` runs the MSIX install, detect, failed-update restore, update and uninstall scripts as SYSTEM in Windows Sandbox.
+- `Tests\Check-ExitCodes.ps1`: the exit code table (unique, clear of Intune's defaults), the codes in the generated device scripts, what the device helpers make of choco and winget results, the causes in PackTune and the insight module, the README table, the device script revision.
 - `Tests\Check-Sources.ps1`: recommended source, source filter, deployment per source, PackTune Runtime dependency and migration, release by supersedence or in place.
 
 The screenshots and the tour are rendered from the same demo data and refreshed with:

@@ -116,6 +116,18 @@ $status = New-InsightGraphContext -Name fake -Invoke {
 $st = Get-InsightAppInstallStatus -Context $status -AppId 'a1' -Now $now
 Test-Check 'status counts' ($st.Installed -eq 1 -and $st.Failed -eq 1 -and $st.Pending -eq 1 -and $st.NotReported7Days -eq 1 -and $st.Endpoint -eq 'beta')
 Test-Check 'status device row' (($st.Devices | Where-Object DeviceName -eq 'PC-02').Cause -like '*another installation*' -and ($st.Devices | Where-Object DeviceName -eq 'PC-02').ErrorCode -eq '0x00000652')
+# the install report without Remediations: PackTune exit codes and Graph's signed winget / installer codes give causes, nothing else is needed
+$report = New-InsightGraphContext -Name fake -Invoke {
+    param($m, $p, $b)
+    if ($p -like '*/deviceStatuses') { @{ value = @(
+                @{ deviceId = 'e1'; deviceName = 'PC-10'; installState = 'failed'; errorCode = 61010; lastSyncDateTime = '2026-11-13T08:00:00Z' }
+                @{ deviceId = 'e2'; deviceName = 'PC-11'; installState = 'failed'; errorCode = -1978335215; lastSyncDateTime = '2026-11-13T08:00:00Z' }
+                @{ deviceId = 'e3'; deviceName = 'PC-12'; installState = 'failed'; errorCode = 1603; lastSyncDateTime = '2026-11-13T08:00:00Z' }
+                @{ deviceId = 'e4'; deviceName = 'PC-13'; installState = 'failed'; errorCode = 61030; lastSyncDateTime = '2026-11-13T08:00:00Z' }) } }
+    else { throw "unexpected $m $p" }
+}
+$rs = Get-InsightAppInstallStatus -Context $report -AppId 'a2' -Now $now
+Test-Check 'install report: PackTune codes, winget hash result (signed) and installer 1603 each give their cause' ((($rs.Devices | Where-Object DeviceName -eq 'PC-10').Cause -like '*not found in the package source*') -and (($rs.Devices | Where-Object DeviceName -eq 'PC-11').Cause -like 'winget*hash*') -and (($rs.Devices | Where-Object DeviceName -eq 'PC-12').Cause -like '*fatal error*') -and (($rs.Devices | Where-Object DeviceName -eq 'PC-13').Cause -like '*belongs to someone else*') -and $rs.Failed -eq 4) (($rs.Devices | ForEach-Object Cause) -join ' | ')
 $run = [pscustomobject]@{ detectionState = 'success'; lastStateUpdateDateTime = '2026-11-13T09:00:00Z'; managedDevice = [pscustomobject]@{ id = 'm2'; deviceName = 'pc-02'; userPrincipalName = 'b@contoso.example' }
     preRemediationDetectionScriptOutput = '{"v":1,"n":2,"f":[{"p":"git","s":"c","t":"2026-11-13T07:00","a":"upgrade","e":1618,"c":"","v":"1.9","g":"2.0"}],"o":["7zip=23.01"],"x":0}' }
 $rs = ConvertFrom-InsightRunState $run

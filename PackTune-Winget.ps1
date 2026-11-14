@@ -207,7 +207,7 @@ try {
     Protect-Folder $Root
     Protect-Folder (Join-Path $Root "Logs")
 }
-catch { Write-Output "The folder $Root could not be protected: $($_.Exception.Message)"; exit 1 }
+catch { Write-Output "The folder $Root could not be protected: $($_.Exception.Message)"; exit $PTExit.FolderProtect }
 Start-Transcript -Path (Join-Path $Root "Logs\$SafeId.log") -Append | Out-Null
 
 __GETWINGET__
@@ -215,7 +215,7 @@ __GETWINGET__
 # Right after the setup (Autopilot) App Installer may not be registered yet: wait up to 10 minutes
 $Winget = Get-Winget
 for ($Wait = 0; -not $Winget -and $Wait -lt 20; $Wait++) { Write-Output "winget not found yet, waiting"; Start-Sleep -Seconds 30; $Winget = Get-Winget }
-if (-not $Winget) { Write-Output "winget.exe not found (App Installer missing)"; Stop-Transcript | Out-Null; exit 1 }
+if (-not $Winget) { Write-Output "winget.exe not found (App Installer missing)"; Stop-Transcript | Out-Null; exit $PTExit.WingetMissing }
 Write-Output "Using $Winget"
 
 $Common = @("--id", $Id, "--exact", "--source", "winget", "--silent", "--accept-source-agreements", "--disable-interactivity")
@@ -248,7 +248,7 @@ function Remove-UpdateTasks {
 }
 
 if ($Uninstall) {
-    if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; Stop-Transcript | Out-Null; exit 1618 }
+    if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; Stop-Transcript | Out-Null; exit (Get-LockExitCode) }
     # Without --source: winget often cannot map the installed product to its source entry
     & $Winget uninstall --id $Id --exact --silent --accept-source-agreements --disable-interactivity | Out-Host
     $ExitCode = $LASTEXITCODE
@@ -272,7 +272,7 @@ $VersionArguments = @("--accept-package-agreements")
 if ($Version) { $VersionArguments += @("--version", $Version) }
 
 try { Protect-Folder $AppRoot }
-catch { Write-Output "The folder $AppRoot could not be protected: $($_.Exception.Message)"; Stop-Transcript | Out-Null; exit 1 }
+catch { Write-Output "The folder $AppRoot could not be protected: $($_.Exception.Message)"; Stop-Transcript | Out-Null; exit $PTExit.FolderProtect }
 $ResultFile = Join-Path $AppRoot "last-result.json"
 # Which released version is installed: winget gives no plain answer, so the scripts remember it
 $VersionFile = Join-Path $AppRoot "version.txt"
@@ -282,11 +282,12 @@ $AppliedVersion = if (Test-Path $VersionFile) { (Get-Content -Path $VersionFile 
 # follows its update mode: Off installs a released version right away (latest + Off leaves the installed version
 # alone), Startup at the next startup, Custom asks the user and installs at the latest when the grace period is over.
 $Upgrade = $Installed -and $Mode -eq "Off" -and $Version -and $AppliedVersion -ne $Version
-if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running after 30 minutes"; Stop-Transcript | Out-Null; exit 1618 }
+if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running after 30 minutes"; Stop-Transcript | Out-Null; exit (Get-LockExitCode) }
 $ExitCode = 0
 if (-not $Installed) { $ExitCode = Invoke-Winget "install" $VersionArguments }
 elseif ($Upgrade) { $ExitCode = Invoke-Winget "upgrade" $VersionArguments }
 Exit-DeploymentLock
+if ($ExitCode -notin $Success -and $ExitCode -notin $Reboot) { $ExitCode = Resolve-WingetFailure $ExitCode }
 $Applied = (-not $Installed) -or $Upgrade
 if ($Applied) {
     $InstallOk = $ExitCode -in $Success -or $ExitCode -in $Reboot
@@ -309,7 +310,7 @@ try {
     if ($Applied -and $Version) { Write-ProtectedFile $VersionFile $Version }
     elseif (-not $Version) { Remove-Item -Path $VersionFile -Force -ErrorAction SilentlyContinue }
 }
-catch { Write-Output "The update helpers could not be copied: $($_.Exception.Message)"; Stop-Transcript | Out-Null; exit 1 }
+catch { Write-Output "The update helpers could not be copied: $($_.Exception.Message)"; Stop-Transcript | Out-Null; exit $PTExit.HelpersCopy }
 
 __TASKREG__
 
@@ -324,13 +325,14 @@ catch {
     # Without its tasks the app is not set up: no marker, so detection fails and Intune runs install.ps1 again
     Write-Output "Update tasks could not be registered: $($_.Exception.Message)"
     Write-DeviceLog "update tasks could not be registered: $($_.Exception.Message)"
-    Save-LastResult "install" "failed" 1 "update tasks could not be registered"
+    Save-LastResult "install" "failed" $PTExit.TaskRegister "update tasks could not be registered"
     Stop-Transcript | Out-Null
-    exit 1
+    exit $PTExit.TaskRegister
 }
 
 # The detection rule compares this marker with the policy in Intune
-Write-ProtectedFile (Join-Path $AppRoot "policy.txt") $Policy
+try { Write-ProtectedFile (Join-Path $AppRoot "policy.txt") $Policy }
+catch { Write-Output "The policy marker could not be written: $($_.Exception.Message)"; Stop-Transcript | Out-Null; exit $PTExit.PolicyWrite }
 Stop-Transcript | Out-Null
 if ($ExitCode -in $Reboot) { exit 3010 }
 exit 0

@@ -23,6 +23,7 @@ $script:LegacyLastResultFile = @{
     Chocolatey = 'IntuneChocoDeployment\Chocolatey\{0}\last-result.json'
     Winget     = 'IntuneChocoDeployment\Winget\{0}\last-result.json'
 }
+. (Join-Path $PSScriptRoot '..\PackTune-ExitCodes.ps1')
 $script:StatusScriptName = 'PackTune status'
 $script:LegacyStatusScriptName = 'IntuneChocoDeployment status'
 $script:Hooks = @{}
@@ -365,53 +366,9 @@ function ConvertTo-InsightHexCode($Code) {
 }
 
 function Get-InsightErrorCause {
-    <#
-        Short cause for an exit or error code (Intune/IME, Windows installer, Chocolatey, winget). Mapping from the
-        documented Windows and winget return codes plus common Intune codes; unknown codes return the hex value only.
-        Source: winget return codes (github.com/microsoft/winget-cli, doc/windows/package-manager/winget/returnCodes.md),
-        Windows installer error codes (learn.microsoft.com, msi/error-codes). Not verified against a live tenant.
-    #>
+    <# Short cause for an exit or error code: PackTune's own codes and the common Intune, Windows installer, Chocolatey and winget codes (one table: PackTune-ExitCodes.ps1). #>
     param($Code)
-    $Number = ConvertTo-InsightHexCode $Code
-    if ($null -eq $Number) { return $null }
-    $Hex = '0x{0:X8}' -f $Number
-    $Table = @{
-        '0' = 'success'
-        '1' = 'the installer or choco reported a general error (see the device log)'
-        '641' = 'fatal error during installation'
-        '1601' = 'Windows Installer service not accessible'
-        '1603' = 'fatal error during installation'
-        '1618' = 'another installation is already running, retry later'
-        '1619' = 'installer package could not be opened'
-        '1625' = 'installation blocked by policy'
-        '1638' = 'another version of the product is already installed'
-        '1641' = 'success, the installer started a restart'
-        '3010' = 'success, a restart is required'
-        '80004005' = 'unspecified error (0x80004005)'
-        '80070002' = 'file not found (0x80070002)'
-        '80070005' = 'access denied (0x80070005)'
-        '80070643' = 'fatal error during installation (0x80070643)'
-        '80070652' = 'another installation is in progress (0x80070652)'
-        '87D1041C' = 'installed, but the detection rule does not find the app (0x87D1041C)'
-        '8A150001' = 'winget: internal error (0x8A150001)'
-        '8A150002' = 'winget: invalid command line arguments (0x8A150002)'
-        '8A150008' = 'winget: download of the installer failed (0x8A150008)'
-        '8A150010' = 'winget: no applicable installer for this device (0x8A150010)'
-        '8A150011' = 'winget: installer hash does not match (0x8A150011)'
-        '8A150014' = 'winget: no package found (0x8A150014)'
-    }
-    $Table.Remove('641')
-    $Known = @{}
-    foreach ($Key in $Table.Keys) {
-        # 0..3999 are decimal exit codes, the rest hexadecimal
-        $Value = if ($Key.Length -le 4) { [int64]$Key } else { [Convert]::ToInt64($Key, 16) }
-        $Known[$Value] = $Table[$Key]
-    }
-    if ($Known.ContainsKey([int64]$Number)) { return $Known[[int64]$Number] }
-    if ($Hex -like '0x8A15*') { return "winget error $Hex (see the winget return codes)" }
-    if ($Hex -like '0x87D*') { return "Intune Management Extension error $Hex" }
-    if ($Number -eq 4294967295) { return 'the installer or choco failed (-1)' }
-    return "error $Hex"
+    Get-PackTuneCodeCause $Code
 }
 
 function ConvertFrom-InsightReport {
