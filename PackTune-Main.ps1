@@ -92,6 +92,8 @@ $script:DefaultSettings = [ordered]@{
     # Name of the standard site: PackTune, or PackTune-Packages after a conflict with something that exists already
     StoreSiteName         = "PackTune"
     StoreLibrary          = "PackTune Packages"
+    # Language of the session protocol (page Protocol): en or de
+    ProtocolLanguage      = "en"
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
 # Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
@@ -192,6 +194,7 @@ function Save-PackTuneSettings {
     $Clean.TenantClients = Remove-PackTuneSetupClientEntries $Clean.TenantClients
     if ($Clean.StoreSiteUrl -and -not (Test-PackTuneStoreSiteUrl $Clean.StoreSiteUrl)) { throw "The SharePoint site must look like https://<tenant>.sharepoint.com/sites/<name>" }
     if ($Clean.StoreSiteName -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,40}$') { throw "The name of the site may contain letters, digits and hyphens" }
+    if ($Clean.ProtocolLanguage -notin "en", "de") { $Clean.ProtocolLanguage = "en" }
     if ($Clean.StoreLibrary -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,60}$') { throw "The name of the document library may contain letters, digits, spaces, . _ -" }
     # The current pair is remembered for later tenant switches
     $Map = ConvertFrom-TenantClients $Clean.TenantClients
@@ -3030,6 +3033,7 @@ function New-PackTuneAppFromCatalog {
 . (Join-Path $PSScriptRoot "PackTune-Release.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Custom.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Store.ps1")
+. (Join-Path $PSScriptRoot "PackTune-Protocol.ps1")
 . (Join-Path $PSScriptRoot "PackTune-CustomMsix.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Repos.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Aliases.ps1")

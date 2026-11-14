@@ -654,7 +654,7 @@ function Complete-UiTask($Task) {
     if ($script:Shared.Auth) { Set-PackTuneAuthState $script:Shared.Auth }
     $errors = @($job.Log.ToArray() | Where-Object Level -eq 'Error')
     foreach ($entry in @($job.Log.ToArray())) { Write-UiLog ("[{0}] {1}" -f $job.Display, $entry.Text) $entry.Level }
-    if ($job.Status -eq 'failed' -and $job.Kind -notin 'meta', 'icons' -and -not ($job.Kind -in $script:GraphReadKinds -and @($errors | Where-Object { Test-GraphReadFailureText ([string]$_.Text) }).Count)) {
+    if ($job.Status -eq 'failed' -and $job.Kind -notin 'meta', 'icons', 'protocolsync', 'protocolhistory' -and -not ($job.Kind -in $script:GraphReadKinds -and @($errors | Where-Object { Test-GraphReadFailureText ([string]$_.Text) }).Count)) {
         Show-Toast ("{0}: {1}" -f $job.Display, (Get-FriendlyCause $(if ($errors.Count) { [string]$errors[-1].Text } else { 'failed' }))) 'bad' 'Details' { Show-Page 'Activity' }
     }
     if ($job.Kind -in $script:GraphReadKinds) {
@@ -666,6 +666,7 @@ function Complete-UiTask($Task) {
         }
         elseif ($job.Status -eq 'succeeded') { Clear-GraphDown }
     }
+    Add-ProtocolJob $job $errors
     if ($Task.OnDone) {
         try { & $Task.OnDone $job.Result $job } catch { Show-Error $_.Exception.Message }
     }
@@ -950,7 +951,7 @@ function Update-ConnectionStatus {
 $script:AccountText = ''
 
 # ---------------------------------------------------------------- navigation, dialogs, help
-$script:Pages = @('Start', 'Apps', 'Custom', 'Tenant', 'Status', 'Activity', 'Settings')
+$script:Pages = @('Start', 'Apps', 'Custom', 'Tenant', 'Status', 'Activity', 'Protocol', 'Settings')
 $script:CurrentPage = 'Start'
 function Measure-Ui([string]$Step, [scriptblock]$Do) {
     # Timing for the page switches: with PACKTUNE_TIMING set, every step is appended to timing.txt in that folder
@@ -972,11 +973,12 @@ function Show-Page([string]$Name) {
         'Custom'   { if (-not $script:StoreState) { Start-StoreCheck }; if ((Test-SignedIn) -and $null -eq $script:CustomApps) { Start-CustomRefresh } else { Update-CustomRows } }
         'Tenant'   { if ((Test-SignedIn) -and $null -eq $script:TenantApps -and -not (Test-TaskRunning 'tenant')) { Start-TenantRefresh } else { Update-TenantRows } }
         'Settings' { Update-SettingsView }
+        'Protocol' { Update-ProtocolView }
     }
     Update-SelectionBar
     if ($env:PACKTUNE_TIMING) { Add-Content -Path (Join-Path $env:PACKTUNE_TIMING 'timing.txt') -Value ('{0,6} ms  Show-Page {1} (total)' -f $pageWatch.ElapsedMilliseconds, $Name) }
 }
-foreach ($p in 'Start', 'Apps', 'Custom', 'Tenant', 'Activity', 'Settings') {
+foreach ($p in 'Start', 'Apps', 'Custom', 'Tenant', 'Activity', 'Protocol', 'Settings') {
     $ui["Nav$p"].Add_Checked({
         param($src)
         $name = $src.Name -replace '^Nav', ''
@@ -5023,6 +5025,129 @@ function Start-ModuleInstall {
 Add-Click $ui.BtnInstallModule { Start-ModuleInstall }
 
 # ---------------------------------------------------------------- run
+# ---------------------------------------------------------------- protocol of the session
+# One journal for the whole session, fed from one place (Add-ProtocolJob, called by Complete-UiTask for every finished job), saved after
+# every action to %LOCALAPPDATA%\PackTune\Protocols and, when the package store is ready, uploaded to its folder "Protocols".
+$script:Protocol = New-PackTuneProtocol
+$script:ProtocolViewing = $null       # a protocol picked from the history (read only), $null = this session
+$script:ProtocolHistory = @()
+$script:ProtocolHistoryOpen = $false
+$script:ProtocolSyncState = ''        # '' / 'ok' / error text of the last upload to the package store
+$script:ProtocolSyncDirty = $false
+function Get-ProtocolLanguage { if ($ui.CmbProtocolLanguage.SelectedIndex -eq 1) { 'de' } elseif ($ui.CmbProtocolLanguage.SelectedIndex -eq 0) { 'en' } elseif ($script:Settings.ProtocolLanguage -eq 'de') { 'de' } else { 'en' } }
+function Update-ProtocolIdentity {
+    # Administrator and tenant come from the sign-in; the first sign-in of the session fills them
+    if (-not (Test-SignedIn)) { return }
+    $id = Get-PackTuneIdentity
+    if (-not $id) { return }
+    $tenant = if ($script:Settings.TenantID) { [string]$script:Settings.TenantID } else { [string]$id.TenantId }
+    Set-PackTuneProtocolIdentity -Protocol $script:Protocol -Admin ([string]$id.Name) -Account ([string]$id.Account) -Tenant $tenant
+}
+function Add-ProtocolJob($Job, $Errors) {
+    try {
+        Update-ProtocolIdentity
+        $cause = if ($Job.Status -eq 'failed') { Get-FriendlyCause $(if (@($Errors).Count) { [string]@($Errors)[-1].Text } else { 'failed' }) } else { '' }
+        $action = Add-PackTuneProtocolFromJob -Protocol $script:Protocol -Job $Job -Cause $cause
+        if (-not $action) { return }
+        [void](Save-PackTuneProtocol -Protocol $script:Protocol -Language (Get-ProtocolLanguage))
+        Start-ProtocolSync
+        if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolView }
+    }
+    catch { Write-UiLog "The protocol could not be saved: $($_.Exception.Message)" 'Warning' }
+}
+function Start-ProtocolSync {
+    # Uploads the protocol to the package store (one upload at a time; what changed meanwhile goes in the next one). Local only without the store.
+    if (-not (Test-StoreReady) -or -not (Test-SignedIn)) { return }
+    if (Test-TaskRunning 'protocolsync') { $script:ProtocolSyncDirty = $true; return }
+    $script:ProtocolSyncDirty = $false
+    try {
+        [void](Start-UiTask -Kind 'protocolsync' -Title 'Saving the protocol in the package store' -Display 'Protocol' -Hidden -NeedsAuth -Pool $script:UserPool -Arguments @{ Json = ($script:Protocol | ConvertTo-Json -Depth 6); Language = (Get-ProtocolLanguage) } `
+            -Work 'param($Json, $Language) $p = Read-PackTuneProtocolJson -Text $Json; if ($p) { Send-PackTuneProtocolToStore -Protocol $p -Language $Language }' -OnDone {
+            param($Result, $Job)
+            $script:ProtocolSyncState = if ($Job.Status -eq 'succeeded') { 'ok' } else { [string](@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { Get-FriendlyCause ([string]$_.Text) })[0]) }
+            if ($script:ProtocolSyncDirty) { Start-ProtocolSync }
+            if ($script:CurrentPage -eq 'Protocol') { Update-ProtocolState }
+        })
+    }
+    catch { $script:ProtocolSyncState = $_.Exception.Message }
+}
+function Update-ProtocolState {
+    $folder = Get-PackTuneProtocolFolder
+    $ui.TxtProtocolState.Text = if ($script:ProtocolViewing) { "An earlier protocol ($($script:ProtocolViewing.Where)), read only. Copy and Save as file work for it too; Back to this session returns to the current one." }
+        elseif (Test-StoreReady) { if ($script:ProtocolSyncState -and $script:ProtocolSyncState -ne 'ok') { "Saved after every action in $folder. The upload to the package store did not work: $($script:ProtocolSyncState)" } else { "Saved after every action in $folder and in the folder Protocols of the package store." } }
+        else { "Saved after every action in $folder. Set up the package store (Start page) to keep the protocols there too, where other administrators can read them." }
+}
+function Get-ProtocolShown { if ($script:ProtocolViewing) { $script:ProtocolViewing.Protocol } else { $script:Protocol } }
+function Get-ProtocolShownText([string]$Format = 'Text') {
+    $shown = Get-ProtocolShown
+    if ($script:ProtocolViewing) { ConvertTo-PackTuneProtocolText -Protocol $shown -Language (Get-ProtocolLanguage) -Format $Format }
+    else { ConvertTo-PackTuneProtocolText -Protocol $shown -Language (Get-ProtocolLanguage) -Format $Format -End (Get-Date) }
+}
+function Update-ProtocolView {
+    Update-ProtocolIdentity
+    $ui.TxtProtocol.Text = Get-ProtocolShownText
+    Update-ProtocolState
+}
+function Set-ProtocolHistoryRows($Rows) {
+    $current = Get-PackTuneProtocolFileBase $script:Protocol
+    $script:ProtocolHistory = @($Rows | Where-Object { $_.Key -ne $current })
+    $ui.LstProtocolHistory.ItemsSource = @($script:ProtocolHistory | ForEach-Object {
+        $span = if ($_.Duration.TotalHours -ge 1) { '{0} h {1} min' -f [int][math]::Floor($_.Duration.TotalHours), $_.Duration.Minutes } else { '{0} min' -f [int][math]::Round($_.Duration.TotalMinutes) }
+        $where = if ($_.Where -eq 'Store') { '  [package store]' } else { '' }
+        "{0:yyyy-MM-dd HH:mm}  {1}  {2}  {3} action(s){4}" -f $_.Started, $_.Admin, $span, $_.Count, $where
+    })
+}
+function Show-ProtocolHistory([bool]$Open) {
+    $script:ProtocolHistoryOpen = $Open
+    $ui.BoxProtocolHistory.Visibility = ConvertTo-Vis $Open
+    $ui.ColProtocolHistory.Width = if ($Open) { [System.Windows.GridLength]::new(380) } else { [System.Windows.GridLength]::new(0) }
+    if (-not $Open) { $script:ProtocolViewing = $null; Update-ProtocolView; return }
+    # Local protocols at once, those of the package store (other administrators) when they arrive
+    Set-ProtocolHistoryRows @(Get-PackTuneProtocolHistory)
+    if ((Test-StoreReady) -and (Test-SignedIn) -and -not (Test-TaskRunning 'protocolhistory')) {
+        [void](Start-UiTask -Kind 'protocolhistory' -Title 'Reading the protocols of the package store' -Display 'Protocol history' -Hidden -NeedsAuth -Pool $script:UserPool -Arguments @{ Folder = (Get-PackTuneProtocolFolder) } `
+            -Work 'param($Folder) $store = Resolve-PackTuneStore; Get-PackTuneProtocolHistory -Folder $Folder -Store $store' -OnDone {
+            param($Result, $Job)
+            if ($Job.Status -eq 'succeeded' -and $script:ProtocolHistoryOpen) { Set-ProtocolHistoryRows @($Result | Where-Object { $_.Key }) }
+        })
+    }
+}
+$ui.CmbProtocolLanguage.ItemsSource = @('English', 'Deutsch')
+$ui.CmbProtocolLanguage.SelectedIndex = if ($script:Settings.ProtocolLanguage -eq 'de') { 1 } else { 0 }
+$ui.CmbProtocolLanguage.Add_SelectionChanged({
+    try {
+        $s = Get-PackTuneSettings; $s.ProtocolLanguage = Get-ProtocolLanguage
+        [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings
+        Update-ProtocolView
+    } catch { Show-Error $_.Exception.Message }
+})
+$ui.LstProtocolHistory.Add_SelectionChanged({
+    try {
+        $i = $ui.LstProtocolHistory.SelectedIndex
+        if ($i -ge 0 -and $i -lt @($script:ProtocolHistory).Count) { $script:ProtocolViewing = $script:ProtocolHistory[$i]; Update-ProtocolView }
+    } catch { Show-Error $_.Exception.Message }
+})
+Add-Click $ui.BtnProtocolHistory { Show-ProtocolHistory (-not $script:ProtocolHistoryOpen) }
+Add-Click $ui.BtnProtocolCurrent { $script:ProtocolViewing = $null; $ui.LstProtocolHistory.SelectedIndex = -1; Update-ProtocolView }
+Add-Click $ui.BtnProtocolCopy {
+    Update-ProtocolView
+    $text = $ui.TxtProtocol.Text
+    $done = $false
+    foreach ($try in 1..3) { try { [System.Windows.Clipboard]::SetText($text); $done = $true; break } catch { Start-Sleep -Milliseconds 100 } }
+    if (-not $done) { try { Set-Clipboard -Value $text; $done = $true } catch { } }
+    if ($done) { Show-Toast 'Protocol copied to the clipboard.' 'ok' } else { Show-Toast 'The clipboard is in use by another program. Try again.' 'warn' }
+}
+function Save-ProtocolFile([string]$Path) {
+    $format = if ($Path -like '*.md') { 'Markdown' } else { 'Text' }
+    [IO.File]::WriteAllText($Path, (Get-ProtocolShownText $format), (New-Object Text.UTF8Encoding $true))
+}
+Add-Click $ui.BtnProtocolSave {
+    $shown = Get-ProtocolShown
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Title = 'Save the protocol'; $dlg.Filter = 'Text (*.txt)|*.txt|Markdown (*.md)|*.md'; $dlg.FileName = "PackTune-protocol-$($shown.Id).txt"
+    if ($dlg.ShowDialog()) { Save-ProtocolFile $dlg.FileName; Show-Toast "Protocol saved: $($dlg.FileName)" 'ok' }
+}
+
 $window.Add_Closing({
     param($s, $e)
     $running = @($script:Tasks | Where-Object { -not $_.Hidden -and $_.Job.Kind -in 'deploy', 'policy' })

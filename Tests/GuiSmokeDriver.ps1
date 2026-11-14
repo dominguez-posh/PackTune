@@ -1559,7 +1559,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $all = New-Object System.Collections.ArrayList
         foreach ($scale in 1.0, 1.25, 1.5) {
             $ui.RootGrid.LayoutTransform = New-Object System.Windows.Media.ScaleTransform $scale, $scale
-            foreach ($p in 'Start', 'Apps', 'Tenant', 'Activity', 'Settings') { Show-Page $p; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("$p@$scale $x") } }
+            foreach ($p in 'Start', 'Apps', 'Tenant', 'Activity', 'Protocol', 'Settings') { Show-Page $p; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("$p@$scale $x") } }
             foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgHelp') { Show-Dialog $d; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("$d@$scale $x") } }
             Close-Dialog
             $ui.ConfirmTitle.Text = 'Switch'; $ui.ConfirmText.Text = 'Text'; $ui.BtnConfirmYes.Content = 'Switch to PackTune Runtime'; $ui.ConfirmLayer.Visibility = 'Visible'; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("Confirm@$scale $x") }; $ui.ConfirmLayer.Visibility = 'Collapsed'
@@ -1625,6 +1625,50 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'friendly: a removed or foreign app is explained without the id' ($c -like '*not a custom application of PackTune or was already removed*' -and $c -notmatch '[0-9a-f]{8}-[0-9a-f]{4}') $c
         Test-Smoke 'friendly: other ids in a message become a pointer to Details' ((Get-FriendlyCause 'Something with 6f0f2a3c-1111-2222-3333-444455556666 failed') -notmatch '6f0f2a3c') 
         $ui.ToastHost.Children.Remove($toast); foreach ($tt in @($script:Toasts | Where-Object { $_.Element -eq $toast })) { $script:Toasts.Remove($tt) }
+        $true } }
+    @{ Name = 'protocol: the session journal, EN/DE text, copy, save, auto-save, history'; Phase = 0; Do = {
+        param($s)
+        Test-Smoke 'protocol: the left navigation has Protocol below Activity' ($ui.NavProtocol -and $ui.NavProtocol.Content -ne $null)
+        Test-Smoke 'protocol: earlier jobs of this session are in the journal (one hook)' ($script:Protocol.Actions.Count -ge 1) "$($script:Protocol.Actions.Count)"
+        $fake = @{ Kind = 'deploy'; Title = 'Deploying Smoke Tool'; Display = 'Smoke Tool password=Hunter2'; Status = 'succeeded'; Result = @(1); Source = 'Chocolatey'; Finished = (Get-Date); Log = @() }
+        $prevPage = $script:CurrentPage
+        Add-ProtocolJob $fake @()
+        $ui.CmbProtocolLanguage.SelectedIndex = 0
+        Show-Page 'Protocol'; $window.UpdateLayout()
+        $text = $ui.TxtProtocol.Text
+        Test-Smoke 'protocol: English by default with header, groups and the new action' ($text -match 'PackTune session protocol' -and $text -match 'Administrator:' -and $text -match 'Tenant:' -and $text -match 'Deployments:' -and $text -match 'Smoke Tool: done') $text
+        Test-Smoke 'protocol: no secret in the text' ($text -notmatch 'Hunter2')
+        Test-Smoke 'protocol: the page is not clipped' ($ui.TxtProtocol.ActualWidth -ge 300 -and $ui.BtnProtocolCopy.ActualWidth -gt 0)
+        $ui.CmbProtocolLanguage.SelectedIndex = 1
+        Test-Smoke 'protocol: German on switch, the choice is stored' ($ui.TxtProtocol.Text -match 'PackTune-Sitzungsprotokoll' -and $ui.TxtProtocol.Text -match 'Bereitstellungen:' -and (Get-PackTuneSettings).ProtocolLanguage -eq 'de') $ui.TxtProtocol.Text
+        $ui.CmbProtocolLanguage.SelectedIndex = 0
+        Test-Smoke 'protocol: and back to English' ($ui.TxtProtocol.Text -match 'session protocol' -and (Get-PackTuneSettings).ProtocolLanguage -eq 'en')
+        & $script:ClickActions[$ui.BtnProtocolCopy]
+        $clip = try { [System.Windows.Clipboard]::GetText() } catch { 'unreadable' }
+        Test-Smoke 'protocol: Copy puts the plain text on the clipboard' ($clip -eq $ui.TxtProtocol.Text -or $clip -eq 'unreadable') "$($clip.Length)"
+        $txt = Join-Path $env:TEMP "protocol-smoke-$PID.txt"; $md = Join-Path $env:TEMP "protocol-smoke-$PID.md"
+        Save-ProtocolFile $txt; Save-ProtocolFile $md
+        Test-Smoke 'protocol: Save as file writes text and Markdown' ((Get-Content $txt -Raw) -match 'Smoke Tool: done' -and (Get-Content $md -Raw) -match '(?m)^# PackTune session protocol' -and (Get-Content $md -Raw) -match '(?m)^- ') 
+        Remove-Item $txt, $md -Force -ErrorAction SilentlyContinue
+        $folder = Get-PackTuneProtocolFolder
+        $saved = @(Get-ChildItem $folder -Filter '*.json' -ErrorAction SilentlyContinue)
+        $onDisk = if ($saved.Count) { Read-PackTuneProtocolJson -Text ([IO.File]::ReadAllText($saved[0].FullName)) }
+        Test-Smoke 'protocol: auto-saved after the action (json and md in the Protocols folder)' ($saved.Count -ge 1 -and $onDisk -and @($onDisk.Actions).Count -eq $script:Protocol.Actions.Count -and (Test-Path ([IO.Path]::ChangeExtension($saved[0].FullName, '.md')))) "$folder $($saved.Count)"
+        Test-Smoke 'protocol: without the package store the page says it is local only' ($ui.TxtProtocolState.Text -match 'package store' -and $ui.TxtProtocolState.Text -match 'Saved after every action')
+        $old = New-PackTuneProtocol -Admin 'Bob Builder' -Account 'bob@contoso.com' -Tenant 'contoso.com' -Started (Get-Date).AddDays(-3)
+        [void](Add-PackTuneProtocolAction -Protocol $old -Category removal -Subject 'Old Thing' -At (Get-Date).AddDays(-3).AddMinutes(12))
+        [void](Save-PackTuneProtocol -Protocol $old)
+        & $script:ClickActions[$ui.BtnProtocolHistory]; $window.UpdateLayout()
+        Test-Smoke 'protocol: History lists the earlier protocol (date, admin, duration, actions)' ($ui.BoxProtocolHistory.Visibility -eq 'Visible' -and @($ui.LstProtocolHistory.ItemsSource).Count -eq 1 -and @($ui.LstProtocolHistory.ItemsSource)[0] -match 'Bob Builder' -and @($ui.LstProtocolHistory.ItemsSource)[0] -match '12 min' -and @($ui.LstProtocolHistory.ItemsSource)[0] -match '1 action') (@($ui.LstProtocolHistory.ItemsSource) -join ' | ')
+        $ui.LstProtocolHistory.SelectedIndex = 0
+        Test-Smoke 'protocol: picking one shows it (read only) and Copy then copies that one' ($ui.TxtProtocol.Text -match 'Old Thing: done' -and $ui.TxtProtocol.Text -match 'Bob Builder' -and $ui.TxtProtocolState.Text -match 'earlier protocol') $ui.TxtProtocol.Text
+        Save-SmokeShot '97-protocol-history'
+        & $script:ClickActions[$ui.BtnProtocolCurrent]
+        Test-Smoke 'protocol: Back to this session shows the current one' ($ui.TxtProtocol.Text -match 'Smoke Tool: done' -and $ui.TxtProtocol.Text -notmatch 'Old Thing')
+        & $script:ClickActions[$ui.BtnProtocolHistory]
+        Test-Smoke 'protocol: closing the history hides it' ($ui.BoxProtocolHistory.Visibility -eq 'Collapsed')
+        Save-SmokeShot '96-protocol'
+        Show-Page $prevPage
         $true } }
     @{ Name = 'repositories: add a public repository, list, approval, remove (fake GitHub)'; Phase = 0; Do = {
         param($s)
