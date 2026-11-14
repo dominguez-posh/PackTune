@@ -381,7 +381,9 @@ function Invoke-PackTuneIntuneGraph {
     if (Get-Command Invoke-FakeIntuneGraph -ErrorAction SilentlyContinue) { return (Invoke-IntuneModule { Invoke-FakeIntuneGraph -Method $Method -Path $Path -Body $Body }) }
     Assert-PackTuneConnection
     Update-PackTuneToken
-    $Params = @{ Method = $Method; Uri = "https://graph.microsoft.com/beta/deviceAppManagement/$Path"; Headers = $Global:AuthenticationHeader; ErrorAction = "Stop" }
+    # A path that starts with deviceManagement/ is relative to the beta root, every other one to deviceAppManagement
+    $Url = if ($Path -like "deviceManagement/*") { "https://graph.microsoft.com/beta/$Path" } else { "https://graph.microsoft.com/beta/deviceAppManagement/$Path" }
+    $Params = @{ Method = $Method; Uri = $Url; Headers = $Global:AuthenticationHeader; ErrorAction = "Stop" }
     if ($null -ne $Body) { $Params.Body = ($Body | ConvertTo-Json -Depth 8); $Params.ContentType = "application/json" }
     try { return (Invoke-RestMethod @Params) }
     catch {
@@ -425,8 +427,15 @@ function Remove-PackTuneIntuneApp {
         a superseding app that points at it gets that supersedence taken off; the relationships of the app itself are cleared first
         (Intune refuses to delete a "parent of another app"); then the delete, and a read back that the app is gone. Every step is logged.
     #>
-    param([Parameter(Mandatory = $true)][string]$Id, [string]$Name)
+    param([Parameter(Mandatory = $true)][string]$Id, [string]$Name, [switch]$AllowInstalled)
     if (-not $Name) { $Name = $Id }
+    # Never while a device still reports the app as installed (the count is read again right now; when it cannot be read, nothing is deleted).
+    # -AllowInstalled is for the old dependency apps only: Chocolatey and winget stay on the devices whatever happens to the app in Intune.
+    if (-not $AllowInstalled) {
+        $Installed = $null
+        try { $Installed = Get-PackTuneAppInstalledCount -AppId $Id } catch { throw "$Name ($Id) is kept: the install count cannot be read ($($_.Exception.Message)). Nothing is deleted without it." }
+        if ($Installed -gt 0) { throw "$Name ($Id) is kept: still installed on $Installed device(s). Set the assignment to Uninstall first and remove the app when no device reports it any more." }
+    }
     $Relations = @(Get-PackTuneAppRelationships -AppId $Id)
     $Dependents = @($Relations | Where-Object { $_.Direction -eq "Incoming" -and $_.Kind -eq "Dependency" })
     if ($Dependents.Count) { throw "$Name ($Id) is kept: $($Dependents.Count) app(s) still depend on it: $((($Dependents | ForEach-Object { "$($_.TargetName) ($($_.TargetId))" }) -join ', ')). Switch or remove those first." }
@@ -575,7 +584,7 @@ function Remove-PackTuneUnusedDependencyApps {
         $Removed = $false
         if ($WhatIf) { Write-Host "Would delete $($Old.DisplayName) ($($Old.Id)): nothing depends on it" }
         else {
-            try { Remove-PackTuneIntuneApp -Id $Old.Id -Name $Old.DisplayName; $Removed = $true }
+            try { Remove-PackTuneIntuneApp -Id $Old.Id -Name $Old.DisplayName -AllowInstalled; $Removed = $true }
             catch { [void]$Failed.Add("$($Old.DisplayName) ($($Old.Id)): $($_.Exception.Message)"); Write-Error "$($Old.DisplayName) ($($Old.Id)) was not deleted: $($_.Exception.Message)" -ErrorAction Continue }
         }
         [pscustomobject]@{ Id = $Old.Id; DisplayName = $Old.DisplayName; Kind = $Old.Kind; Removed = $Removed }

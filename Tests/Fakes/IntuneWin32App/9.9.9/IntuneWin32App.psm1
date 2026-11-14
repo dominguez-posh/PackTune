@@ -148,6 +148,17 @@ function Invoke-FakeIntuneGraph {
     param([string]$Method = "GET", [string]$Path, $Body)
     Test-FakeAccessToken
     $Apps = Read-Store
+    # The install status of a Win32 app comes from the report, the install summary of the app answers 400 (like the service)
+    if ($Path -eq "deviceManagement/reports/getAppStatusOverviewReport") {
+        $Id = ([string]$Body.filter -replace "^\(ApplicationId eq '(.*)'\)$", '$1')
+        $Own = $Apps | Where-Object id -eq $Id
+        $Count = if ($Own -and $null -ne $Own.installedCount) { [int]$Own.installedCount } else { 0 }
+        if (-not $Own) { return [pscustomobject]@{ TotalRowCount = 0; Schema = @(); Values = @() } }
+        return [pscustomobject]@{ TotalRowCount = 1
+            Schema = @("ApplicationId", "FailedDeviceCount", "InstalledDeviceCount", "PendingInstallDeviceCount", "NotInstalledDeviceCount", "NotApplicableDeviceCount" | ForEach-Object { [pscustomobject]@{ Column = $_; PropertyType = "String" } })
+            Values = @(, @($Id, 0, $Count, 0, 0, 0)) }
+    }
+    if ($Path -match '/installSummary$') { throw "fake Graph: (400) BadRequest: The install summary is not available for this app type" }
     if ($Path -notmatch '^mobileApps/([^/]+)(/(relationships|updateRelationships))?$') { throw "fake Graph: unknown path $Path" }
     $Id = $Matches[1]; $Tail = $Matches[3]
     $App = $Apps | Where-Object id -eq $Id
