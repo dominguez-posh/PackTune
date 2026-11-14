@@ -1032,7 +1032,7 @@ $script:HelpTexts = @{
     Activity = @(
         @('Activity', 'Every deployment, release and check that runs in the background. Show log reveals the messages, Retry starts a failed job again, Clear finished removes the done ones. Log files are written per day in the work folder.'))
     Settings = @(
-        @('Tenant and app registration', 'The tenant (domain or ID) and the client ID of your app registration. Grant new permissions runs the app registration setup again (admin sign-in), which adds missing permissions and the admin consent. New permissions of the tool itself are confirmed at the next normal sign-in.'),
+        @('Tenant and app registration', 'Optional: filled in after sign-in. The tenant follows the account you sign in with, and PackTune''s app registration there is looked up (or created with Create on the start page). Grant new permissions runs the app registration setup again (admin sign-in), which adds missing permissions and the admin consent. New permissions of the tool itself are confirmed at the next normal sign-in.'),
         @('Deployment defaults', 'What the deploy dialog starts with: assignment, preferred source, architecture, version and update mode. Schedule and conditions for new apps opens the schedule dialog.'),
         @('Package sources', 'The metadata feed is read on this computer. The package source is what choco uses on the devices (--source); the download URL is where the Chocolatey bootstrap gets its nupkg. Both empty = community repository. Chocolatey rate limits downloads from its community repository; for larger environments put an internal repository or caching proxy in front.'))
 }
@@ -1116,6 +1116,8 @@ function Get-ReadinessItems {
     $m = $script:ModuleState
     $busyModules = Test-TaskRunning 'components'
     $busyAppReg = Test-TaskRunning 'appreg'
+    $busyAppFind = Test-TaskRunning 'appfind'
+    $viaSetup = (Test-SignedIn) -and [bool]$Global:AccessToken.SetupClient
     $busyConnect = Test-TaskRunning 'connect'
     $busyDeps = Test-TaskRunning 'chocolatey'
     $moduleOk = $m.Ok -and $m.Winget
@@ -1130,8 +1132,8 @@ function Get-ReadinessItems {
                     Text = $(if ($busyConnect) { 'Waiting for the sign-in ...' } else { "New permissions needed - you'll confirm them at your next sign-in ($($missing -join ', ')). An administrator sees the consent page in the sign-in window." })
                     Fix = 'Confirm now'; Action = { Connect-Intune -Consent } } }
               else { @{ Key = 'appreg'; Title = 'App registration'; State = 'ok'; Text = "$($script:Settings.TenantID), client ID $($script:Settings.ClientID)." } } }
-          else { @{ Key = 'appreg'; Title = 'App registration'; State = 'bad'; Wait = $busyAppReg
-                    Text = $(if ($busyAppReg) { 'Waiting for the administrator sign-in in your browser ...' } elseif ($script:SetupClientRepaired -and -not $script:Settings.ClientID) { "App registration needed: the saved client ID was Microsoft's setup app (Microsoft Graph Command Line Tools), not PackTune's app registration, and is no longer used. Create finds PackTune's registration in the tenant (owned by you) or creates it, with admin consent." } elseif (-not $script:Settings.ClientID) { "$(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'This tenant' }) has no app registration yet. Created with admin consent." } else { 'The tenant is missing (Settings).' })
+          else { @{ Key = 'appreg'; Title = 'App registration'; State = 'bad'; Wait = ($busyAppReg -or $busyAppFind)
+                    Text = $(if ($busyAppReg) { 'Waiting for the administrator sign-in in your browser ...' } elseif ($busyAppFind) { "Looking for PackTune's app registration in the tenant you signed in to ..." } elseif ($viaSetup -and -not $script:Settings.ClientID) { "Signed in through Microsoft's setup app: $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'this tenant' }) has no app registration of PackTune yet (or it belongs to another owner). Create sets it up with admin consent, using this sign-in." } elseif ($script:SetupClientRepaired -and -not $script:Settings.ClientID) { "App registration needed: the saved client ID was Microsoft's setup app (Microsoft Graph Command Line Tools), not PackTune's app registration, and is no longer used. Create finds PackTune's registration in the tenant (owned by you) or creates it, with admin consent." } elseif (-not $script:Settings.ClientID) { "$(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'This tenant' }) has no app registration yet. Created with admin consent." } else { 'The tenant is missing (Settings).' })
                     Fix = $(if ($script:Settings.ClientID) { 'Settings' } else { 'Create' }); Action = $(if ($script:Settings.ClientID) { { Show-Page 'Settings' } } else { { Start-AppRegistration } }) } })
         $(if (Test-SignedIn) { @{ Key = 'signin'; Title = 'Signed in to Intune'; State = 'ok'; Text = $(if ($script:AccountText) { "Signed in as $((Get-AccountInfo).Account)" } else { 'Signed in' }) } }
           else { @{ Key = 'signin'; Title = 'Signed in to Intune'; State = 'bad'; Wait = $busyConnect
@@ -1257,8 +1259,14 @@ function Start-AppRegistration {
     $script:Shared.CancelSignIn = $false
     # The setup sign-in (Microsoft Graph Command Line Tools app, admin consent) in the window of this app; the browser as fallback
     $setupToken = $null
+    # Signed in through the setup app with the permissions the setup needs: that sign-in is used, no second window
+    if ((Test-SignedIn) -and $Global:AccessToken.SetupClient) {
+        Update-UiToken
+        $have = @($Global:AccessToken.Scopes | ForEach-Object { ([string]$_) -replace '^https://graph\.microsoft\.com/', '' })
+        if ($have -contains 'Application.ReadWrite.All' -and $have -contains 'DelegatedPermissionGrant.ReadWrite.All') { $setupToken = $Global:AccessToken }
+    }
     try {
-        $setupToken = Get-EmbeddedToken -TenantID $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'organizations' }) -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Application.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All', 'User.Read') -Hint 'Sign in with an administrator account: this creates the app registration and grants the admin consent.'
+        if (-not $setupToken) { $setupToken = Get-EmbeddedToken -TenantID $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'organizations' }) -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Application.ReadWrite.All', 'DelegatedPermissionGrant.ReadWrite.All', 'User.Read') -Hint 'Sign in with an administrator account: this creates the app registration and grants the admin consent.' }
     }
     catch {
         if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Show-SignInCancelled }
@@ -1288,6 +1296,8 @@ New-PackTuneAppRegistration @Params
             Write-UiLog "App registration ready: tenant $($reg.TenantID), client ID $($reg.ClientID). Saved in the settings." 'Success'
             Show-Toast 'App registration is ready, with admin consent.' 'ok'
             Update-ConnectionStatus
+            # Signed in through the setup app: the session moves to the new registration (same account, no prompt)
+            if ((Test-SignedIn) -and $Global:AccessToken.SetupClient) { Switch-SignInToRegistration ([string]$reg.ClientID) }
             Complete-SetupStep $true
             if ($script:SignInAfterRegistration) { $script:SignInAfterRegistration = $false; if (-not (Test-SignedIn)) { try { Connect-Intune } catch { Show-Error $_.Exception.Message } } }
         }
@@ -4500,10 +4510,8 @@ function Start-PackageTest {
 }
 
 function Assert-SignInSettings {
-    if (-not $script:Settings.TenantID -or -not $script:Settings.ClientID) {
-        Show-Page 'Settings'
-        throw 'Enter tenant and the client ID of your app registration first (Settings), then sign in.'
-    }
+    # Tenant and client ID are optional: without them the sign-in goes to any tenant (the account decides) through
+    # Microsoft's setup app, and PackTune's registration of that tenant is looked up afterwards (Start-RegistrationLookup)
     if (-not $script:ModuleState.Ok) {
         Show-Page 'Settings'
         throw "IntuneWin32App $($script:MinimumModuleVersion) or newer is required (Settings > Components)."
@@ -4565,6 +4573,7 @@ function Show-AdminConsentRefusal {
     Write-UiLog 'An administrator must confirm these permissions (the sign-in of a user who is no administrator cannot grant them for the organization).' 'Warning'
 }$script:SignInHint = ''
 $script:FirstSignInHow = ''
+$script:SignInAnyTenant = $false   # set by "Another account or tenant": the next sign-in goes to any tenant
 $script:BrowserSignIn = 'Invoke-PackTuneBrowserSignIn'   # tests replace it
 function Set-SignInHintFromToken {
     # Signed in already (browser, Keevault or this window): that account is the login hint, so a second sign-in lands on its session
@@ -4627,15 +4636,14 @@ function Connect-Intune {
     # Consent: the administrator confirms new permissions on the consent page of this same sign-in (prompt=consent)
     param([ValidateSet('Microsoft', 'Browser', 'Keevault')][string]$Method = 'Microsoft', [switch]$Consent)
     $prompt = if ($Consent) { 'consent' } else { 'default' }
-    if (-not $script:Settings.ClientID -and $script:ModuleState.Ok -and $Method -ne 'Keevault') {
-        # No app registration yet: the sign-in starts with its setup (admin sign-in, consent), then signs in with it
-        $script:SignInAfterRegistration = $true
-        Start-AppRegistration
-        return
-    }
     Assert-SignInSettings
-    $tenant = $script:Settings.TenantID
-    $clientId = $script:Settings.ClientID
+    # Nothing filled in, or "Another account or tenant": any tenant, through Microsoft's setup app until PackTune's
+    # registration of that tenant is found (Complete-SignIn looks it up and switches to it)
+    $target = if ($script:SignInAnyTenant) { Get-PackTuneSignInTarget -TenantID '' -ClientID '' } else { Get-PackTuneSignInTarget }
+    $script:SignInAnyTenant = $false
+    $tenant = $target.TenantID
+    $clientId = $target.ClientID
+    if ($target.Setup) { Write-UiLog "No app registration of PackTune is known$(if ($tenant -ne 'organizations') { " for $tenant" }) yet: signing in through Microsoft's setup app (Microsoft Graph Command Line Tools); PackTune's registration is looked up after the sign-in." }
     if ($Method -eq 'Keevault') {
         # Keevault and the embedded sign-in window take the foreground; the tool keeps painting meanwhile but takes no clicks
         $window.IsEnabled = $false
@@ -4644,7 +4652,8 @@ function Connect-Intune {
             $pump = { $window.Dispatcher.Invoke([action] {}, [System.Windows.Threading.DispatcherPriority]::Background) }
             $token = Connect-PackTuneWithKeevault -TenantID $tenant -ClientID $clientId -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -UserDataFolder $script:SignInSession -Scopes (Get-PackTuneSignInScopes -Consent:$Consent) -Prompt $prompt -Owner $window -OnWait $pump -OnAccount { param($User) Resolve-AccountTenant $User }
             Set-PackTuneToken -TokenResponse $token -TenantID $token.SignInTenantID -ClientID $token.SignInClientID
-            if (-not (Test-PackTuneSameTenant $token.SignInTenantID $tenant)) { Switch-Tenant $token.SignInTenantID $token.SignInClientID }
+            # Through the setup app the tenant is taken over after the lookup (Complete-SignIn), never with the setup app as client ID
+            if (-not $Global:AccessToken.SetupClient -and -not (Test-PackTuneSameTenant $token.SignInTenantID $script:Settings.TenantID)) { Switch-Tenant $token.SignInTenantID $token.SignInClientID }
             $script:Shared.Auth = Get-PackTuneAuthState
             Complete-SignIn 'via Keevault'
         }
@@ -4688,7 +4697,7 @@ Connect-PackTune @Params | Out-Null
 Get-PackTuneAuthState
 '@
     $arguments = @{ TenantID = $tenant; ClientID = $clientId; Authority = $script:SignInTest.Authority; UrlHandler = $script:SignInTest.UrlHandler }
-    [void](Start-UiTask -Kind 'connect' -Title "Sign in to ${tenant}: complete the Microsoft sign-in in your browser" -Display 'Sign-in' -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
+    [void](Start-UiTask -Kind 'connect' -Title "Sign in$(if ($tenant -ne 'organizations') { " to $tenant" }): complete the Microsoft sign-in in your browser" -Display 'Sign-in' -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
         param($Result, $Job)
         $state = @($Result | Where-Object { $_ -is [hashtable] -and $_.AccessToken })
         if ($Job.Status -ne 'succeeded' -or $state.Count -eq 0) { Update-ConnectionStatus; Complete-SetupStep $false 'the sign-in'; return }   # the reason is in the activity panel
@@ -4700,18 +4709,22 @@ Get-PackTuneAuthState
 function Get-AccountDomain([string]$User) { if ($User -match '@([^@\s]+)$') { $Matches[1].ToLower() } else { '' } }
 
 function Resolve-AccountTenant([string]$User) {
-    # The account chosen in Keevault decides the tenant. Its own app registration is needed there: the one of
-    # another tenant is used when it is known, otherwise the tool switches and offers to create one.
+    # The account chosen in Keevault decides the tenant. PackTune's registration there is used when it is known; otherwise
+    # the sign-in goes there through Microsoft's setup app and the registration is looked up afterwards (Complete-SignIn).
     $tenant = [string]$script:Settings.TenantID
     $domain = Get-AccountDomain $User
-    if (-not $domain -or (Test-PackTuneSameTenant $tenant $domain)) { return @{ TenantID = $tenant; ClientID = $script:Settings.ClientID } }
+    if (-not $domain -or (Test-PackTuneSameTenant $tenant $domain)) {
+        $t = Get-PackTuneSignInTarget -TenantID $(if ($tenant) { $tenant } else { $domain }) -ClientID ([string]$script:Settings.ClientID)
+        return @{ TenantID = $t.TenantID; ClientID = $t.ClientID }
+    }
     $known = Get-PackTuneTenantClient $domain
     if ($known) {
         Write-UiLog "$User belongs to ${domain}: signing in there with its app registration ($known)."
         return @{ TenantID = $domain; ClientID = $known }
     }
     Switch-Tenant $domain ''
-    throw "$User belongs to the tenant $domain, which has no app registration for this tool yet. The tool switched to ${domain}: click Create (start page) to set it up, then sign in again."
+    Write-UiLog "$User belongs to the tenant $domain, whose app registration of PackTune is not known yet: signing in there through Microsoft's setup app, then looking it up."
+    return @{ TenantID = $domain; ClientID = $script:SetupClientId }
 }
 
 function Switch-Tenant([string]$TenantID, [string]$ClientID) {
@@ -4737,10 +4750,68 @@ function Complete-SignIn([string]$How) {
     Update-ConnectionStatus
     $identity = Get-PackTuneIdentity
     # Tenant identity is the GUID: remember which domain names belong to it (settings tenant, account domain)
-    try { if ($identity.TenantId) { Register-PackTuneTenantAlias -Guid ([string]$identity.TenantId) -Name @([string]$script:Settings.TenantID, (Get-AccountDomain ([string]$identity.Account))); $script:Settings = Get-PackTuneSettings } } catch { }
+    # (through the setup app the sign-in may have gone to any tenant: the settings tenant is no alias of it then)
+    $setup = [bool]$Global:AccessToken.SetupClient
+    try { if ($identity.TenantId) { Register-PackTuneTenantAlias -Guid ([string]$identity.TenantId) -Name @($(if (-not $setup) { [string]$script:Settings.TenantID }), (Get-AccountDomain ([string]$identity.Account))); $script:Settings = Get-PackTuneSettings } } catch { }
     Save-GrantedScopes
-    Write-UiLog "Signed in $How as $($identity.Account) (tenant $($identity.TenantId))." 'Success'
+    Write-UiLog "Signed in $How as $($identity.Account) (tenant $($identity.TenantId))$(if ($setup) { " through Microsoft's setup app" })." 'Success'
     Start-TenantRefresh
+    if ($setup) { Start-RegistrationLookup }
+}
+
+function Start-RegistrationLookup {
+    # Signed in through the setup app: the tenant of the token and PackTune's registration there (remembered or searched).
+    # Found -> saved for that tenant and the sign-in switches to it; not found -> the setup session stays, Create is offered.
+    if (Test-TaskRunning 'appfind') { return }
+    Update-UiToken
+    [void](Start-UiTask -Kind 'appfind' -Title "Looking for PackTune's app registration in the tenant" -Display 'App registration' -Hidden -NeedsAuth -Pool $script:UserPool `
+        -Arguments @{ GraphUrl = $(if ($script:SignInTest.GraphUrl) { $script:SignInTest.GraphUrl } else { 'https://graph.microsoft.com' }) } `
+        -Work 'param($GraphUrl) Resolve-PackTuneSignInRegistration -GraphUrl $GraphUrl' -OnDone {
+        param($Result, $Job)
+        $r = @($Result | Where-Object { $_ -and $_.PSObject.Properties['TenantGuid'] }) | Select-Object -First 1
+        if ($Job.Status -ne 'succeeded' -or -not $r) { Write-UiLog "PackTune's app registration could not be looked up; Create on the start page sets it up." 'Warning'; Update-Readiness; return }
+        Complete-RegistrationLookup $r
+    })
+    Update-Readiness
+}
+
+function Complete-RegistrationLookup($Found) {
+    # The tenant field follows the signed-in tenant; the client ID only ever holds PackTune's own registration
+    $client = if ($Found.ClientID -and -not (Test-PackTuneSetupClient ([string]$Found.ClientID))) { [string]$Found.ClientID } else { '' }
+    try { Register-PackTuneTenantAlias -Guid ([string]$Found.TenantGuid) -Name @([string]$Found.TenantID, (Get-AccountDomain ([string]$Found.Account))); $script:Settings = Get-PackTuneSettings } catch { }
+    if (-not (Test-PackTuneSameTenant ([string]$Found.TenantID) ([string]$script:Settings.TenantID)) -or ($client -and $client -ne $script:Settings.ClientID)) {
+        $s = Get-PackTuneSettings; $s.TenantID = [string]$Found.TenantID; $s.ClientID = $client
+        [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings
+        Update-SettingsView
+    }
+    if (-not $client) {
+        Write-UiLog "$($Found.TenantID) has no app registration of PackTune yet (or it belongs to another owner). You stay signed in through Microsoft's setup app; Create on the start page sets PackTune's registration up with this sign-in." 'Warning'
+        Update-ConnectionStatus; Update-Readiness
+        return
+    }
+    Write-UiLog "PackTune's app registration of $($Found.TenantID) $(if ($Found.Source -eq 'found') { 'found in the tenant' } else { 'is known' }) ($client): switching the sign-in to it."
+    Switch-SignInToRegistration $client
+}
+
+function Switch-SignInToRegistration([string]$ClientID) {
+    # Same account, same session of the sign-in window: no password, no account choice; only when the window cannot be used
+    # the setup session stays and the next Sign in uses the registration
+    $tenant = [string]$script:Settings.TenantID
+    Set-SignInHintFromToken
+    try {
+        $token = $null
+        if ($script:EmbeddedSignInOverride) { $token = & $script:EmbeddedSignInOverride $tenant $ClientID (Get-PackTuneSignInScopes) $script:SignInHint 'default' $script:SignInSession }
+        elseif (Test-EmbeddedSignIn) {
+            $params = @{ TenantID = $tenant; ClientID = $ClientID; Scopes = (Get-PackTuneSignInScopes); CacheFolder = (Join-Path $script:WorkRoot 'WebView2'); Owner = $window; Title = 'Sign in to Microsoft'; UserDataFolder = $script:SignInSession; Prompt = 'default' }
+            if ($script:SignInHint) { $params.LoginHint = $script:SignInHint }
+            $token = & $script:BrowserSignIn @params
+        }
+        if (-not $token) { Write-UiLog "Sign in again to use PackTune's app registration ($ClientID)." 'Warning'; Update-Readiness; return }
+        Set-PackTuneToken -TokenResponse $token -TenantID $tenant -ClientID $ClientID
+        $script:Shared.Auth = Get-PackTuneAuthState
+        Complete-SignIn 'with the app registration of PackTune'
+    }
+    catch { Write-UiLog "The sign-in could not switch to PackTune's app registration ($($_.Exception.Message)). Sign in again to use it." 'Warning'; Update-Readiness }
 }
 
 function Disconnect-Intune {
@@ -4811,7 +4882,9 @@ function Show-AccountMenu {
         $t = $tenant; $c = $known[$tenant]
         [void]$entries.Add(@{ Glyph = [char]0xE8AB; Header = "Switch to $t"; Text = 'Signs out and uses the app registration of that tenant.'; Action = { Disconnect-Intune; Switch-Tenant $t $c }.GetNewClosure() })
     }
-    [void]$entries.Add(@{ Glyph = [char]0xE713; Header = 'Another tenant ...'; Text = 'Enter a tenant and client ID in the settings.'; Action = { Show-Page 'Settings' } })
+    # Any account of any tenant: signed out, then the account choice of Microsoft; the tenant and PackTune's registration
+    # there follow the account (looked up after the sign-in), nothing to fill in
+    [void]$entries.Add(@{ Glyph = [char]0xE713; Header = 'Another account or tenant ...'; Text = 'Signs out and signs in with the account you choose; the tenant follows it.'; Action = { Disconnect-Intune; $script:SignInAnyTenant = $true; Connect-Intune } })
     foreach ($i in $entries) {
         $mi = New-Object System.Windows.Controls.MenuItem
         $mi.Header = $i.Header; $mi.Tag = [string]$i.Glyph; $mi.ToolTip = $i.Text

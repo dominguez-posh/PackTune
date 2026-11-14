@@ -125,10 +125,26 @@ $script:LicenseNotes = @{
     "oracle.javaruntimeenvironment"       = "Oracle Java: commercial use requires a paid Oracle Java SE subscription. Use Eclipse Temurin instead."
 }
 
-# Microsoft's "Microsoft Graph Command Line Tools" app: PackTune signs in with it ONLY for the one-time setup (creating the
-# app registration, the package store grant). It is never PackTune's own client ID: settings that name it (entered by hand
-# in earlier versions and copied by the migration) are treated as "no app registration" (Repair-PackTuneSetupClient).
+# Microsoft's "Microsoft Graph Command Line Tools" app: PackTune signs in with it for the setup (creating the app
+# registration, the package store grant) and for the first sign-in to a tenant whose PackTune registration is not known yet
+# (session only). It is never SAVED as PackTune's own client ID: settings that name it (entered by hand in earlier versions
+# and copied by the migration) are treated as "no app registration" (Repair-PackTuneSetupClient).
 $script:SetupClientId = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+
+function Get-PackTuneSignInTarget {
+    <#
+        Where a sign-in goes: tenant and client given (or saved), else any tenant ("organizations", the account decides) and,
+        without a known PackTune registration, Microsoft's setup app. Setup = $true when the session runs on the setup app;
+        after the sign-in Resolve-PackTuneSignInRegistration finds PackTune's own registration in that tenant.
+    #>
+    param([string]$TenantID, [string]$ClientID)
+    if (-not $PSBoundParameters.ContainsKey("TenantID")) { $TenantID = [string]$script:Settings.TenantID }
+    if (-not $PSBoundParameters.ContainsKey("ClientID")) { $ClientID = [string]$script:Settings.ClientID }
+    if (-not $TenantID) { $TenantID = "organizations" }
+    if (-not $ClientID -and $TenantID -ne "organizations") { $ClientID = [string](Get-PackTuneTenantClient $TenantID) }
+    if (-not $ClientID) { $ClientID = $script:SetupClientId }
+    return [pscustomobject]@{ TenantID = $TenantID; ClientID = $ClientID; Setup = (Test-PackTuneSetupClient $ClientID) }
+}#Tenant and client id of the next sign-in (any tenant through the setup app when nothing is known)
 function Test-PackTuneSetupClient([string]$ClientID) { return ([string]$ClientID).Trim() -ieq $script:SetupClientId }
 
 function Get-PackTuneSettings {
@@ -612,8 +628,10 @@ function Invoke-PackTuneTokenRequest {
 
 function Connect-PackTune {
     param(
-        [Parameter(Mandatory = $true)][string]$TenantID,
-        [Parameter(Mandatory = $true)][string]$ClientID,
+        # Empty: any tenant ("organizations", the account decides; the tenant is taken from the token)
+        [string]$TenantID,
+        # Empty: no app registration of PackTune is known yet, the sign-in goes through Microsoft's setup app (session only)
+        [string]$ClientID,
         # How long to wait for the sign-in in the browser
         [int]$TimeoutSeconds = 300,
         # Other clouds, e.g. https://login.microsoftonline.us
@@ -624,14 +642,14 @@ function Connect-PackTune {
         [scriptblock]$ShouldCancel
     )
     Assert-PackTunePrerequisites
-    if (Test-PackTuneSetupClient $ClientID) { throw "$ClientID is Microsoft's setup app (Microsoft Graph Command Line Tools), not PackTune's app registration. Create the app registration first (New-PackTuneAppRegistration)." }
-    $Params = @{ TenantID = $TenantID; ClientID = $ClientID; TimeoutSeconds = $TimeoutSeconds; Authority = $Authority; UrlHandler = $UrlHandler; ShouldCancel = $ShouldCancel }
+    $Target = Get-PackTuneSignInTarget -TenantID $TenantID -ClientID $ClientID
+    $Params = @{ TenantID = $Target.TenantID; ClientID = $Target.ClientID; TimeoutSeconds = $TimeoutSeconds; Authority = $Authority; UrlHandler = $UrlHandler; ShouldCancel = $ShouldCancel }
     $Token = Invoke-PackTunePkceSignIn @Params
-    Set-PackTuneToken -TokenResponse $Token -TenantID $TenantID -ClientID $ClientID -Authority $Authority
-    $script:Settings.TenantID = $TenantID
-    $script:Settings.ClientID = $ClientID
+    Set-PackTuneToken -TokenResponse $Token -TenantID $Target.TenantID -ClientID $Target.ClientID -Authority $Authority
+    # The setup app is never PackTune's client ID (also not in memory); the tenant is the one of the token
+    if (-not $Target.Setup) { $script:Settings.TenantID = $Target.TenantID; $script:Settings.ClientID = $Target.ClientID }
     $Identity = Get-PackTuneIdentity
-    Write-Host "Connected to Intune tenant $TenantID$(if ($Identity.Account) { " as $($Identity.Account)" })"
+    Write-Host "Connected to Intune tenant $(if ($Identity.TenantId) { $Identity.TenantId } else { $Target.TenantID })$(if ($Identity.Account) { " as $($Identity.Account)" })$(if ($Target.Setup) { " (through Microsoft's setup app: no app registration of PackTune known yet)" })"
 }#Connects to the Intune Graph API with an Entra ID app registration (sign-in in the browser)
 
 function Invoke-PackTunePkceSignIn {
@@ -774,13 +792,7 @@ function New-PackTuneAppRegistration {
     }
 
     # The tenant: its initial domain, as in the settings field
-    $Tenant = [string]$Claims.tid
-    try {
-        $Org = (& $Call GET "/v1.0/organization?`$select=verifiedDomains" $null).value | Select-Object -First 1
-        $Initial = $Org.verifiedDomains | Where-Object isInitial | Select-Object -First 1
-        if ($Initial.name) { $Tenant = [string]$Initial.name }
-    }
-    catch { Write-Warning "The tenant domain could not be read, the tenant id is used: $($_.Exception.Message)" }
+    $Tenant = Get-PackTuneInitialDomain -Call $Call -TenantGuid ([string]$Claims.tid)
 
     $GraphApp = "00000003-0000-0000-c000-000000000000"
     $GraphSp = (& $Call GET "/v1.0/servicePrincipals?`$filter=appId eq '$GraphApp'&`$select=id,oauth2PermissionScopes" $null).value | Select-Object -First 1
@@ -793,21 +805,10 @@ function New-PackTuneAppRegistration {
         @{ id = $Scope.id; type = "Scope" }
     }
 
-    # An app registration of an earlier setup is reused only when the signed-in account is its only owner (the
-    # setup creates it as the signed-in admin, who becomes its owner). The name alone proves nothing: any user may
-    # register an app with this name, and it would get the admin consent below. The tag only marks registrations of
-    # this tool; it is not trusted, an owner can set any tag.
+    # An app registration of an earlier setup is reused only when the signed-in account is its only owner (see
+    # Find-PackTuneOwnedRegistration). The tag only marks registrations of this tool; it is not trusted.
     $Tag = "PackTune"
-    $Me = [string]$Claims.oid
-    $Names = @($DisplayName) + @($FormerNames | Where-Object { $_ -and $_ -ne $DisplayName })
-    $Filter = [uri]::EscapeDataString((@($Names | ForEach-Object { "displayName eq '$($_.Replace("'", "''"))'" }) -join " or "))
-    $App = $null
-    foreach ($Candidate in @((& $Call GET "/v1.0/applications?`$filter=$Filter&`$select=id,appId,publicClient,tags" $null).value)) {
-        if (-not $Candidate -or $Candidate.publicClient.redirectUris -notcontains "http://localhost") { continue }
-        $Owners = @((& $Call GET "/v1.0/applications/$($Candidate.id)/owners?`$select=id" $null).value | ForEach-Object { [string]$_.id })
-        if ($Me -and $Owners.Count -gt 0 -and @($Owners | Where-Object { $_ -ne $Me }).Count -eq 0) { $App = $Candidate; break }
-        Write-Warning "The app registration '$DisplayName' ($($Candidate.appId)) is not reused: you are not its only owner. A new one is created."
-    }
+    $App = Find-PackTuneOwnedRegistration -Call $Call -Me ([string]$Claims.oid) -Names (@($DisplayName) + @($FormerNames | Where-Object { $_ -and $_ -ne $DisplayName })) -NotUsedNote "A new one is created."
     # Authorization code with PKCE on the loopback redirect (http://localhost) works as a public client through the
     # redirect URI alone; the fallback (device code, password flows) is not needed and stays off
     $Definition = @{
@@ -849,6 +850,72 @@ function New-PackTuneAppRegistration {
     $script:Settings.ClientID = [string]$App.appId
     return [pscustomobject]@{ TenantID = $Tenant; ClientID = [string]$App.appId; Account = [string]$(if ($Claims.upn) { $Claims.upn } else { $Claims.preferred_username }) }
 }#Creates (or updates) the Entra ID app registration of this tool with admin consent, returns tenant and client id
+
+function Get-PackTuneInitialDomain {
+    # The initial domain of the tenant (<name>.onmicrosoft.com), as in the settings field; the tenant GUID when it cannot be read
+    param([Parameter(Mandatory = $true)][scriptblock]$Call, [string]$TenantGuid)
+    try {
+        $Org = (& $Call GET "/v1.0/organization?`$select=verifiedDomains" $null).value | Select-Object -First 1
+        $Initial = $Org.verifiedDomains | Where-Object isInitial | Select-Object -First 1
+        if ($Initial.name) { return [string]$Initial.name }
+    }
+    catch { Write-Warning "The tenant domain could not be read, the tenant id is used: $($_.Exception.Message)" }
+    return $TenantGuid
+}
+
+function Find-PackTuneOwnedRegistration {
+    <#
+        PackTune's app registration in the tenant: by name (current or earlier), redirect URI http://localhost, and the signed-in
+        account is its ONLY owner (the setup creates it as the signed-in admin). The name alone proves nothing: any user may
+        register an app with this name. Returns the application object or $null.
+    #>
+    param([Parameter(Mandatory = $true)][scriptblock]$Call, [string]$Me, [string[]]$Names = @("PackTune", "Intune Chocolatey Deployment"), [string]$NotUsedNote)   # current and earlier name
+    $Filter = [uri]::EscapeDataString((@($Names | ForEach-Object { "displayName eq '$($_.Replace("'", "''"))'" }) -join " or "))
+    foreach ($Candidate in @((& $Call GET "/v1.0/applications?`$filter=$Filter&`$select=id,appId,displayName,publicClient,tags" $null).value)) {
+        if (-not $Candidate -or $Candidate.publicClient.redirectUris -notcontains "http://localhost") { continue }
+        $Owners = @((& $Call GET "/v1.0/applications/$($Candidate.id)/owners?`$select=id" $null).value | ForEach-Object { [string]$_.id })
+        if ($Me -and $Owners.Count -gt 0 -and @($Owners | Where-Object { $_ -ne $Me }).Count -eq 0) { return $Candidate }
+        Write-Warning "The app registration '$($Candidate.displayName)' ($($Candidate.appId)) is not reused: you are not its only owner. $NotUsedNote"
+    }
+    return $null
+}
+
+function Resolve-PackTuneSignInRegistration {
+    <#
+        After a sign-in through Microsoft's setup app (any tenant): the tenant of the token (GUID and initial domain) and
+        PackTune's own registration there, from the remembered registrations (TenantClients, by GUID or domain) or else
+        searched in the tenant (Find-PackTuneOwnedRegistration). ClientID is empty when there is none: the start page then
+        offers Create. Nothing is saved here (the caller saves tenant and client id; the setup app is never saved).
+    #>
+    param([string]$GraphUrl = "https://graph.microsoft.com")
+    Assert-PackTuneConnection
+    $AccessToken = [string]$Global:AccessToken.access_token
+    $Claims = Get-PackTuneTokenClaims $AccessToken
+    $Graph = $GraphUrl.TrimEnd("/")
+    $Headers = @{ Authorization = "Bearer $AccessToken"; "Content-Type" = "application/json" }
+    $Call = {
+        param([string]$Method, [string]$Path, $Body)
+        try { Invoke-RestMethod -Method $Method -Uri "$Graph$Path" -Headers $Headers -TimeoutSec 60 -ErrorAction Stop }
+        catch {
+            $Detail = try { ($_.ErrorDetails.Message | ConvertFrom-Json).error.message } catch { $null }
+            throw "Graph $Method $Path failed: $(if ($Detail) { $Detail } else { $_.Exception.Message })"
+        }
+    }
+    $Guid = ([string]$Claims.tid).ToLower()
+    $Tenant = Get-PackTuneInitialDomain -Call $Call -TenantGuid $Guid
+    $Account = [string]$(if ($Claims.upn) { $Claims.upn } else { $Claims.preferred_username })
+    $Client = $null; $Source = "none"
+    foreach ($Key in @($Guid, $Tenant) | Where-Object { $_ }) { if (-not $Client) { $Client = Get-PackTuneTenantClient $Key } }
+    if ($Client) { $Source = "known" }
+    else {
+        try {
+            $App = Find-PackTuneOwnedRegistration -Call $Call -Me ([string]$Claims.oid) -NotUsedNote "Create makes PackTune's own one."
+            if ($App -and -not (Test-PackTuneSetupClient ([string]$App.appId))) { $Client = [string]$App.appId; $Source = "found" }
+        }
+        catch { Write-Warning "PackTune's app registration could not be searched in the tenant: $($_.Exception.Message)" }
+    }
+    return [pscustomobject]@{ TenantGuid = $Guid; TenantID = $Tenant; ClientID = [string]$Client; Source = $Source; Account = $Account }
+}#Tenant and PackTune's registration there after a sign-in through the setup app
 
 function Invoke-IntuneModule {
     param([Parameter(Mandatory = $true)][scriptblock]$Script)
@@ -929,10 +996,12 @@ function Set-PackTuneToken {
     )
     # Same shape as the module's own New-DelegatedAccessToken, which the module functions expect
     if (-not $TokenResponse.access_token) { throw "The token response contains no access token" }
-    # The Intune session never runs on the setup client (it is for the one-time setup only)
-    if (Test-PackTuneSetupClient $ClientID) { throw "A sign-in with Microsoft's setup app ($ClientID) is not used for Intune: PackTune needs its own app registration (Create on the start page)." }
-    try { if (Test-PackTuneSetupClient ([string](Get-PackTuneTokenClaims ([string]$TokenResponse.access_token)).appid)) { throw "setup" } }
-    catch { if ($_.Exception.Message -eq "setup") { throw "The token was issued to Microsoft's setup app, not to PackTune's app registration: it is not used for Intune." } }
+    # A session through Microsoft's setup app is allowed (signed in before PackTune's registration is known); it is marked so
+    # that it is never saved as PackTune's client ID. Signed in to "organizations": the tenant is the one of the token.
+    $Claims = try { Get-PackTuneTokenClaims ([string]$TokenResponse.access_token) } catch { $null }
+    if (-not $ClientID -and $Claims.appid) { $ClientID = [string]$Claims.appid }
+    if ($TenantID -in "organizations", "common" -and $Claims.tid) { $TenantID = [string]$Claims.tid }
+    $TokenResponse | Add-Member -MemberType NoteProperty -Name "SetupClient" -Value ((Test-PackTuneSetupClient $ClientID) -or (Test-PackTuneSetupClient ([string]$Claims.appid))) -Force
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "ClientID" -Value $ClientID -Force
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "client_id" -Value $ClientID -Force   # read by the module's own renewal
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "Authority" -Value $Authority -Force
