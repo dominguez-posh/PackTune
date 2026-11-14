@@ -228,6 +228,7 @@ function Get-FriendlyCause([string]$Raw) {
        The raw text stays in the log and behind Details. #>
     $text = [string]$Raw
     if (-not $text) { return 'Something went wrong.' }
+    if ($text -match '(?i)is not a custom application of this tool or does not exist') { return 'this app is not a custom application of PackTune or was already removed - nothing was removed.' }
     if ($text -match '(?i)Close Windows Sandbox to continue') { return 'Close Windows Sandbox to continue, then press Retry.' }
     if ($text -match '(?i)-2147024891|0x80070005|E_ACCESSDENIED|denied access to the package folder') { return 'Windows denied access to the package folder - close Windows Sandbox, wait a minute and try again (see Details).' }
     if ($text -match '(?i)Das Argument kann nicht|Cannot bind argument|cannot be bound|ParameterBinding|leere Zeichenfolge|empty string|empty collection|null or empty') { return 'An internal value was missing (for example no app selected). Nothing was changed; Details has the log.' }
@@ -236,7 +237,8 @@ function Get-FriendlyCause([string]$Raw) {
     if ($text -match '(?i)\b50[0234]\b|service unavailable|bad gateway|gateway time|internal server error|serverfehler') { return 'Microsoft Graph has a problem right now (server error). Try again in a moment.' }
     if ($text -match '(?i)\b40[04]\b|bad request|not found|nicht gefunden|ung(Ã¼|u|ue)ltige anforderung|BadRequest|ResourceNotFound') { return 'Not available in this tenant (Remediations need Windows Enterprise E3/E5 licensing).' }
     if ($text -match '(?i)remoteserver|remote server|remotename|could not be resolved|unable to connect|no such host|timed out|timeout|zeit(Ã¼|u|ue)berschreitung|network|netzwerk|connection (was )?(closed|refused|reset)|Verbindung|name or service not known|SSL|TLS') { return "Can't reach Microsoft Graph." }
-    $one = ($text -replace '\s+', ' ').Trim()
+    # Ids belong under Details (the log), not in the first line
+    $one = ([regex]::Replace($text, '(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', '(id in Details)') -replace '\s+', ' ').Trim()
     if ($one.Length -gt 140) { $one = $one.Substring(0, 137) + '...' }
     $one
 }
@@ -1849,8 +1851,13 @@ function Get-CustomPackageIconFile {
         New-Item -Path $dir -ItemType Directory -Force | Out-Null
         if ($script:CustomKind -eq 'Msi') {
             if ($script:CustomInfo -and $script:CustomInfo.IconName) {
-                $f = Join-Path $dir 'msi-icon.ico'
-                if (Save-PackTuneMsiIcon -Path $script:CustomInfo.Path -IconName $script:CustomInfo.IconName -Destination $f) { return $f }
+                # The same converter as the upload (ConvertTo-PngBytes: largest frame of the ICO, PNG frames as they are, EXE icons), so preview and Company Portal match
+                $raw = Join-Path $dir 'msi-icon.bin'
+                if (Save-PackTuneMsiIcon -Path $script:CustomInfo.Path -IconName $script:CustomInfo.IconName -Destination $raw) {
+                    $f = Join-Path $dir 'msi-icon.png'
+                    [IO.File]::WriteAllBytes($f, (ConvertTo-PngBytes -Bytes ([IO.File]::ReadAllBytes($raw)) -WorkPath $dir))
+                    return $f
+                }
             }
             return $null
         }
@@ -1858,6 +1865,8 @@ function Get-CustomPackageIconFile {
         if ($entry -like '*.exe' -and $folder) {
             $exe = if ([IO.Path]::IsPathRooted($entry)) { $entry } else { Join-Path $folder $entry }
             if (Test-Path -LiteralPath $exe -PathType Leaf) {
+                $f = Join-Path $dir 'exe-icon.png'
+                try { [IO.File]::WriteAllBytes($f, (ConvertTo-PngBytes -Bytes ([IO.File]::ReadAllBytes($exe)) -WorkPath $dir)); return $f } catch { }
                 Add-Type -AssemblyName System.Drawing
                 $ico = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
                 if ($ico) { $f = Join-Path $dir 'exe-icon.png'; $bmp = $ico.ToBitmap(); $bmp.Save($f, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose(); return $f }

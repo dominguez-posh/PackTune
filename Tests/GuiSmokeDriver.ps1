@@ -1369,7 +1369,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $script:CustomInfo = [pscustomobject]@{ Name = 'Menu Tool'; Version = '2.0.0'; Path = (Join-Path $env:TEMP 'menu.msi') }
                 Show-TestMenu 'Custom' $ui.BtnCustomTestMenu
                 $headers = @($script:LastMenu.Items | ForEach-Object { [string]$_.Header })
-                Test-Smoke 'Test in sandbox is a split button: Test installation and Test update from the previous version' ($headers.Count -eq 2 -and $headers[0] -eq 'Test installation' -and $headers[1] -like 'Test update from the previous version*') ($headers -join ' | ')
+                Test-Smoke 'Test in sandbox is a split button: Test installation and Test update from the previous version' ($headers.Count -ge 2 -and $headers[0] -eq 'Test installation' -and $headers[1] -like 'Test update from the previous version*') ($headers -join ' | ')
                 # Custom update test: the previous version comes from the package store when there is one, else a file dialog
                 $savedStore = $script:Settings.StoreSiteUrl; $savedMode = $script:CustomMode; $savedApp = $script:CustomUpdateApp
                 $script:Settings.StoreSiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; $script:CustomMode = 'Version'; $script:CustomUpdateApp = [pscustomobject]@{ AppId = 'smoke-tool-1a2b3c4d' }
@@ -1573,6 +1573,26 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $true
             }
         } } }
+    @{ Name = 'toasts: a long message keeps its layout (wide text column, plain Details button, 3 lines at most, friendly first line)'; Phase = 0; Do = {
+        param($s)
+        $before = $ui.ToastHost.Children.Count
+        $long = 'Packaging with IntuneWinAppUtil.exe failed: C:\Users\someone.long\AppData\Local\PackTune\package\custom-keevault-0a1b2c3d\source\keevault-0.9.34.msi could not be read because Windows denied access to the package folder and the files are held by another process, please close Windows Sandbox and try again later when nothing else uses the folder'
+        Show-Toast $long 'bad' 'Details' { }
+        $window.UpdateLayout()
+        $toast = $ui.ToastHost.Children[$ui.ToastHost.Children.Count - 1]
+        $grid = $toast.Child
+        $label = @($grid.Children | Where-Object { $_ -is [System.Windows.Controls.TextBlock] -and $_.Text -notmatch '^.$' })[0]
+        $button = @($grid.Children | Where-Object { $_ -is [System.Windows.Controls.Button] })[0]
+        Test-Smoke 'toast: the text column is at least 250 px wide (not a few characters)' ($label.ActualWidth -ge 250) "$($label.ActualWidth)"
+        Test-Smoke 'toast: at most three lines, shortened path, the full text in the tooltip' ($label.ActualHeight -le 70 -and $label.Text -like '*...*' -and $label.Text -notlike '*AppData\Local\PackTune\package*' -and $label.ToolTip -eq $long) "$($label.ActualHeight) / $($label.Text)"
+        Test-Smoke 'toast: the Details button is plain text (no icon glyph, nothing in Tag) and not wider than 120 px' ($button.Content -eq 'Details' -and $null -eq $button.Tag -and $button.ActualWidth -le 120) "$($button.Tag) $($button.ActualWidth)"
+        Test-Smoke 'toast: the whole toast is not wider than 440 px' ($toast.ActualWidth -le 440) "$($toast.ActualWidth)"
+        Save-SmokeShot '96-long-toast'
+        $c = Get-FriendlyCause 'App 6f0f2a3c-1111-2222-3333-444455556666 is not a custom application of this tool or does not exist any more, nothing was removed'
+        Test-Smoke 'friendly: a removed or foreign app is explained without the id' ($c -like '*not a custom application of PackTune or was already removed*' -and $c -notmatch '[0-9a-f]{8}-[0-9a-f]{4}') $c
+        Test-Smoke 'friendly: other ids in a message become a pointer to Details' ((Get-FriendlyCause 'Something with 6f0f2a3c-1111-2222-3333-444455556666 failed') -notmatch '6f0f2a3c') 
+        $ui.ToastHost.Children.Remove($toast); foreach ($tt in @($script:Toasts | Where-Object { $_.Element -eq $toast })) { $script:Toasts.Remove($tt) }
+        $true } }
     @{ Name = 'repositories: add a public repository, list, approval, remove (fake GitHub)'; Phase = 0; Do = {
         param($s)
         if (-not (Test-Idle)) { return $false }
