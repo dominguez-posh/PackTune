@@ -52,7 +52,7 @@ $script:GraphScopeString = (@("DeviceManagementApps.ReadWrite.All", "DeviceManag
         ForEach-Object { "https://graph.microsoft.com/$_" }) + "offline_access", "openid", "profile") -join " "
 # Added to the app registration and its consent for the install status and device views (Modules\TenantInsight.psm1).
 # Sign-ins request them with Get-InsightScopeSet once the consent exists (Test-InsightReadiness shows what is missing).
-$script:GraphInsightScopes = @("DeviceManagementManagedDevices.Read.All", "Sites.Selected")
+$script:GraphInsightScopes = @("DeviceManagementManagedDevices.Read.All", "Sites.Selected", "DeviceManagementScripts.ReadWrite.All")
 
 $script:DefaultSettings = [ordered]@{
     TenantID              = ""

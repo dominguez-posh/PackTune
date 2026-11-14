@@ -800,7 +800,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if ($s.Phase -eq 4) {
-            if (-not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
+            if (-not (Test-Idle)) { return $false }
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'remove: one custom app is gone from Intune and from the list' ($fake.Count -eq 1 -and $script:CustomRows.Count -eq 1 -and $ui.PanelCustomDetails.Visibility -eq 'Collapsed') ($fake | ForEach-Object displayVersion)
             Remove-Item $s.Dir -Recurse -Force -ErrorAction SilentlyContinue
@@ -1192,9 +1192,9 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"name":"Consent Admin","upn":"admin@contoso.onmicrosoft.com","tid":"t-1"}')).TrimEnd('=').Replace('+', '-').Replace('/', '_')
                 $script:ConsentCalls = New-Object System.Collections.ArrayList
                 $script:EmbeddedAvailableOverride = $true
-                $script:EmbeddedSignInOverride = { param($t, $c, $sc, $h, $pr, $folder) [void]$script:ConsentCalls.Add("$pr|$c"); [pscustomobject]@{ token_type = 'Bearer'; expires_in = 3600; access_token = "x.$claims.y"; refresh_token = 'r'; scope = 'https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All' } }
+                $script:EmbeddedSignInOverride = { param($t, $c, $sc, $h, $pr, $folder) [void]$script:ConsentCalls.Add("$pr|$c"); [pscustomobject]@{ token_type = 'Bearer'; expires_in = 3600; access_token = "x.$claims.y"; refresh_token = 'r'; scope = 'https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All https://graph.microsoft.com/DeviceManagementScripts.ReadWrite.All' } }
                 $Global:AccessToken.Scopes = @('DeviceManagementApps.ReadWrite.All')
-                Test-Smoke 'status setup: missing scope is detected' (@(Get-StatusMissingScopes) -contains 'DeviceManagementConfiguration.ReadWrite.All') (@(Get-StatusMissingScopes) -join ',')
+                Test-Smoke 'status setup: missing scope is detected' (@(Get-StatusMissingScopes) -contains 'DeviceManagementScripts.ReadWrite.All') (@(Get-StatusMissingScopes) -join ',')
                 Start-StatusScriptSetup
                 $s.Phase = 1; return $false
             }
@@ -1206,6 +1206,16 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'license hint with the admin center path, Open and Check again offered' ($ui.BoxStepsNote.Visibility -eq 'Visible' -and $ui.TxtStepsNote.Text -like '*Windows data*I confirm that my tenant owns one of these licenses*' -and $ui.BtnStepsOpen.Visibility -eq 'Visible' -and $ui.BtnStepsAgain.Visibility -eq 'Visible' -and $script:StatusAdminUrl -like 'https://intune.microsoft.com/*') $ui.TxtStepsNote.Text
                 Test-Smoke 'step list rows: error icon and cause shown, progress bar determinate' ($ui.ListSteps.Children.Count -eq 5 -and $ui.BarSteps.Maximum -eq 5 -and $ui.BarSteps.Value -eq 1)
                 Save-SmokeShot '12b-status-setup-license'
+                # 403 with only the old scope = missing permission (not the license); with the Scripts scope the license hint stays
+                $saveScopes = $Global:AccessToken.Scopes
+                $fctx = New-InsightGraphContext -Invoke ([scriptblock]::Create($script:InsightFake))
+                $Global:AccessToken.Scopes = @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementConfiguration.ReadWrite.All')
+                $a1 = Test-InsightRemediationsAvailable -Context $fctx
+                $Global:AccessToken.Scopes = @('DeviceManagementApps.ReadWrite.All', 'DeviceManagementScripts.ReadWrite.All')
+                $a2 = Test-InsightRemediationsAvailable -Context $fctx
+                $Global:AccessToken.Scopes = $saveScopes
+                Test-Smoke '403 with the old scope only: "Missing permission DeviceManagementScripts.ReadWrite.All - confirm it", not the license hint' ($a1.MissingScope -eq 'DeviceManagementScripts.ReadWrite.All' -and $a1.Reason -like 'Missing permission DeviceManagementScripts.ReadWrite.All - confirm it*') $a1.Reason
+                Test-Smoke '403 with the scope granted: license hint, and it can take a few minutes' (-not $a2.MissingScope -and $a2.Reason -like '*wait a few minutes*') $a2.Reason
                 Remove-Item $flag -Force
                 $ui.BtnStepsAgain.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
                 $s.Phase = 2; return $false
@@ -1482,6 +1492,23 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 if (-not (Test-Idle)) { return $false }
                 $app = Get-SelectedTenantApp
                 Test-Smoke 'assignment section shows the current state (none yet in the fake Graph), groups info present' ($ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.RbAsgNone.IsChecked -and $ui.TxtAsgInfo.Text -like '*all-users assignment*') $ui.TxtAsgInfo.Text
+                # The segmented control fits the panel at the smallest window width and 100/125/150%
+                $bad = New-Object System.Collections.ArrayList
+                $w0 = $window.Width
+                foreach ($ww in 1280, 1080) {
+                    $window.Width = $ww
+                    foreach ($sc in 1.0, 1.25, 1.5) {
+                        $ui.RootGrid.LayoutTransform = New-Object System.Windows.Media.ScaleTransform $sc, $sc
+                        $window.UpdateLayout()
+                        foreach ($r in $ui.RbAsgRequired, $ui.RbAsgAvailable, $ui.RbAsgUninstall, $ui.RbAsgNone) {
+                            if (($r.ActualWidth + 0.5) -lt $r.DesiredSize.Width) { [void]$bad.Add("$($r.Content)@$ww/$sc narrower than its content") }
+                            $right = $r.TransformToAncestor($ui.GbTenantAssign).Transform((New-Object System.Windows.Point $r.ActualWidth, 0)).X
+                            if ($right -gt $ui.GbTenantAssign.ActualWidth + 1) { [void]$bad.Add("$($r.Content)@$ww/$sc runs out of the panel ($([int]$right) > $([int]$ui.GbTenantAssign.ActualWidth))") }
+                        }
+                    }
+                }
+                $window.Width = $w0; $ui.RootGrid.LayoutTransform = [System.Windows.Media.Transform]::Identity; $window.UpdateLayout()
+                Test-Smoke 'assignment segments fit the panel (window 1280 and 1080, 100/125/150%): no segment clipped, none outside the panel' ($bad.Count -eq 0) ($bad -join '; ')
                 $script:AsgSeq = @('Required', 'Available', 'Uninstall', 'None'); $script:AsgIdx = 0; $script:AsgResults = @()
                 $script:ConfirmAsked = New-Object System.Collections.ArrayList
                 $ui.RbAsgRequired.IsChecked = $true
@@ -1631,7 +1658,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         function New-FakeToken([string]$Name, [bool]$Consent = $false) {
             $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("{`"name`":`"$Name`",`"upn`":`"admin@contoso.onmicrosoft.com`",`"tid`":`"t-1`"}")).TrimEnd('=').Replace('+', '-').Replace('/', '_')
             [pscustomobject]@{ token_type = 'Bearer'; expires_in = 3600; access_token = "x.$claims.y"; refresh_token = "refresh-$Name"
-                scope = ('https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All' + $(if ($Consent) { ' https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All https://graph.microsoft.com/Sites.Selected' } else { '' })) }
+                scope = ('https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All' + $(if ($Consent) { ' https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All https://graph.microsoft.com/Sites.Selected https://graph.microsoft.com/DeviceManagementScripts.ReadWrite.All' } else { '' })) }
         }
         switch ($s.Phase) {
             0 {

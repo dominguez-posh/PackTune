@@ -34,9 +34,10 @@ $script:FunctionScopes = [ordered]@{
     'Get-InsightAppInstallStatus'    = @('DeviceManagementApps.Read.All')
     'Get-InsightAppInstallSummary'   = @('DeviceManagementApps.Read.All')
     'Set-InsightAllUsersAssignment'  = @('DeviceManagementApps.ReadWrite.All')
-    'Get-InsightStatusScriptState'   = @('DeviceManagementConfiguration.Read.All')
-    'Set-InsightStatusScript'        = @('DeviceManagementConfiguration.ReadWrite.All')
-    'Get-InsightDeviceRunStates'     = @('DeviceManagementConfiguration.Read.All', 'DeviceManagementManagedDevices.Read.All')
+    # Remediations (deviceHealthScripts) are governed by the Scripts permissions (Microsoft Learn: List / Create deviceHealthScripts), not by DeviceManagementConfiguration
+    'Get-InsightStatusScriptState'   = @('DeviceManagementScripts.Read.All')
+    'Set-InsightStatusScript'        = @('DeviceManagementScripts.ReadWrite.All')
+    'Get-InsightDeviceRunStates'     = @('DeviceManagementScripts.Read.All', 'DeviceManagementManagedDevices.Read.All')
 }
 
 function Set-TenantInsightHooks {
@@ -576,7 +577,8 @@ function Test-InsightRemediationsAvailable {
     <#
         Remediations need Windows Enterprise E3/E5 (Microsoft 365 F3/E3/E5), Education A3/A5 or Windows VDA per user
         (Microsoft Learn, "Use Remediations"). The licence is per user of the device, so only Graph's refusal can be
-        detected here; the result says why. Scopes: DeviceManagementConfiguration.Read.All.
+        detected here; the result says why. Scopes: DeviceManagementScripts.Read.All. A 403 while the sign-in lacks that scope is a missing
+        permission (MissingScope), not the license; the license confirmation in the Intune admin center can take a few minutes to apply.
     #>
     param([Parameter(Mandatory)]$Context)
     try {
@@ -585,8 +587,13 @@ function Test-InsightRemediationsAvailable {
     }
     catch {
         $Text = $_.Exception.Message
-        $Reason = if ($Text -match '(?i)licen|subscription|not enabled|forbidden|\b403\b') { "Remediations are not available in this tenant ($Text)" } else { "Remediations could not be queried ($Text)" }
-        [pscustomobject]@{ Available = $false; Reason = $Reason }
+        $Refused = $Text -match '(?i)licen|subscription|not enabled|forbidden|verboten|\b403\b'
+        $Have = @($Global:AccessToken.Scopes | ForEach-Object { ([string]$_) -replace '^https://graph\.microsoft\.com/', '' })
+        $Missing = if ($Refused -and $Have.Count -and -not ($Have -contains 'DeviceManagementScripts.ReadWrite.All' -or $Have -contains 'DeviceManagementScripts.Read.All')) { 'DeviceManagementScripts.ReadWrite.All' } else { $null }
+        $Reason = if ($Missing) { "Missing permission $Missing - confirm it (Confirm now)." }
+        elseif ($Refused) { "Remediations are not available in this tenant ($Text). If you just confirmed the Windows license in the Intune admin center, wait a few minutes and check again." }
+        else { "Remediations could not be queried ($Text)" }
+        [pscustomobject]@{ Available = $false; Reason = $Reason; MissingScope = $Missing }
     }
 }
 
@@ -606,7 +613,7 @@ function Set-InsightStatusScript {
     #>
     param([Parameter(Mandatory)]$Context)
     $Availability = Test-InsightRemediationsAvailable $Context
-    if (-not $Availability.Available) { return [pscustomobject]@{ Created = $false; Id = $null; Message = $Availability.Reason } }
+    if (-not $Availability.Available) { return [pscustomobject]@{ Created = $false; Id = $null; Message = $Availability.Reason; MissingScope = $Availability.MissingScope } }
     $Bytes = (New-Object Text.UTF8Encoding($false)).GetBytes((Get-InsightStatusScriptText))
     $Body = @{
         displayName = $script:StatusScriptName; description = 'Reports the last install and update result of the apps managed by PackTune (detection only).'
@@ -637,7 +644,7 @@ function Initialize-InsightStatusReport {
     $Availability = Test-InsightRemediationsAvailable $Context
     if (-not $Availability.Available) {
         Write-Host "Step 2/5 error: $($Availability.Reason)"
-        return [pscustomobject]@{ Created = $false; Id = $null; Message = $Availability.Reason; LicenseLikely = [bool]($Availability.Reason -match '(?i)licen|forbidden|verboten|\b403\b') }
+        return [pscustomobject]@{ Created = $false; Id = $null; Message = $Availability.Reason; MissingScope = $Availability.MissingScope; LicenseLikely = [bool](-not $Availability.MissingScope -and $Availability.Reason -match '(?i)licen|forbidden|verboten|\b403\b') }
     }
     Write-Host 'Step 2/5 done: Remediations are available'
     Write-Host 'Step 3/5 running: Creating the status script (detection only, runs as SYSTEM)'

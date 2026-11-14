@@ -1229,7 +1229,7 @@ $script:StatusAdminUrl = 'https://intune.microsoft.com/#view/Microsoft_Intune_De
 function Get-StatusMissingScopes {
     # Scopes the status report functions need that the sign-in does not carry (Get-InsightRequiredScopes via Test-InsightReadiness)
     if (-not $Global:AccessToken -or -not $Global:AccessToken.Scopes) { return @() }
-    @(Test-InsightReadiness -GrantedScopes @($Global:AccessToken.Scopes) | Where-Object { $_.Function -in 'Get-InsightStatusScriptState', 'Set-InsightStatusScript' -and -not $_.Ready } | ForEach-Object { $_.Missing } | Select-Object -Unique)
+    @(Test-InsightReadiness -GrantedScopes @($Global:AccessToken.Scopes) | Where-Object { $_.Function -in 'Get-InsightStatusScriptState', 'Set-InsightStatusScript', 'Get-InsightDeviceRunStates' -and -not $_.Ready } | ForEach-Object { $_.Missing } | Select-Object -Unique)
 }
 function Set-StatusDialogButtons([bool]$Running, [bool]$Failed, [bool]$License) {
     $ui.BtnStepsAgain.Visibility = ConvertTo-Vis ($Failed -and -not $Running)
@@ -1279,8 +1279,12 @@ function Start-StatusScriptSetup {
         }
         else {
             $license = $r -and $r.LicenseLikely
-            if ($license) {
-                $ui.TxtStepsNote.Text = "Most likely the license confirmation is missing: in the Intune admin center open Tenant administration > Connectors and tokens > Windows data and switch on 'I confirm that my tenant owns one of these licenses' (Windows Enterprise E3/E5 or equivalent). Then click Check again."
+            if ($r -and $r.MissingScope) {
+                $ui.TxtStepsNote.Text = "Missing permission $($r.MissingScope): Microsoft moved Remediations to this permission. Close this window, use Confirm now on the Start page (App registration), then set up the status report again."
+                $ui.BoxStepsNote.Visibility = 'Visible'
+            }
+            elseif ($license) {
+                $ui.TxtStepsNote.Text = "The permission is there, so most likely the license confirmation is missing or not applied yet: in the Intune admin center open Tenant administration > Connectors and tokens > Windows data and switch on 'I confirm that my tenant owns one of these licenses' (Windows Enterprise E3/E5 or equivalent). It can take a few minutes to apply; then click Check again."
                 $ui.BoxStepsNote.Visibility = 'Visible'
             }
             if ($r) { Write-UiLog "Status report: $($r.Message)" 'Warning' }
