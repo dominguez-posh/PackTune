@@ -230,10 +230,11 @@ foreach ($Case in $Cases) {
     Test-Check "$Label last result uses the schema of the status script" ((Get-FunctionText $Install 'Save-LastResult') -match 'lastAttempt = ' -and (Get-FunctionText $Install 'Save-LastResult') -match 'installedVersion = ' -and (Get-FunctionText $Install 'Save-LastResult') -match 'targetVersion = ' -and (Get-FunctionText $Install 'Save-LastResult') -notmatch '\bTime = ')
     Test-Check "$Label notify.ps1 has update, close warning and restart prompts" ($Notify -match 'restart\.json' -and $Notify -match 'CloseAt' -and $Notify -match 'Software update')
     $TaskFolder = if ($Case.Source -eq "Winget") { "PackTune\Winget" } else { "PackTune\Chocolatey" }
-    Test-Check "$Label notify.ps1 starts the task of its source" ($Notify.Contains("\$TaskFolder\Update"))
+    Test-Check "$Label notify.ps1 starts the task of its source (task folder of the source, task name Update <package> now)" ($Notify.Contains('$TaskPath = "\' + $TaskFolder + '\"') -and $Notify.Contains('($Action.TaskPath + "Update " + $Action.Package + " now")'))
     Test-Check "$Label install.ps1 copies the helpers" ($Install -match '"update\.ps1", "notify\.ps1", "probe\.ps1"')
     # Every file install.ps1 copies from its own folder is in the package and in the sandbox lab project (the lab once missed probe.ps1)
-    $Helpers = @(Get-CopiedHelpers $Install)
+    # icon.png is optional (the icon of the package for the notifications)
+    $Helpers = @(Get-CopiedHelpers $Install | Where-Object { $_ -ne "icon.png" })
     $Lab = Join-Path $Folder "lab"; New-Item -Path $Lab -ItemType Directory -Force | Out-Null
     Copy-LabPackageFiles -SourcePath (Join-Path $Folder "source") -Destination $Lab
     $MissingSource = @($Helpers | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Folder "source\$_")) })
