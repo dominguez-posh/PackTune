@@ -387,7 +387,7 @@ $script:ConfirmFrame = $null
 $script:ConfirmAnswer = $false
 function Confirm-Action([string]$Message, [string]$Title = 'PackTune', [string]$YesLabel = 'Continue', [string]$NoLabel = 'Cancel') {
     # The app's own confirmation (card above everything, Enter = yes, Esc = no). Returns the answer; the window keeps running meanwhile.
-    if ($env:PACKTUNE_SMOKE -and -not $script:ConfirmDialogTest) { return $true }
+    if ($env:PACKTUNE_SMOKE -and -not $script:ConfirmDialogTest) { if (-not $script:ConfirmAsked) { $script:ConfirmAsked = New-Object System.Collections.ArrayList }; [void]$script:ConfirmAsked.Add(@($Title, $Message)); return ($null -eq $script:ConfirmSmokeAnswer -or [bool]$script:ConfirmSmokeAnswer) }
     if ($script:ConfirmFrame) { return $false }
     $ui.ConfirmTitle.Text = $Title
     $ui.ConfirmText.Text = $Message
@@ -3122,28 +3122,52 @@ Get-PackTuneTenantApps | ForEach-Object {
 }
 Add-Click $ui.BtnTenantRefresh { $script:TenantApps = $script:TenantApps; Start-TenantRefresh }
 
+$script:CountsCacheSeconds = 120
+function Get-ShortCountError([string]$Raw) {
+    $c = Get-FriendlyCause $Raw
+    if ($c -like 'No permission*') { 'No permission' } elseif ($c -like 'Not available*') { 'Not available' } elseif ($c -like "Can't reach*") { "Can't reach Graph" } elseif ($c -like 'The sign-in expired*') { 'Sign in again' } else { "Can't read" }
+}
 function Start-CountsTask {
-    $ids = @($script:TenantApps | Where-Object { -not $_.IsChocolatey -and $_.Package } | ForEach-Object { $_.Id })
+    # Intune's install summary per app (one small call each, DeviceManagementApps.Read.All), a short cache so the list does not hammer Graph
+    $ids = @($script:TenantApps | Where-Object { -not $_.IsChocolatey -and $_.Package } | ForEach-Object { $_.Id } | Where-Object {
+        $c = $script:DeviceCounts[$_]; -not $c -or $c.Error -or -not $c.Fetched -or ((Get-Date) - [datetime]$c.Fetched).TotalSeconds -gt $script:CountsCacheSeconds })
     if ($ids.Count -eq 0 -or (Test-TaskRunning 'counts')) { return }
-    $work = @'
+    $work = '
 param($Ids, $Fake)
 $Ctx = if ($Fake) { New-InsightGraphContext -Invoke ([scriptblock]::Create($Fake)) } else { New-InsightGraphContext }
 foreach ($Id in $Ids) {
-    try { $S = Get-InsightAppInstallStatus -Context $Ctx -AppId $Id; [pscustomobject]@{ Id = $Id; Installed = $S.Installed; Failed = $S.Failed; Pending = $S.Pending; Stale = $S.NotReported7Days } }
-    catch { [pscustomobject]@{ Id = $Id; Error = $_.Exception.Message } }
+    try { $S = Get-InsightAppInstallSummary -Context $Ctx -AppId $Id; [pscustomobject]@{ Id = $Id; Installed = $S.Installed; Failed = $S.Failed; Pending = $S.Pending; NotInstalled = $S.NotInstalled; NotApplicable = $S.NotApplicable; Fetched = $S.Fetched } }
+    catch { [pscustomobject]@{ Id = $Id; Error = $_.Exception.Message; Fetched = (Get-Date) } }
 }
-'@
+'
     [void](Start-UiTask -Kind 'counts' -Title 'Reading the install counts' -Hidden -NeedsAuth -Arguments @{ Ids = $ids; Fake = $script:InsightFake } -Work $work -OnDone {
         param($Result, $Job)
-        foreach ($r in @($Result | Where-Object { $_ -and $_.Id })) { $script:DeviceCounts[$r.Id] = $r }
+        foreach ($r in @($Result | Where-Object { $_ -and $_.Id })) {
+            if ($r.Error) { Write-UiLog "Install counts of $($r.Id): $($r.Error)" 'Warning' }
+            $script:DeviceCounts[$r.Id] = $r
+        }
         Update-TenantRows
+        try { Update-TenantButtons } catch { }
     })
 }
+function Update-TenantSummary($App) {
+    $isDep = $App.IsChocolatey -or $App.IsDependency
+    $ui.BoxTenantSummary.Visibility = ConvertTo-Vis (-not $isDep)
+    if ($isDep) { return }
+    $c = $script:DeviceCounts[$App.Id]
+    foreach ($n in 'Installed', 'Failed', 'Pending', 'NotInstalled') { $ui["TxtSum$n"].Text = '-'; $ui["TxtSum$n"].Foreground = [System.Windows.Media.Brushes]::Black }
+    if (-not $c) { $ui.TxtSumInfo.Text = 'Reading the install counts from Intune ...'; return }
+    if ($c.Error) { $ui.TxtSumInfo.Text = "Could not read the counts: $(Get-FriendlyCause $c.Error)"; return }
+    $ui.TxtSumInstalled.Text = [string]$c.Installed; $ui.TxtSumFailed.Text = [string]$c.Failed; $ui.TxtSumPending.Text = [string]$c.Pending; $ui.TxtSumNotInstalled.Text = [string]$c.NotInstalled
+    if ($c.Failed) { $ui.TxtSumFailed.Foreground = ConvertTo-Brush '#A11D1D' }
+    $ui.TxtSumInfo.Text = "From Intune's install summary, read $(([datetime]$c.Fetched).ToString('HH:mm'))$(if ($c.NotApplicable) { ", $($c.NotApplicable) not applicable" })."
+}
+Add-Click $ui.BtnSumStatus { $app = Get-SelectedTenantApp; if ($app) { Show-Page 'Status' } }
 
 function Get-IntentText($App) {
     if ($App.IsChocolatey -or $App.IsDependency) { return 'Automatic' }
     $i = @([string]$App.Intents -split ',' | Where-Object { $_ })
-    if ($i -contains 'required') { 'Required' } elseif ($i -contains 'available') { 'Available' } else { 'None' }
+    if ($i -contains 'required') { 'Required' } elseif ($i -contains 'available') { 'Available' } elseif ($i -contains 'uninstall') { 'Uninstall' } else { 'None' }
 }
 
 function Update-TenantRows {
@@ -3184,8 +3208,9 @@ function Update-TenantRows {
         $isDep = $app.IsChocolatey -or $app.IsDependency
         $title = if ($app.IsOld) { "$($app.DisplayName) (old)" } elseif ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
         $sub = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($app.IsDependency) { 'Dependency of all apps: Chocolatey and winget for SYSTEM' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" }
-        $ok = if ($count -and -not $count.Error) { "$($count.Installed) installed" } elseif ($isDep) { '' } else { '-' }
-        $bad = if ($count -and -not $count.Error) { @($(if ($count.Failed) { "$($count.Failed) failed" }), $(if ($count.Pending) { "$($count.Pending) pending" })) | Where-Object { $_ } | Select-Object -First 1 } else { '' }
+        $ok = if ($count -and -not $count.Error) { "$($count.Installed) installed" } elseif ($count -and $count.Error) { Get-ShortCountError $count.Error } elseif ($isDep) { '' } else { '...' }
+        $bad = if ($count -and -not $count.Error) { @($(if ($count.Failed) { "$($count.Failed) failed" }), $(if ($count.Pending) { "$($count.Pending) pending" })) | Where-Object { $_ } | Select-Object -First 2 } else { '' }
+        $bad = (@($bad) -join " $([char]0x00B7) ").Trim()
         $updates = if ($isDep) { 'Updated daily' } elseif ($app.UpdateMode -eq 'Custom') { "Ask user, $(if ($app.GraceHours % 24 -eq 0) { "$($app.GraceHours / 24) days" } else { "$($app.GraceHours) h" })" } elseif ($app.UpdateMode -eq 'Off') { 'Off' } else { if ($app.Schedule.TriggerStart -and -not $app.Schedule.TriggerWindow) { 'At startup' } else { 'Automatic' } }
         $icon = Get-TenantAppIcon $app
         New-Row (@{
@@ -3366,6 +3391,85 @@ function Show-TenantPolicy($App) {
         })
 }
 
+# ---- assignment for all users: one click, applied as a job with the step list; group assignments stay
+$script:AssignInfo = @{}            # app id -> @{ Intent; Groups; AllIntents }
+$script:AssignUpdating = $false
+$script:AssignStepTitles = @('Read the current assignments', 'Remove the old all-users assignment', 'Assign to all users', 'Check the result')
+function Get-AssignRadio([string]$Intent) { switch ($Intent) { 'required' { $ui.RbAsgRequired } 'available' { $ui.RbAsgAvailable } 'uninstall' { $ui.RbAsgUninstall } default { $ui.RbAsgNone } } }
+function Set-AssignRadios($Intent, [bool]$Enabled) {
+    $script:AssignUpdating = $true
+    try { (Get-AssignRadio $Intent).IsChecked = $true }
+    finally { $script:AssignUpdating = $false }
+    foreach ($r in $ui.RbAsgRequired, $ui.RbAsgAvailable, $ui.RbAsgUninstall, $ui.RbAsgNone) { $r.IsEnabled = $Enabled }
+}
+function Update-TenantAssign($App) {
+    $isDep = $App.IsChocolatey -or $App.IsDependency
+    $ui.GbTenantAssign.Visibility = ConvertTo-Vis (-not $isDep)
+    if ($isDep) { return }
+    $info = $script:AssignInfo[$App.Id]
+    $busy = Test-TaskRunning 'assign'
+    if (-not $info) {
+        Set-AssignRadios 'none' $false
+        $ui.TxtAsgInfo.Text = 'Reading the assignments ...'
+        Start-AssignRead $App
+        return
+    }
+    Set-AssignRadios $(if ($info.Intent) { $info.Intent } else { 'none' }) ((Test-SignedIn) -and -not $busy)
+    $ui.TxtAsgInfo.Text = "$(if ($info.Groups) { "Groups: $($info.Groups) (read only, kept as they are). " })Only the all-users assignment of PackTune is changed here."
+}
+function Start-AssignRead($App) {
+    if (Test-TaskRunning 'assignread') { return }
+    $work = 'param($Id, $Fake) $Ctx = if ($Fake) { New-InsightGraphContext -Invoke ([scriptblock]::Create($Fake)) } else { New-InsightGraphContext }; $a = Get-InsightAllUsersAssignment -Context $Ctx -AppId $Id; [pscustomobject]@{ Id = $Id; Intent = $a.Intent; Groups = $a.Groups; AllIntents = @($a.AllIntents) }'
+    [void](Start-UiTask -Kind 'assignread' -Title 'Reading the assignments of an app' -Hidden -NeedsAuth -Arguments @{ Id = $App.Id; Fake = $script:InsightFake } -Work $work -OnDone {
+        param($Result, $Job)
+        $r = @($Result | Where-Object { $_ -and $_.Id }) | Select-Object -First 1
+        if ($Job.Status -eq 'succeeded' -and $r) { $script:AssignInfo[$r.Id] = @{ Intent = $r.Intent; Groups = $r.Groups; AllIntents = @($r.AllIntents) } }
+        else { $ui.TxtAsgInfo.Text = "Could not read the assignments: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" }
+        $cur = Get-SelectedTenantApp
+        if ($cur -and $script:AssignInfo[$cur.Id]) { Update-TenantAssign $cur }
+    })
+}
+function Start-AssignChange([string]$Intent, $App) {
+    # Intent: Required | Available | Uninstall | None
+    if (-not $App) { $App = Get-SelectedTenantApp }
+    if (-not $App -or (Test-TaskRunning 'assign')) { return }
+    $word = @{ Required = 'Install'; Available = 'Show in Company Portal'; Uninstall = 'Uninstall'; None = 'None' }[$Intent]
+    if ($Intent -eq 'Uninstall' -and -not (Confirm-Action "Removes the app from all users' devices.`n`n'$($App.DisplayName)' gets the assignment Uninstall for all users: devices that have it uninstall it. Group assignments stay as they are." 'Uninstall for all users' 'Uninstall' 'Cancel')) {
+        $info = $script:AssignInfo[$App.Id]; Set-AssignRadios $(if ($info -and $info.Intent) { $info.Intent } else { 'none' }) $true
+        return
+    }
+    Update-UiToken
+    $model = New-StepModel $script:AssignStepTitles
+    $ui.PanelAsgSteps.Visibility = 'Visible'
+    Set-AssignRadios $Intent $false
+    $work = 'param($Id, $Intent, $Fake) $Ctx = if ($Fake) { New-InsightGraphContext -Invoke ([scriptblock]::Create($Fake)) } else { New-InsightGraphContext }; $r = Set-InsightAllUsersAssignment -Context $Ctx -AppId $Id -Intent $Intent; $a = Get-InsightAllUsersAssignment -Context $Ctx -AppId $Id; [pscustomobject]@{ Id = $Id; Intent = $Intent; Changed = $r.Changed; Groups = $a.Groups; AllIntents = @($a.AllIntents) }'
+    $appId = [string]$App.Id
+    $job = @(Start-UiTask -Kind 'assign' -Title "Assignment of $($App.DisplayName) for all users: $word" -Display "$($App.DisplayName): $word" -NeedsAuth -Arguments @{ Id = $appId; Intent = $Intent; Fake = $script:InsightFake } -Work $work -OnDone {
+        param($Result, $Job)
+        $r = @($Result | Where-Object { $_ -and $_.Id }) | Select-Object -First 1
+        $m = $script:AssignModel
+        Sync-StepModel $m $Job
+        if ($Job.Status -eq 'succeeded' -and $r) {
+            $script:AssignInfo[$r.Id] = @{ Intent = $(if ($r.Intent -eq 'None') { $null } else { $r.Intent.ToLower() }); Groups = $r.Groups; AllIntents = @($r.AllIntents) }
+            $row = @($script:TenantApps | Where-Object { $_.Id -eq $r.Id }) | Select-Object -First 1
+            if ($row) { $row.Intents = (@($r.AllIntents) -join ',') }
+            $path = if (@($r.AllIntents) -contains 'available' -and @($r.AllIntents) -notcontains 'required') { 'supersedence (Available apps)' } else { 'in place (Required or unassigned apps)' }
+            Write-UiLog "[$($Job.Display)] done. A new version is now released through $path." 'Success'
+            Show-Toast "Assignment for all users: $($script:AssignWord)." 'ok'
+        }
+        else { Show-Toast "The assignment could not be changed: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" 'bad' 'Details' { Show-Page 'Activity' } }
+        Update-TenantRows
+        $cur = Get-SelectedTenantApp
+        if ($cur) { Update-TenantAssign $cur }
+    }) | Select-Object -Last 1
+    $script:AssignModel = $model; $script:AssignWord = $word
+    Add-StepBinding $model $job $ui.ListAsgSteps $ui.BarAsgSteps
+}
+foreach ($pair in @(@('RbAsgRequired', 'Required'), @('RbAsgAvailable', 'Available'), @('RbAsgUninstall', 'Uninstall'), @('RbAsgNone', 'None'))) {
+    $ui[$pair[0]].Tag = $pair[1]
+    $ui[$pair[0]].Add_Checked({ param($s) if (-not $script:AssignUpdating) { try { Start-AssignChange ([string]$s.Tag) } catch { Show-Error $_.Exception.Message } } })
+}
+
 function Update-TenantButtons {
     $app = Get-SelectedTenantApp
     $on = [bool]$app
@@ -3378,6 +3482,8 @@ function Update-TenantButtons {
     $tenantIcon = Get-TenantAppIcon $app; $ui.ImgTenant.Source = ConvertTo-ImageSource $tenantIcon; $ui.TxtTenantMono.Visibility = ConvertTo-Vis (-not $tenantIcon)
     $ui.TxtTenantAppTitle.Text = if ($app.IsOld) { "$($app.DisplayName) (old)" } elseif ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
     $ui.TxtTenantAppSub.Text = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($isDep) { 'Dependency of every app, updated daily' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source) $([char]0x00B7) $(Get-IntentText $app)" }
+    Update-TenantSummary $app
+    Update-TenantAssign $app
     $busy = Test-TaskRunning 'policy'
     $ui.BtnTenantOpen.IsEnabled = $true
     $ui.BtnTenantRemove.IsEnabled = (Test-SignedIn) -and -not (Test-TaskRunning 'remove') -and -not $app.IsDependency

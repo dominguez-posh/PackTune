@@ -32,6 +32,8 @@ $script:FunctionScopes = [ordered]@{
     'Get-InsightTenantApps'          = @('DeviceManagementApps.Read.All')
     'Set-InsightAppTakeOver'         = @('DeviceManagementApps.ReadWrite.All')
     'Get-InsightAppInstallStatus'    = @('DeviceManagementApps.Read.All')
+    'Get-InsightAppInstallSummary'   = @('DeviceManagementApps.Read.All')
+    'Set-InsightAllUsersAssignment'  = @('DeviceManagementApps.ReadWrite.All')
     'Get-InsightStatusScriptState'   = @('DeviceManagementConfiguration.Read.All')
     'Set-InsightStatusScript'        = @('DeviceManagementConfiguration.ReadWrite.All')
     'Get-InsightDeviceRunStates'     = @('DeviceManagementConfiguration.Read.All', 'DeviceManagementManagedDevices.Read.All')
@@ -411,6 +413,67 @@ function Get-InsightErrorCause {
     return "error $Hex"
 }
 
+function Get-InsightAppInstallSummary {
+    <#
+        How many devices have an app in which state, from Intune's own summary (beta: GET /deviceAppManagement/mobileApps/{id}/installSummary):
+        one small call per app instead of one row per device. Scopes: DeviceManagementApps.Read.All.
+    #>
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$AppId)
+    $S = Invoke-InsightGraph $Context GET "/beta/deviceAppManagement/mobileApps/$AppId/installSummary"
+    [pscustomobject]@{
+        AppId = $AppId; Installed = [int]$S.installedDeviceCount; Failed = [int]$S.failedDeviceCount; Pending = [int]$S.pendingInstallDeviceCount
+        NotInstalled = [int]$S.notInstalledDeviceCount; NotApplicable = [int]$S.notApplicableDeviceCount; Fetched = (Get-Date)
+    }
+}
+
+function Get-InsightAllUsersAssignment {
+    <# The all-users assignment PackTune manages: its intent (required, available, uninstall) or $null, plus how many group assignments exist (kept as they are). #>
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$AppId)
+    $All = @(Invoke-InsightGraph $Context GET "/beta/deviceAppManagement/mobileApps/$AppId/assignments" -All | Where-Object { $_ })
+    $Users = @($All | Where-Object { [string]$_.target.'@odata.type' -like '*allLicensedUsersAssignmentTarget' })
+    $Groups = @($All | Where-Object { [string]$_.target.'@odata.type' -like '*groupAssignmentTarget' -and [string]$_.target.'@odata.type' -notlike '*exclusion*' })
+    [pscustomobject]@{ Intent = $(if ($Users.Count) { ([string]$Users[0].intent).ToLower() } else { $null }); Assignments = $Users; Groups = $Groups.Count; Other = ($All.Count - $Users.Count - $Groups.Count); AllIntents = @($All | ForEach-Object { ([string]$_.intent).ToLower() } | Where-Object { $_ } | Select-Object -Unique) }
+}
+
+function Set-InsightAllUsersAssignment {
+    <#
+        Sets the assignment for all users of an app: Required (install), Available (Company Portal), Uninstall, or None (removes it). Only the
+        all-users assignment is changed; group assignments, the notification setting and the dependencies stay. Steps are reported as log lines
+        ("Step 2/4 running: ..."). Returns Intent, Previous and the re-read state.
+    #>
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$AppId, [Parameter(Mandatory)][ValidateSet('Required', 'Available', 'Uninstall', 'None')][string]$Intent)
+    Write-Host 'Step 1/4 running: Reading the current assignments'
+    $Before = Get-InsightAllUsersAssignment $Context $AppId
+    Write-Host "Step 1/4 done: All users now: $(if ($Before.Intent) { $Before.Intent } else { 'none' })$(if ($Before.Groups) { ", $($Before.Groups) group assignment(s) stay" })"
+    $Want = $Intent.ToLower()
+    if (($Before.Intent -eq $Want) -or ($Intent -eq 'None' -and -not $Before.Intent)) {
+        foreach ($N in 2, 3, 4) { Write-Host "Step ${N}/4 done: Nothing to change" }
+        return [pscustomobject]@{ Intent = $Intent; Previous = $Before.Intent; Changed = $false; Groups = $Before.Groups }
+    }
+    $Settings = $null
+    Write-Host 'Step 2/4 running: Removing the old all-users assignment'
+    foreach ($A in $Before.Assignments) {
+        if ($A.settings -and -not $Settings) { $Settings = $A.settings }
+        Invoke-InsightGraph $Context DELETE "/beta/deviceAppManagement/mobileApps/$AppId/assignments/$($A.id)" | Out-Null
+    }
+    Write-Host "Step 2/4 done: $(if ($Before.Assignments.Count) { 'Old assignment removed' } else { 'There was none' })"
+    if ($Intent -ne 'None') {
+        Write-Host "Step 3/4 running: Assigning to all users ($Intent)"
+        if (-not $Settings) { $Settings = @{ '@odata.type' = '#microsoft.graph.win32LobAppAssignmentSettings'; notifications = 'showAll' } }
+        $Body = @{ '@odata.type' = '#microsoft.graph.mobileAppAssignment'; intent = $Want; target = @{ '@odata.type' = '#microsoft.graph.allLicensedUsersAssignmentTarget' }; settings = $Settings }
+        try { Invoke-InsightGraph $Context POST "/beta/deviceAppManagement/mobileApps/$AppId/assignments" $Body | Out-Null }
+        catch { Write-Host "Step 3/4 error: $(($_.Exception.Message -replace '\s+', ' ').Trim())"; throw }
+        Write-Host "Step 3/4 done: All users: $Intent"
+    }
+    else { Write-Host 'Step 3/4 done: No all-users assignment wanted' }
+    Write-Host 'Step 4/4 running: Checking the result'
+    $After = Get-InsightAllUsersAssignment $Context $AppId
+    $Ok = if ($Intent -eq 'None') { -not $After.Intent } else { $After.Intent -eq $Want }
+    if (-not $Ok) { Write-Host "Step 4/4 error: Intune shows '$($After.Intent)' for all users instead of '$Want'"; throw "The assignment was not applied: Intune shows '$($After.Intent)'." }
+    Write-Host 'Step 4/4 done: Confirmed in Intune'
+    [pscustomobject]@{ Intent = $Intent; Previous = $Before.Intent; Changed = $true; Groups = $After.Groups }
+}
+
 function Get-InsightAppInstallStatus {
     <#
         Device install status of one app (beta: GET /deviceAppManagement/mobileApps/{id}/deviceStatuses; the v1.0
@@ -675,5 +738,5 @@ function Expand-InsightLogs {
 Export-ModuleMember -Function Set-TenantInsightHooks, New-InsightGraphContext, Invoke-InsightGraph, Get-InsightRequiredScopes, Get-InsightScopeSet,
 Get-InsightTokenScopes, Test-InsightReadiness, Get-InsightGrantedScopes, Get-InsightCommandInfo, Get-InsightClassification, Get-InsightTenantApps,
 Set-InsightAppTakeOver, Export-InsightManagedApps, Read-InsightExportFile, Test-InsightFeedUrl, Get-InsightOtherTenantContext, New-InsightRecreatedApps,
-Get-InsightErrorCause, Get-InsightAppInstallStatus, Get-InsightStatusScriptText, Test-InsightRemediationsAvailable, Get-InsightStatusScriptState,
+Get-InsightErrorCause, Get-InsightAppInstallStatus, Get-InsightAppInstallSummary, Get-InsightAllUsersAssignment, Set-InsightAllUsersAssignment, Get-InsightStatusScriptText, Test-InsightRemediationsAvailable, Get-InsightStatusScriptState,
 Set-InsightStatusScript, Initialize-InsightStatusReport, Get-InsightDeviceRunStates, ConvertFrom-InsightRunState, Merge-InsightStatus, Get-InsightDiagnosticsInfo, Expand-InsightLogs

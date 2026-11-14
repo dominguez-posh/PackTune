@@ -10,6 +10,27 @@ if ($P -like '*/deviceStatuses*') {
         @{ deviceId = 'md-4'; deviceName = 'PC-0002'; userPrincipalName = 'shared@example.test'; installState = 'installed'; installStateDetail = 'ok'; displayVersion = '26.6.0'; lastSyncDateTime = $Now.AddDays(-12).ToString('o') }
     ) }
 }
+if ($P -like '*/installSummary') {
+    if (Test-Path (Join-Path $Dir 'fake-summary-down.txt')) { throw 'Graph GET failed (403): forbidden (fake)' }
+    return @{ installedDeviceCount = 12; failedDeviceCount = 1; pendingInstallDeviceCount = 3; notInstalledDeviceCount = 4; notApplicableDeviceCount = 2; installedUserCount = 11; failedUserCount = 1; pendingInstallUserCount = 3; notInstalledUserCount = 4 }
+}
+if ($P -like '*/mobileApps/*/assignments*') {
+    $Id = (($P -split '/mobileApps/')[1] -split '/')[0]
+    $F = Join-Path $Dir 'fake-assignments.json'
+    $All = @{}
+    if (Test-Path $F) { $o = Get-Content $F -Raw | ConvertFrom-Json; foreach ($pr in $o.PSObject.Properties) { $All[$pr.Name] = @($pr.Value) } }
+    $List = @($All[$Id] | Where-Object { $_ })
+    if ($Method -eq 'POST') {
+        $n = @{ id = "as-$([guid]::NewGuid().ToString('N').Substring(0, 6))"; intent = [string]$Body.intent; target = @{ '@odata.type' = [string]$Body.target.'@odata.type' }; settings = @{ notifications = [string]$Body.settings.notifications } }
+        $All[$Id] = @($List + $n); ($All | ConvertTo-Json -Depth 8) | Set-Content $F; return $n
+    }
+    if ($Method -eq 'DELETE') {
+        $Aid = ($P -split '/assignments/')[1]
+        $All[$Id] = @($List | Where-Object { $_.id -ne $Aid }); ($All | ConvertTo-Json -Depth 8) | Set-Content $F; return @{}
+    }
+    if (-not $All.ContainsKey($Id) -and $Id -eq 'seed-groups') { return @{ value = @(@{ id = 'g1'; intent = 'available'; target = @{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = 'x' } }, @{ id = 'g2'; intent = 'required'; target = @{ '@odata.type' = '#microsoft.graph.groupAssignmentTarget'; groupId = 'y' } }) } }
+    return @{ value = @($List) }
+}
 if ($P -like '*/deviceHealthScripts/*/deviceRunStates*') {
     $Out = '{"f":[{"p":"7zip.install","s":"c","t":"11:50","a":"upgrade","e":1,"c":"Download blocked by the Chocolatey rate limit","v":"23.1","g":"26.6.0"}],"o":[]}'
     return @{ value = @(@{ detectionState = 'success'; lastStateUpdateDateTime = $Now.ToString('o'); preRemediationDetectionScriptOutput = $Out; managedDevice = @{ id = 'md-1'; deviceName = 'PC-0142'; userPrincipalName = 'j.weber@example.test' } }) }

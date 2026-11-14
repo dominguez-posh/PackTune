@@ -619,6 +619,35 @@
                                                     <TextBlock x:Name="TxtTenantAppSub" Style="{StaticResource Hint}"/>
                                                 </StackPanel>
                                             </StackPanel>
+                                            <Border x:Name="BoxTenantSummary" Background="#F7F7F7" CornerRadius="8" Padding="14,10" Margin="0,16,0,0">
+                                                <StackPanel>
+                                                    <TextBlock Text="On devices" Style="{StaticResource FieldLabel}"/>
+                                                    <UniformGrid Columns="4" Margin="0,2,0,0">
+                                                        <StackPanel><TextBlock x:Name="TxtSumInstalled" FontSize="20" FontWeight="SemiBold" Text="-"/><TextBlock Text="installed" Style="{StaticResource Hint}"/></StackPanel>
+                                                        <StackPanel><TextBlock x:Name="TxtSumFailed" FontSize="20" FontWeight="SemiBold" Text="-"/><TextBlock Text="failed" Style="{StaticResource Hint}"/></StackPanel>
+                                                        <StackPanel><TextBlock x:Name="TxtSumPending" FontSize="20" FontWeight="SemiBold" Text="-"/><TextBlock Text="pending" Style="{StaticResource Hint}"/></StackPanel>
+                                                        <StackPanel><TextBlock x:Name="TxtSumNotInstalled" FontSize="20" FontWeight="SemiBold" Text="-"/><TextBlock Text="not installed" Style="{StaticResource Hint}" TextWrapping="Wrap"/></StackPanel>
+                                                    </UniformGrid>
+                                                    <TextBlock x:Name="TxtSumInfo" Style="{StaticResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                                                    <Button x:Name="BtnSumStatus" Content="Per device details ..." HorizontalAlignment="Left" Margin="0,8,0,0" Padding="14,5"/>
+                                                </StackPanel>
+                                            </Border>
+                                            <StackPanel x:Name="GbTenantAssign" Margin="0,18,0,0">
+                                                <TextBlock Text="Assignment (all users)" Style="{StaticResource FieldLabel}"/>
+                                                <Border x:Name="BoxAssignSeg" Style="{StaticResource Segmented}" HorizontalAlignment="Left" AutomationProperties.Name="Assignment for all users">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <RadioButton x:Name="RbAsgRequired" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="Install" ToolTip="Required: installed on all users' devices"/>
+                                                        <RadioButton x:Name="RbAsgAvailable" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="Company Portal" ToolTip="Available: users install it themselves from the Company Portal"/>
+                                                        <RadioButton x:Name="RbAsgUninstall" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="Uninstall" ToolTip="Removes the app from all users' devices"/>
+                                                        <RadioButton x:Name="RbAsgNone" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="None" ToolTip="Removes the all-users assignment"/>
+                                                    </StackPanel>
+                                                </Border>
+                                                <TextBlock x:Name="TxtAsgInfo" Style="{StaticResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                                                <StackPanel x:Name="PanelAsgSteps" Visibility="Collapsed" Margin="0,8,0,0">
+                                                    <ProgressBar x:Name="BarAsgSteps" Height="6" Minimum="0" Maximum="4" Value="0"/>
+                                                    <StackPanel x:Name="ListAsgSteps" Margin="0,10,0,0"/>
+                                                </StackPanel>
+                                            </StackPanel>
                                             <StackPanel x:Name="GbTenantPolicy" Margin="0,18,0,0">
                                                 <TextBlock Text="Version on devices" Style="{StaticResource FieldLabel}"/>
                                                 <ComboBox x:Name="CmbTenantVersion" HorizontalAlignment="Stretch" AutomationProperties.Name="Version on devices"/>

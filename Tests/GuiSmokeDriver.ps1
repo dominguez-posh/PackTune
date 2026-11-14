@@ -418,7 +418,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'subtitle counts apps and dependency apps' ($ui.TxtTenantCount.Text -like '2 apps and 1 dependency app*contoso*') $ui.TxtTenantCount.Text
         $zip = $rows | Where-Object { $_['Title'] -eq '7-Zip' }
         Test-Smoke 'row shows package, source, version and assignment' ($zip['Sub'] -like '7zip.install*Chocolatey' -and $zip['Assigned'] -eq 'Available' -and $zip['Version'] -eq 'Always newest') ($zip['Sub'] + '|' + $zip['Assigned'] + '|' + $zip['Version'])
-        Test-Smoke 'device counts linked from the install status' ($zip['Ok'] -eq '2 installed' -and $zip['Bad'] -eq '1 failed') ($zip['Ok'] + '|' + $zip['Bad'])
+        Test-Smoke 'On devices column from Intune''s install summary: 12 installed, 1 failed - 3 pending' ($zip['Ok'] -eq '12 installed' -and $zip['Bad'] -eq "1 failed $([char]0x00B7) 3 pending") ($zip['Ok'] + '|' + $zip['Bad'])
         Test-Smoke 'nav badge shows the devices with problems' ($ui.BadgeTenant.Visibility -eq 'Visible' -and $ui.TxtBadgeTenant.Text -like '*problem*') $ui.TxtBadgeTenant.Text
         $ui.LstTenant.SelectedItem = $zip
         Test-Smoke 'panel shows the selected app with version and update mode' ($ui.ScrollTenantApp.Visibility -eq 'Visible' -and $ui.TxtTenantAppTitle.Text -eq '7-Zip' -and $ui.RbTenantStartup.IsChecked -and $ui.CmbTenantVersion.SelectedIndex -eq 0)
@@ -1371,6 +1371,78 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Switch-Tenant 'contoso.onmicrosoft.com' '11111111-2222-3333-4444-555555555555'
         $script:TenantGuidLookup = $null
         $true } }
+    @{ Name = 'install summary card and assignment for all users'; Phase = 0; Do = {
+        param($s)
+        $dir = $env:LOCALAPPDATA
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle)) { return $false }
+                Show-Page 'Tenant'
+                $row = @($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0]
+                $ui.LstTenant.SelectedItem = $row
+                Test-Smoke 'summary card: installed / failed / pending / not installed from the install summary, with time and a link to the Status page' ($ui.BoxTenantSummary.Visibility -eq 'Visible' -and $ui.TxtSumInstalled.Text -eq '12' -and $ui.TxtSumFailed.Text -eq '1' -and $ui.TxtSumPending.Text -eq '3' -and $ui.TxtSumNotInstalled.Text -eq '4' -and $ui.TxtSumInfo.Text -like 'From Intune*read*' -and $ui.BtnSumStatus.IsEnabled) "$($ui.TxtSumInstalled.Text)/$($ui.TxtSumFailed.Text)/$($ui.TxtSumPending.Text)/$($ui.TxtSumNotInstalled.Text) $($ui.TxtSumInfo.Text)"
+                # a failing call shows the mapped cause, not "-"
+                Set-Content (Join-Path $dir 'fake-summary-down.txt') 'x'
+                $script:DeviceCounts.Clear(); $script:CountsCacheSeconds = 0
+                Start-CountsTask
+                $s.Phase = 1; return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                Remove-Item (Join-Path $dir 'fake-summary-down.txt') -Force
+                $row = @($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0]
+                Test-Smoke 'summary failure: column shows the short cause, the card the mapped cause (no raw text, no "-")' ($row['Ok'] -eq 'No permission' -and $ui.TxtSumInfo.Text -like 'Could not read the counts: No permission*' -and $ui.TxtSumInfo.Text -notmatch 'Graph GET') "$($row['Ok']) / $($ui.TxtSumInfo.Text)"
+                $script:CountsCacheSeconds = 120
+                Start-CountsTask
+                $s.Phase = 2; return $false
+            }
+            2 {
+                if (-not (Test-Idle)) { return $false }
+                $app = Get-SelectedTenantApp
+                # the current state is read from the app's assignments (here: the fake has the all-users assignment of the deployment)
+                $script:AssignInfo.Remove($app.Id); Update-TenantAssign $app
+                $s.Phase = 3; return $false
+            }
+            3 {
+                if (-not (Test-Idle)) { return $false }
+                $app = Get-SelectedTenantApp
+                Test-Smoke 'assignment section shows the current state (none yet in the fake Graph), groups info present' ($ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.RbAsgNone.IsChecked -and $ui.TxtAsgInfo.Text -like '*all-users assignment*') $ui.TxtAsgInfo.Text
+                $script:AsgSeq = @('Required', 'Available', 'Uninstall', 'None'); $script:AsgIdx = 0; $script:AsgResults = @()
+                $script:ConfirmAsked = New-Object System.Collections.ArrayList
+                $ui.RbAsgRequired.IsChecked = $true
+                $s.Phase = 4; return $false
+            }
+            4 {
+                if (-not (Test-Idle)) { return $false }
+                $app = Get-SelectedTenantApp
+                $want = $script:AsgSeq[$script:AsgIdx]
+                $intent = @{ Required = 'required'; Available = 'available'; Uninstall = 'uninstall'; None = '' }[$want]
+                $row = @($script:TenantRowList | Where-Object { $_.Data.Id -eq $app.Id })[0]
+                $assigned = @{ Required = 'Required'; Available = 'Available'; Uninstall = 'Uninstall'; None = 'None' }[$want]
+                $info = $script:AssignInfo[$app.Id]
+                $steps = @($script:AssignModel.Steps | ForEach-Object { $_.State }) -join ','
+                $ok = ((-not $info.Intent -and $want -eq 'None') -or $info.Intent -eq $intent) -and $row['Assigned'] -eq $assigned -and $steps -eq 'done,done,done,done'
+                Test-Smoke "assignment $want for all users: applied through the job with its step list, Assigned column and panel updated at once" $ok "$($info.Intent) / $($row['Assigned']) / $steps"
+                if ($want -eq 'Uninstall') { Test-Smoke 'Uninstall asked for a confirmation: removes the app from all users'' devices' (@($script:ConfirmAsked | Where-Object { $_[0] -eq 'Uninstall for all users' -and $_[1] -like '*Removes the app from all users'' devices*' }).Count -eq 1) }
+                $script:AsgIdx++
+                if ($script:AsgIdx -lt $script:AsgSeq.Count) { (Get-AssignRadio ($script:AsgSeq[$script:AsgIdx]).ToLower()).IsChecked = $true; return $false }
+                # declined uninstall: nothing changes, the selection goes back
+                $script:ConfirmSmokeAnswer = $false
+                $ui.RbAsgRequired.IsChecked = $true
+                $s.Phase = 5; return $false
+            }
+            5 {
+                if (-not (Test-Idle)) { return $false }
+                $app = Get-SelectedTenantApp
+                $script:ConfirmAsked.Clear()
+                $ui.RbAsgUninstall.IsChecked = $true
+                Test-Smoke 'Uninstall declined: nothing applied, the control goes back to the real state' ($script:AssignInfo[$app.Id].Intent -eq 'required' -and $ui.RbAsgRequired.IsChecked -and @($script:ConfirmAsked).Count -eq 1 -and -not (Test-TaskRunning 'assign')) "$($script:AssignInfo[$app.Id].Intent)"
+                $script:ConfirmSmokeAnswer = $null
+                # release path follows the assignment: Available -> supersedence, Required -> in place (the log says which)
+                Test-Smoke 'a release path note is logged after a change' ((Get-SmokeLog) -match 'released through supersedence|released through in place')
+                $true
+            }
+        } } }
     @{ Name = 'buttons are not clipped (100%, 125%, 150%)'; Do = {
         function Find-Clipped($e, $list) {
             if ($e -is [System.Windows.Controls.Primitives.ButtonBase] -and $e.IsVisible -and $e.ActualWidth -gt 0 -and ((($e.ActualHeight + 0.5) -lt ($e.DesiredSize.Height - $e.Margin.Top - $e.Margin.Bottom)) -or (($e.ActualWidth + 0.5) -lt ($e.DesiredSize.Width - $e.Margin.Left - $e.Margin.Right)))) { [void]$list.Add("$($e.Name)|$($e.Content)|$([int]$e.ActualWidth)<$([int]$e.DesiredSize.Width)") }
