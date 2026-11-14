@@ -227,6 +227,14 @@ function Get-ErrorText($Record) {
 }
 
 $script:Toasts = New-Object System.Collections.ArrayList
+function Get-ToastText([string]$Text) {
+    # What fits in a toast: one line of text, long paths shortened to their last two folders, at most about three lines; the full text stays in the log (Details)
+    $one = ($Text -replace '\s+', ' ').Trim()
+    $one = [regex]::Replace($one, '(?<![A-Za-z0-9])[A-Za-z]:\\[^\s"''<>|]+', { param($m) $parts = $m.Value.TrimEnd('.', ',', ':', ';', ')').Split('\') ; if ($m.Value.Length -le 40 -or $parts.Count -lt 4) { $m.Value } else { '...\' + ($parts[-2..-1] -join '\') } })
+    if ($one.Length -gt 200) { $one = $one.Substring(0, 197).TrimEnd() + '...' }
+    $one
+}
+$script:ToastActions = @{}
 function Show-Toast([string]$Text, [string]$Kind = 'info', [string]$ActionLabel, [scriptblock]$Action) {
     <# Short message in the corner: what a job did, or what went wrong. Success and info vanish after 6 s, problems after 12 s. #>
     $pill = $script:PillColors[$Kind]; if (-not $pill) { $pill = @('#FFFFFF', '#1B1B1B') }
@@ -241,16 +249,17 @@ function Show-Toast([string]$Text, [string]$Kind = 'info', [string]$ActionLabel,
     $icon.Text = [string]$glyph; $icon.FontFamily = $window.FindResource('IconFont'); $icon.FontSize = 15; $icon.Margin = '0,1,10,0'; $icon.VerticalAlignment = 'Top'
     $icon.Foreground = ConvertTo-Brush $pill[1]
     $label = New-Object System.Windows.Controls.TextBlock
-    $label.Text = $Text; $label.TextWrapping = 'Wrap'; $label.Foreground = ConvertTo-Brush $(if ($Kind -eq 'info') { '#1B1B1B' } else { $pill[1] })
+    $label.Text = (Get-ToastText $Text); $label.ToolTip = $Text; $label.TextWrapping = 'Wrap'; $label.TextTrimming = 'CharacterEllipsis'; $label.MaxHeight = 66; $label.VerticalAlignment = 'Top'; $label.Foreground = ConvertTo-Brush $(if ($Kind -eq 'info') { '#1B1B1B' } else { $pill[1] })
     [System.Windows.Controls.Grid]::SetColumn($label, 1)
     [void]$grid.Children.Add($icon); [void]$grid.Children.Add($label)
     if ($ActionLabel -and $Action) {
         $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = [System.Windows.GridLength]::Auto; [void]$grid.ColumnDefinitions.Add($c)
         $link = New-Object System.Windows.Controls.Button
-        $link.Content = $ActionLabel; $link.Padding = '10,2'; $link.Margin = '10,0,0,0'; $link.MinHeight = 0; $link.VerticalAlignment = 'Top'
+        # Plain text button: the button style draws the Tag as an icon glyph, so the action must not be kept in Tag (it showed as boxes and made the text column narrow)
+        $link.Content = $ActionLabel; $link.Padding = '10,2'; $link.Margin = '10,0,0,0'; $link.MinHeight = 0; $link.VerticalAlignment = 'Top'; $link.Tag = $null
         [System.Windows.Controls.Grid]::SetColumn($link, 2)
-        $link.Add_Click({ param($b, $a) try { & $b.Tag } catch { } }.GetNewClosure())
-        $link.Tag = $Action
+        $script:ToastActions[$link] = $Action
+        $link.Add_Click({ param($b, $a) try { & $script:ToastActions[$b] } catch { } })
         [void]$grid.Children.Add($link)
     }
     $border.Child = $grid
@@ -269,13 +278,17 @@ function Get-FriendlyCause([string]$Raw) {
        The raw text stays in the log and behind Details. #>
     $text = [string]$Raw
     if (-not $text) { return 'Something went wrong.' }
+    if ($text -match '(?i)is not a custom application of this tool or does not exist') { return 'this app is not a custom application of PackTune or was already removed - nothing was removed.' }
+    if ($text -match '(?i)Close Windows Sandbox to continue') { return 'Close Windows Sandbox to continue, then press Retry.' }
+    if ($text -match '(?i)-2147024891|0x80070005|E_ACCESSDENIED|denied access to the package folder') { return 'Windows denied access to the package folder - close Windows Sandbox, wait a minute and try again (see Details).' }
     if ($text -match '(?i)Das Argument kann nicht|Cannot bind argument|cannot be bound|ParameterBinding|leere Zeichenfolge|empty string|empty collection|null or empty') { return 'An internal value was missing (for example no app selected). Nothing was changed; Details has the log.' }
     if ($text -match '(?i)\b403\b|forbidden|verboten|insufficient privileges|Authorization_RequestDenied|access is denied|zugriff verweigert') { return 'No permission: confirm the new permissions or check the license.' }
     if ($text -match '(?i)\b401\b|unauthorized|nicht autorisiert|token.*expired|InvalidAuthenticationToken') { return 'The sign-in expired or is not accepted: sign in again.' }
     if ($text -match '(?i)\b50[0234]\b|service unavailable|bad gateway|gateway time|internal server error|serverfehler') { return 'Microsoft Graph has a problem right now (server error). Try again in a moment.' }
     if ($text -match '(?i)\b40[04]\b|bad request|not found|nicht gefunden|ung(Ã¼|u|ue)ltige anforderung|BadRequest|ResourceNotFound') { return 'Not available in this tenant (Remediations need Windows Enterprise E3/E5 licensing).' }
     if ($text -match '(?i)remoteserver|remote server|remotename|could not be resolved|unable to connect|no such host|timed out|timeout|zeit(Ã¼|u|ue)berschreitung|network|netzwerk|connection (was )?(closed|refused|reset)|Verbindung|name or service not known|SSL|TLS') { return "Can't reach Microsoft Graph." }
-    $one = ($text -replace '\s+', ' ').Trim()
+    # Ids belong under Details (the log), not in the first line
+    $one = ([regex]::Replace($text, '(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', '(id in Details)') -replace '\s+', ' ').Trim()
     if ($one.Length -gt 140) { $one = $one.Substring(0, 137) + '...' }
     $one
 }
@@ -705,6 +718,12 @@ $timer.Add_Tick({
             if ($script:CurrentPage -eq 'Apps') { Update-AppList }
             if (-not (Test-TaskRunning 'meta')) { Complete-MetaPrefetch }
         }
+    # A store check that does not answer: after 90 seconds the item says so instead of "Checking ..." for ever
+    if (-not $script:StoreCheckTimedOut -and @($script:Tasks | Where-Object { $_.Job.Kind -eq 'storecheck' -and $_.Job.Started -and ((Get-Date) - $_.Job.Started).TotalSeconds -gt 90 }).Count) {
+        $script:StoreCheckTimedOut = $true
+        $script:StoreState = [pscustomobject]@{ State = 'NoAccess'; Message = 'SharePoint did not answer in time. It is checked again at the next start or with Check.'; SiteUrl = $null }
+        Update-Readiness
+    }
         if ($script:Tick % 240 -eq 0 -and $script:Shared.Auth) { Update-ConnectionStatus }
     }
     catch { Write-UiLog (Get-ErrorText $_) 'Error' }
@@ -1110,7 +1129,7 @@ function Get-ReadinessItems {
                     Fix = 'Confirm now'; Action = { Connect-Intune -Consent } } }
               else { @{ Key = 'appreg'; Title = 'App registration'; State = 'ok'; Text = "$($script:Settings.TenantID), client ID $($script:Settings.ClientID)." } } }
           else { @{ Key = 'appreg'; Title = 'App registration'; State = 'bad'; Wait = $busyAppReg
-                    Text = $(if ($busyAppReg) { 'Waiting for the administrator sign-in in your browser ...' } elseif (-not $script:Settings.ClientID) { "$(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'This tenant' }) has no app registration yet. Created with admin consent." } else { 'The tenant is missing (Settings).' })
+                    Text = $(if ($busyAppReg) { 'Waiting for the administrator sign-in in your browser ...' } elseif ($script:SetupClientRepaired -and -not $script:Settings.ClientID) { "App registration needed: the saved client ID was Microsoft's setup app (Microsoft Graph Command Line Tools), not PackTune's app registration, and is no longer used. Create finds PackTune's registration in the tenant (owned by you) or creates it, with admin consent." } elseif (-not $script:Settings.ClientID) { "$(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'This tenant' }) has no app registration yet. Created with admin consent." } else { 'The tenant is missing (Settings).' })
                     Fix = $(if ($script:Settings.ClientID) { 'Settings' } else { 'Create' }); Action = $(if ($script:Settings.ClientID) { { Show-Page 'Settings' } } else { { Start-AppRegistration } }) } })
         $(if (Test-SignedIn) { @{ Key = 'signin'; Title = 'Signed in to Intune'; State = 'ok'; Text = $(if ($script:AccountText) { "Signed in as $((Get-AccountInfo).Account)" } else { 'Signed in' }) } }
           else { @{ Key = 'signin'; Title = 'Signed in to Intune'; State = 'bad'; Wait = $busyConnect
@@ -1136,6 +1155,13 @@ function Get-ReadinessItems {
                        Text = "PackTune Runtime is in the tenant. $n app$(if ($n -ne 1) { 's' }) still use$(if ($n -eq 1) { 's' }) the old dependency apps (Chocolatey, winget runtime): switch them over, nothing is removed."
                        Fix = 'Switch'; Action = { Start-RuntimeSwitch } } }
                 else { @{ Key = 'deps'; Title = 'Dependency app (PackTune Runtime)'; State = 'ok'; Text = 'PackTune Runtime is in the tenant; every app depends on it.' } })
+    # More than one PackTune Runtime in the tenant: listed, removed only when the person confirms
+    if ((Test-SignedIn) -and $info -and @($info.RuntimeDuplicates).Count -gt 0) {
+        $dups = @($info.RuntimeDuplicates)
+        $items += @{ Key = 'depsdup'; Title = 'Duplicate PackTune Runtime apps'; State = 'warn'; Wait = (Test-TaskRunning 'depsdup')
+            Text = "$($dups.Count) more app$(if ($dups.Count -ne 1) { 's' }) named PackTune Runtime $(if ($dups.Count -ne 1) { 'are' } else { 'is' }) in the tenant: $(@($dups | ForEach-Object { "$($_.Id) (created $($_.Created))" }) -join ', '). The oldest one ($($info.RuntimeId)) is used."
+            Fix = 'Clean up'; Action = { Start-RuntimeDuplicateCleanup } }
+    }
     $items += $(if (-not (Test-SignedIn)) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = 'Devices report their update log to Intune, so failures show up under In tenant. Needs Remediations (Windows Enterprise E3/E5).' } }
                 elseif ($script:GraphDown -and -not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = "Can't check right now: $($script:GraphDown.Cause)" } }
                 elseif (-not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statuscheck'); Text = 'Checking ...' } }
@@ -1251,7 +1277,8 @@ New-PackTuneAppRegistration @Params
     $arguments = @{ TenantID = $script:Settings.TenantID; Authority = $script:SignInTest.Authority; UrlHandler = $script:SignInTest.UrlHandler; GraphUrl = $script:SignInTest.GraphUrl; Token = $setupToken }
     [void](Start-UiTask -Kind 'appreg' -Title 'Creating the app registration with admin consent' -Display 'App registration' -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
         param($Result, $Job)
-        $reg = @($Result | Where-Object { $_ -and $_.ClientID }) | Select-Object -First 1
+        # Only the result object of the registration (tenant and client ID), never the setup client of a token
+        $reg = @($Result | Where-Object { $_ -and $_.ClientID -and $_.TenantID -and $_.PSObject.Properties['Account'] -and -not (Test-PackTuneSetupClient ([string]$_.ClientID)) }) | Select-Object -First 1
         if ($Job.Status -eq 'succeeded' -and $reg) {
             $s = Get-PackTuneSettings; $s.TenantID = $reg.TenantID; $s.ClientID = $reg.ClientID
             [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings
@@ -1265,6 +1292,22 @@ New-PackTuneAppRegistration @Params
         else { $script:SignInAfterRegistration = $false; Update-ConnectionStatus; Complete-SetupStep $false 'creating the app registration' }
     })
     Update-SignInButton
+    Update-Readiness
+}
+
+function Start-RuntimeDuplicateCleanup {
+    $dups = @($script:RuntimeInfo.RuntimeDuplicates)
+    if ($dups.Count -eq 0 -or (Test-TaskRunning 'depsdup')) { return }
+    $list = @($dups | ForEach-Object { "$($_.DisplayName) $($_.Id), created $($_.Created)" }) -join "`n"
+    if (-not (Confirm-Action "Remove these extra PackTune Runtime apps from Intune?`n`n$list`n`nThe oldest one ($($script:RuntimeInfo.RuntimeId)) stays. An app that other apps depend on is kept." 'Clean up PackTune Runtime')) { return }
+    Update-UiToken
+    $ids = @($dups | ForEach-Object { $_.Id })
+    [void](Start-UiTask -Kind 'depsdup' -Title 'Removing the extra PackTune Runtime apps' -Display 'PackTune Runtime' -NeedsAuth -Arguments @{ Ids = $ids } -Work 'param($Ids) Remove-PackTuneRuntimeDuplicates -AppId $Ids -Confirm:$false' -OnDone {
+        param($Result, $Job)
+        foreach ($r in @($Result | Where-Object { $_ -and $_.PSObject.Properties['Removed'] })) { Write-UiLog "PackTune Runtime $($r.Id): $($r.Message)" $(if ($r.Removed) { 'Success' } else { 'Warning' }) }
+        $script:TenantApps = $null; $script:RuntimeId = $null; $script:RuntimeInfo = $null
+        Start-TenantRefresh
+    })
     Update-Readiness
 }
 
@@ -1907,8 +1950,13 @@ function Get-CustomPackageIconFile {
         New-Item -Path $dir -ItemType Directory -Force | Out-Null
         if ($script:CustomKind -eq 'Msi') {
             if ($script:CustomInfo -and $script:CustomInfo.IconName) {
-                $f = Join-Path $dir 'msi-icon.ico'
-                if (Save-PackTuneMsiIcon -Path $script:CustomInfo.Path -IconName $script:CustomInfo.IconName -Destination $f) { return $f }
+                # The same converter as the upload (ConvertTo-PngBytes: largest frame of the ICO, PNG frames as they are, EXE icons), so preview and Company Portal match
+                $raw = Join-Path $dir 'msi-icon.bin'
+                if (Save-PackTuneMsiIcon -Path $script:CustomInfo.Path -IconName $script:CustomInfo.IconName -Destination $raw) {
+                    $f = Join-Path $dir 'msi-icon.png'
+                    [IO.File]::WriteAllBytes($f, (ConvertTo-PngBytes -Bytes ([IO.File]::ReadAllBytes($raw)) -WorkPath $dir))
+                    return $f
+                }
             }
             return $null
         }
@@ -1916,6 +1964,8 @@ function Get-CustomPackageIconFile {
         if ($entry -like '*.exe' -and $folder) {
             $exe = if ([IO.Path]::IsPathRooted($entry)) { $entry } else { Join-Path $folder $entry }
             if (Test-Path -LiteralPath $exe -PathType Leaf) {
+                $f = Join-Path $dir 'exe-icon.png'
+                try { [IO.File]::WriteAllBytes($f, (ConvertTo-PngBytes -Bytes ([IO.File]::ReadAllBytes($exe)) -WorkPath $dir)); return $f } catch { }
                 Add-Type -AssemblyName System.Drawing
                 $ico = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
                 if ($ico) { $f = Join-Path $dir 'exe-icon.png'; $bmp = $ico.ToBitmap(); $bmp.Save($f, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose(); return $f }
@@ -2337,6 +2387,7 @@ function Save-StoreSiteUrl([string]$Url, [string]$Name) {
 }
 function Start-StoreCheck {
     if (-not (Test-SignedIn) -or (Test-TaskRunning 'storecheck')) { return }
+    $script:StoreCheckTimedOut = $false
     # Tests: no request to Microsoft Graph from the smoke run
     if ($env:PACKTUNE_SMOKE) { $script:StoreState = if ($script:StoreSmokeState) { $script:StoreSmokeState } else { [pscustomobject]@{ State = 'Missing'; Message = 'The PackTune site does not exist in this tenant yet (smoke test). An administrator sets it up once (Set up).'; SiteUrl = 'https://contoso.sharepoint.com/sites/PackTune' } }; Update-Readiness; Update-CustomRows; return }
     Update-UiToken
@@ -2353,10 +2404,10 @@ function Start-StoreCheck {
 }
 function Get-StoreReadinessItems {
     $items = @()
-    $items += if (-not (Test-SignedIn)) { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Text = 'Keeps every version of a custom application in a private SharePoint library, so it can be updated and edited from any PC. Sign in first.' } }
-              elseif (-not $script:StoreState) { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'storecheck'); Text = 'Checking the package store ...'; Fix = 'Check'; Action = { Start-StoreCheck } } }
-              elseif ($script:StoreState.State -eq 'Ready') { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'ok'; Optional = $true; Text = $script:StoreState.Message } }
-              else { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Text = $script:StoreState.Message; Fix = $(if ($script:StoreState.State -in 'Missing', 'NotConfigured', 'NoLibrary') { 'Set up' } else { 'Details' }); Action = { Show-StoreDialog } } }
+    $items += if (-not (Test-SignedIn)) { @{ Key = 'store'; Title = 'Package store (for custom applications)'; State = 'warn'; Optional = $true; Text = 'Keeps every version of a custom application in a private SharePoint library, so it can be updated and edited from any PC. Sign in first.' } }
+              elseif (-not $script:StoreState) { @{ Key = 'store'; Title = 'Package store (for custom applications)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'storecheck'); Text = 'Checking the package store ...'; Fix = 'Check'; Action = { Start-StoreCheck } } }
+              elseif ($script:StoreState.State -eq 'Ready') { @{ Key = 'store'; Title = 'Package store (for custom applications)'; State = 'ok'; Optional = $true; Text = $script:StoreState.Message } }
+              else { @{ Key = 'store'; Title = 'Package store (for custom applications)'; State = 'warn'; Optional = $true; Text = $script:StoreState.Message; Fix = $(if ($script:StoreState.State -in 'Missing', 'NotConfigured', 'NoLibrary') { 'Set up' } elseif ($script:StoreState.State -eq 'NoAccess') { 'Grant access' } else { 'Details' }); Action = $(if ($script:StoreState.State -eq 'NoAccess') { { Start-StoreGrant } } else { { Show-StoreDialog } }) } }
     return $items
 }
 function Update-StoreDialog {
@@ -2408,10 +2459,10 @@ function Start-StoreSetup([string]$SiteName) {
     $script:StoreSteps = New-StepModel @('Sign in (administrator)', 'Create the Microsoft 365 group PackTune', 'Wait for the SharePoint site', 'Add members', 'Create the library', 'Grant PackTune access to the site', 'Check')
     $ui.PanelStoreSteps.Visibility = 'Visible'
     Set-ButtonBusy $ui.BtnStoreSetup $true 'Setting up ...'; $ui.BtnStoreSetup.IsEnabled = $false
-    $setupJob = (Start-UiTask -Kind 'store' -Title 'Setting up the PackTune site (this can take a few minutes while Microsoft 365 makes the site)' -Display 'Package store' -Pool $script:UserPool -Arguments @{ Token = $access; Client = $script:Settings.ClientID; Name = $SiteName; Group = $group; Library = $script:Settings.StoreLibrary } `
-        -Work 'param($Token, $Client, $Name, $Group, $Library) $p = @{ Token = $Token; ClientID = $Client; Library = $Library }; if ($Name) { $p.SiteName = $Name }; if ($Group) { $p.AdminGroup = $Group }; $r = Initialize-PackTuneStoreSite @p; foreach ($s in $r.Steps) { Write-Host $s }; foreach ($w in $r.Warnings) { Write-Warning $w }; $r | Select-Object State, SiteUrl, SiteName, FallbackName, Message' -OnDone {
+    $setupJob = (Start-UiTask -Kind 'store' -Title 'Setting up the PackTune site (this can take a few minutes while Microsoft 365 makes the site)' -Display 'Package store' -Pool $script:UserPool -Arguments @{ Token = $access; Client = (Get-PackTuneAppClientId); Name = $SiteName; Group = $group; Library = $script:Settings.StoreLibrary } `
+        -Work 'param($Token, $Client, $Name, $Group, $Library) $p = @{ Token = $Token; ClientID = $Client; Library = $Library }; if ($Name) { $p.SiteName = $Name }; if ($Group) { $p.AdminGroup = $Group }; $r = Initialize-PackTuneStoreSite @p; foreach ($s in $r.Steps) { Write-Host $s }; foreach ($w in $r.Warnings) { Write-Warning $w }; $r | Select-Object State, SiteUrl, SiteName, SiteId, FallbackName, WrongGrants, Message' -OnDone {
         param($Result, $Job)
-        $script:StoreSetupToken = $null
+        $setupToken = $script:StoreSetupToken; $script:StoreSetupToken = $null
         Set-ButtonBusy $ui.BtnStoreSetup $false ''; Update-StoreDialog
         $r = @($Result | Where-Object { $_ -and $_.State }) | Select-Object -First 1
         if ($Job.Status -ne 'succeeded' -or -not $r) { Show-Toast 'The PackTune site could not be set up, see Activity.' 'bad'; $script:StoreState = $null; Start-StoreCheck; return }
@@ -2427,27 +2478,43 @@ function Start-StoreSetup([string]$SiteName) {
         Write-UiLog "[Package store] $($r.Message)" 'Success'; Write-UiLog $script:StoreGrantConsentNote 'Warning'
         Show-Toast 'The PackTune site is set up.' 'ok'
         $script:StoreState = $null; Start-StoreCheck
+        if ($r.WrongGrants -gt 0) { Confirm-WrongGrantRemoval ([string]$r.SiteId) $setupToken }
     })
     Add-StepBinding $script:StoreSteps $setupJob $ui.ListStoreSteps $ui.BarStoreSteps
     Set-StepState $script:StoreSteps 1 'done' 'Signed in as administrator'
     Show-StepList $script:StoreSteps $ui.ListStoreSteps $ui.BarStoreSteps
 }
 Add-Click $ui.BtnStoreSetup { Start-StoreSetup '' }
-Add-Click $ui.BtnStoreGrant {
+function Confirm-WrongGrantRemoval($SiteId, $Token) {
+    # An earlier version gave the site permission to the setup app of Microsoft instead of PackTune: offered for removal (PackTune does not need it)
+    if (-not $SiteId -or -not $Token) { return }
+    if (-not (Confirm-Action "The setup app of Microsoft ('Microsoft Graph Command Line Tools') still holds a permission on the PackTune site. PackTune put it there by mistake in an earlier version and does not need it.`n`nRemove it now? It uses the sign-in you just made.`n`nRemove: take the permission of the setup app off the site.`nKeep: leave it." 'Wrong site permission' 'Remove' 'Keep')) { return }
+    [void](Start-UiTask -Kind 'store' -Title 'Removing the permission of the setup app from the PackTune site' -Display 'Package store' -Pool $script:UserPool -Arguments @{ Token = $Token; SiteId = $SiteId } -Work 'param($Token, $SiteId) Remove-PackTuneStoreWrongGrants -Token $Token -SiteId $SiteId | Out-Null' -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'succeeded') { Write-UiLog '[Package store] the permission of the setup app was removed from the site.' 'Success' } else { Show-Toast 'The permission of the setup app could not be removed, see Activity.' 'bad' }
+    })
+}
+function Start-StoreGrant {
+    # The administrator confirms PackTune's access to the site once: sign-in through the setup app, then the permission for PackTune's OWN app registration
     if (-not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permission Sites.FullControl.All, which PackTune uses for this one grant only.`n`n$($script:StoreGrantConsentNote)`n`nContinue?" 'Grant access to the SharePoint site' 'Continue' 'Cancel')) { return }
+    $client = Get-PackTuneAppClientId
     $token = $null
     try { $token = Get-EmbeddedToken -TenantID $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'organizations' }) -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Sites.FullControl.All') -Hint 'Sign in with an administrator account: it grants PackTune access to this one SharePoint site.' }
     catch { if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Show-SignInCancelled }; return }
     $role = if ($script:StoreState -and $script:StoreState.State -eq 'NoLibrary') { 'manage' } else { 'write' }
     $access = if ($token) { [string]$token.access_token } else { '' }
-    [void](Start-UiTask -Kind 'store' -Title "Granting PackTune access to the SharePoint site (role $role)" -Display 'Package store' -Pool $script:UserPool -Arguments @{ Site = $script:Settings.StoreSiteUrl; Client = $script:Settings.ClientID; Token = $access; Role = $role } `
-        -Work 'param($Site, $Client, $Token, $Role) if (-not $Site) { $Site = Get-PackTuneStoreSiteUrl }; $p = @{ SiteUrl = $Site; ClientID = $Client; Role = $Role }; if ($Token) { $p.Token = $Token }; Grant-PackTuneStoreAccess @p | Out-Null' -OnDone {
+    $script:StoreSetupToken = $access
+    [void](Start-UiTask -Kind 'store' -Title "Granting PackTune access to the SharePoint site (role $role)" -Display 'Package store' -Pool $script:UserPool -Arguments @{ Site = $script:Settings.StoreSiteUrl; Client = $client; Token = $access; Role = $role } `
+        -Work 'param($Site, $Client, $Token, $Role) if (-not $Site) { $Site = Get-PackTuneStoreSiteUrl }; $p = @{ SiteUrl = $Site; ClientID = $Client; Role = $Role }; if ($Token) { $p.Token = $Token }; Grant-PackTuneStoreAccess @p' -OnDone {
         param($Result, $Job)
+        $tok = $script:StoreSetupToken; $script:StoreSetupToken = $null
+        $r = @($Result | Where-Object { $_ -and $_.SiteId }) | Select-Object -First 1
         if ($Job.Status -eq 'succeeded') { Write-UiLog 'PackTune has access to the SharePoint site now.' 'Success'; Write-UiLog $script:StoreGrantConsentNote 'Warning'; Show-Toast 'Access to the SharePoint site granted.' 'ok' }
         $script:StoreState = $null; Start-StoreCheck
+        if ($Job.Status -eq 'succeeded' -and $r -and $r.WrongGrants -gt 0) { Confirm-WrongGrantRemoval ([string]$r.SiteId) $tok }
     })
 }
-
+Add-Click $ui.BtnStoreGrant { Start-StoreGrant }
 # ---------------------------------------------------------------- add application: live search in both repositories
 $script:AddRows = New-Object System.Collections.ObjectModel.ObservableCollection[object]
 $ui.LstAddResults.ItemsSource = $script:AddRows
@@ -3293,6 +3360,7 @@ Get-PackTuneTenantApps | ForEach-Object {
         Start-DependencyCheck
         Start-RuntimeCheck
         Start-StatusCheck
+        if (-not $script:StoreState) { Start-StoreCheck }
         Start-CountsTask
         Start-SupersededCheck
         Update-Readiness
@@ -4260,6 +4328,14 @@ function Show-TestMenu([ValidateSet('Detail', 'Tenant', 'Custom')][string]$Kind,
             }
         }
     }
+    [void]$menu.Items.Add((New-Object System.Windows.Controls.Separator))
+    $keep = New-Object System.Windows.Controls.MenuItem
+    $keep.Header = 'Keep the sandbox open after the test'
+    $keep.ToolTip = 'For manual checks. Off: PackTune closes the sandbox it started about 10 seconds after the result; close it yourself before you deploy when this is on.'
+    [System.Windows.Controls.ToolTipService]::SetIsEnabled($keep, $false)
+    $keep.IsCheckable = $true; $keep.IsChecked = ($env:PACKTUNE_SANDBOX_KEEPOPEN -eq '1')
+    $keep.Add_Click({ param($src) $env:PACKTUNE_SANDBOX_KEEPOPEN = $(if ($src.IsChecked) { '1' } else { '' }) })
+    [void]$menu.Items.Add($keep)
     Show-Flyout $menu $Target
 }
 Add-Click $ui.BtnDetailTestMenu { Show-TestMenu 'Detail' $ui.BtnDetailTestMenu }
@@ -4404,6 +4480,8 @@ function Get-GrantedScopeMemory {
 function Save-GrantedScopes {
     # After a sign-in: the Graph scopes of the token are what the tenant granted (added to what is known)
     if (-not $Global:AccessToken -or -not $Global:AccessToken.Scopes -or -not $script:Settings.TenantID) { return }
+    # Scopes of a setup-client token are that app's consent, not PackTune's
+    if (Test-PackTuneSetupClient ([string]$Global:AccessToken.ClientID)) { return }
     $granted = @($Global:AccessToken.Scopes | ForEach-Object { $_ -replace '^https://graph\.microsoft\.com/', '' } | Where-Object { $_ -and $_ -notin 'offline_access', 'openid', 'profile', 'email' })
     $m = Get-GrantedScopeMemory
     $key = ([string]$script:Settings.TenantID).ToLower()
@@ -4800,9 +4878,9 @@ Add-Click $ui.BtnRepoAdd {
     $address = $ui.TxtRepoAddress.Text.Trim()
     if (-not $address) { throw 'Enter the repository as owner/name or its github.com address.' }
     $null = ConvertTo-PackTuneRepoKey $address
-    $repoArgs = @{ Repository = $address; Token = $ui.PwdRepoToken.Password; Own = [bool]$ui.ChkRepoOwn.IsChecked; Signed = [bool]$ui.ChkRepoSigned.IsChecked }
+    $repoArgs = @{ Repository = $address; Token = $ui.PwdRepoToken.Password; Own = [bool]$ui.ChkRepoOwn.IsChecked; Signed = [bool]$ui.ChkRepoSigned.IsChecked; Logins = @($ui.TxtRepoLogins.Text -split '[,; ]+' | Where-Object { $_ }) }
     $ui.PwdRepoToken.Clear()
-    [void](Start-UiTask -Kind 'repoadd' -Title "Connecting $address" -Display "Repository $address" -Pool $script:UserPool -Arguments $repoArgs -Work 'param($Repository, $Token, $Own, $Signed) $null = Add-PackTuneRepository -Repository $Repository -Token $Token -Own:$Own -RequireSignedCommits:$Signed' -OnDone {
+    [void](Start-UiTask -Kind 'repoadd' -Title "Connecting $address" -Display "Repository $address" -Pool $script:UserPool -Arguments $repoArgs -Work 'param($Repository, $Token, $Own, $Signed, $Logins) $null = Add-PackTuneRepository -Repository $Repository -Token $Token -Own:$Own -RequireSignedCommits:$Signed -AllowedLogins $Logins' -OnDone {
             param($Result, $Job)
             if ($Job.Status -eq 'succeeded') { $ui.TxtRepoAddress.Text = ''; Show-Toast 'Repository connected.' 'ok' }
             Update-RepoView
@@ -4822,7 +4900,7 @@ function Format-RepoApprovalText($Request) {
     $title = "$($Request.Name) $($Request.Version) from $($Request.Label) ($($Request.Repository))"
     if ($Request.ThirdParty) { $title += ' - THIRD-PARTY SOURCE' }
     $compare = if ($Request.PreviousVersion) { "Changes against the approved version $($Request.PreviousVersion):" } else { 'First approval of this app:' }
-    @($title, "Commit $($c.Sha.Substring(0, 12)) by $($c.Author) on $($c.Date)", "Message: $($c.Message)", "Signature: $(if ($c.Verified) { 'verified by GitHub' } else { 'NOT verified' })",
+    @($title, "Commit $($c.Sha.Substring(0, 12)) by $($c.Author) on $($c.Date)", "Message: $($c.Message)", "Signature: $(if ($c.Verified) { 'verified by GitHub (signed with the committer''s own key: that says who signed, not who may publish)' } else { 'NOT verified' })", "Author login: $($c.Login), committer login: $($c.CommitterLogin)", "Allowed signers of this repository: $(if (@($Request.AllowedLogins).Count) { @($Request.AllowedLogins) -join ', ' } else { 'none set (anyone with access to the repository)' })",
         "Manifest SHA256 $($Request.Manifest)", $compare, $files, 'Approving lets this exact content be deployed to your devices.') -join "`n"
 }
 Add-Click $ui.BtnRepoApprove {
@@ -4966,6 +5044,7 @@ $window.Add_Closed({
 Update-ModuleState
 Set-DeployDefaults
 Write-UiLog "PackTune $script:ToolVersion started. Work folder: $script:WorkRoot"
+if ($script:SetupClientRepaired) { Write-UiLog "The saved client ID was Microsoft's setup app (Microsoft Graph Command Line Tools, $($script:SetupClientId)), not PackTune's app registration. It was removed from the settings; create or find PackTune's registration on the start page (Create). A package store grant made for that app has to be given again to PackTune's registration." 'Warning' }
 if (-not $script:ModuleState.Ok) { Write-UiLog "The IntuneWin32App module ($($script:MinimumModuleVersion) or newer) is missing: install it on the start page." 'Warning' }
 Update-CatalogRows
 Update-ConnectionStatus

@@ -220,6 +220,47 @@ $lab = Start-PackTuneWin32Lab -DisplayName 'Check App' -Scripts @{ 'Install.ps1'
 Test-Check 'lab: a failed report is a failed verdict; without -AutoRun the lab waits for the person' ($lab.Verdict -eq 'Failed' -and $script:JobSeen.Info.AutoRun -eq $false)
 $threw = $false; try { $null = Start-PackTuneWin32Lab -DisplayName 'x' -Scripts @{ 'Install.ps1' = '' } } catch { $threw = $_.Exception.Message -like '*Uninstall.ps1*' -or $_.Exception.Message -like '*Detect.ps1*' }
 Test-Check 'lab: the three scripts are required' $threw
+$origLauncher = & $mod { $script:Launcher }
+# --- the sandbox PackTune started is closed after the verdict (and only that one); keep-open leaves it
+& $mod { $script:FakeProcs = @(); function script:Get-SandboxProcessIds { @($script:FakeProcs) }; function script:Stop-SandboxProcessId([int]$Id) { [void]$script:StopCalls.Add($Id); $script:FakeProcs = @($script:FakeProcs | Where-Object { $_ -ne $Id }) }; $script:StopCalls = New-Object System.Collections.ArrayList }
+Set-PackTuneSandboxOption -Name CloseDelaySeconds -Value 0
+$script:Logs = New-Object System.Collections.ArrayList
+Set-PackTuneSandboxLog -Sink { param($Text, $Level) [void]$script:Logs.Add($Text) }
+Set-PackTuneSandboxLauncher -Launcher {
+    param($WsbPath)
+    $job = Split-Path $WsbPath -Parent
+    & $mod { $script:FakeProcs = @($script:FakeProcs) + @(222, 223) }
+    @{ State = 'Succeeded'; Step = 'Done'; Message = 'ok'; Result = @{ Verdict = 'Passed'; Notes = 'n' } } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $job 'status.json')
+}
+& $mod { $script:FakeProcs = @(111) }   # a sandbox process that was there before (not PackTune's)
+$labClose = Start-PackTuneWin32Lab -DisplayName 'Close App' -Scripts @{ 'Install.ps1' = 'exit 0'; 'Uninstall.ps1' = 'exit 0'; 'Detect.ps1' = 'x' } -AutoRun
+$stopped = & $mod { @($script:StopCalls) }; $left = & $mod { @($script:FakeProcs) }
+Test-Check 'close: after the verdict the sandbox PackTune started is closed, the result stays visible first' ($labClose.Verdict -eq 'Passed' -and (@($stopped) -join ',') -eq '222,223' -and (@($script:Logs | Where-Object { $_ -like '*sandbox closes in*' }).Count -eq 1) -and (@($script:Logs | Where-Object { $_ -like 'Windows Sandbox closed*' }).Count -eq 1))
+Test-Check 'close: a sandbox process that was there before PackTune launched (the user''s) is never touched' ((@($left) -join ',') -eq '111' -and $stopped -notcontains 111)
+& $mod { $script:StopCalls.Clear(); $script:FakeProcs = @() }
+$script:Logs.Clear()
+Set-PackTuneSandboxOption -Name KeepOpen -Value $true
+$labKeep = Start-PackTuneWin32Lab -DisplayName 'Keep App' -Scripts @{ 'Install.ps1' = 'exit 0'; 'Uninstall.ps1' = 'exit 0'; 'Detect.ps1' = 'x' } -AutoRun
+$stopped = & $mod { @($script:StopCalls) }
+Test-Check 'keep open: with the option nothing is closed and the log says the user has to close it' ($labKeep.Verdict -eq 'Passed' -and @($stopped).Count -eq 0 -and (@($script:Logs | Where-Object { $_ -like '*stays open as you asked*' }).Count -eq 1) -and (@(& $mod { $script:FakeProcs }) -join ',') -eq '222,223')
+Set-PackTuneSandboxOption -Name KeepOpen -Value $false
+& $mod { $script:FakeProcs = @() }
+$env:PACKTUNE_SANDBOX_KEEPOPEN = '1'
+$labEnv = Start-PackTuneWin32Lab -DisplayName 'Keep App 2' -Scripts @{ 'Install.ps1' = 'exit 0'; 'Uninstall.ps1' = 'exit 0'; 'Detect.ps1' = 'x' } -AutoRun
+Test-Check 'keep open: the test menu item (PACKTUNE_SANDBOX_KEEPOPEN=1) keeps it open too' (@(& $mod { $script:StopCalls }).Count -eq 0)
+$env:PACKTUNE_SANDBOX_KEEPOPEN = ''
+# waiting for the sandbox to be gone: false while a process of PackTune's sandbox remains, true when it is gone
+Set-PackTuneSandboxOption -Name PollSeconds -Value 0
+& $mod { $script:SandboxOwned = @{ Before = @(); Started = Get-Date }; $script:FakeProcs = @(222) }
+$stillThere = Wait-PackTuneSandboxClosed -Seconds 1
+& $mod { $script:FakeProcs = @() }
+Test-Check 'wait: reports a sandbox that is still open, and success when it exited' (-not $stillThere -and (Wait-PackTuneSandboxClosed -Seconds 1))
+Set-PackTuneSandboxLog -Sink { param($Text, $Level) }
+Set-PackTuneSandboxOption -Name CloseDelaySeconds -Value 10
+$guiText = Get-Content (Join-Path $repo 'Start-PackTune.ps1') -Raw
+Test-Check 'menu: Keep the sandbox open after the test is in the test menu, off by default' ($guiText -match "Keep the sandbox open after the test" -and $guiText -match "IsChecked = \(\`$env:PACKTUNE_SANDBOX_KEEPOPEN -eq '1'\)" -and (Get-Content (Join-Path $repo 'Modules\PackTune.Sandbox.psm1') -Raw) -match 'KeepOpen\s+= \$false' -and (Get-Content (Join-Path $repo 'Modules\PackTune.Sandbox.psm1') -Raw) -match 'CloseDelaySeconds = 10')
+Set-PackTuneSandboxLauncher -Launcher $origLauncher
+& $mod { $script:SandboxOwned = $null }
 # previous version: its scripts and files are in the job, the job says so
 $prev = Join-Path $work 'prev-source'; New-Item -ItemType Directory -Path $prev -Force | Out-Null; 'old payload' | Set-Content (Join-Path $prev 'choco-app.ps1')
 $script:LabVerdict = 'Succeeded'

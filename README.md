@@ -303,6 +303,8 @@ Test-PackTunePackage -ChocoName vlc
 
 Catalog entries live in [catalog.json](catalog.json): `{ "id": "<choco id>", "winget": "<winget id, optional>", "name": "<description>", "category": "<category>" }`.
 
+The winget id of an app that has none in the catalog (and of the popular list) comes from the reviewed table [data/winget-map.json](data/winget-map.json). It is made at development time by `Tools\Update-WingetMap.ps1` from the official winget source index and the winget-pkgs manifests; [docs/winget-map-report.md](docs/winget-map-report.md) lists what was accepted, what is open for review and which packages have no winget equivalent. Decisions of a person go into `data/winget-map-review.json`.
+
 ## Licenses and rate limits
 
 - Chocolatey itself is Apache 2.0. The installed software keeps its own license. The tool shows a note for packages with known restrictions (for example Oracle Java, TeamViewer, AnyDesk, Adobe Reader distribution, Sublime Text, 1Password); the catalog uses Eclipse Temurin instead of Oracle Java.

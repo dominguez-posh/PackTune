@@ -1,0 +1,248 @@
+{
+  "schema": 1,
+  "comment": "Decisions of a person for Tools/Update-WingetMap.ps1. accept: choco id -> winget id (must exist in the winget index). noEquivalent: choco id -> reason. reject: choco id -> winget ids that never count. These always win over the scoring.",
+  "accept": {
+    "adobereader": {
+      "winget": "Adobe.Acrobat.Reader.64-bit",
+      "note": "same as the catalog entry"
+    },
+    "azcopy10": {
+      "winget": "Microsoft.Azure.AZCopy.10",
+      "note": ""
+    },
+    "azure-cli": {
+      "winget": "Microsoft.AzureCLI",
+      "note": ""
+    },
+    "brackets": {
+      "winget": "Adobe.Brackets",
+      "note": "original project; brackets-cont.brackets is the community fork"
+    },
+    "dotnet-6.0-desktopruntime": {
+      "winget": "Microsoft.DotNet.DesktopRuntime.6",
+      "note": ""
+    },
+    "dotnet-8.0-desktopruntime": {
+      "winget": "Microsoft.DotNet.DesktopRuntime.8",
+      "note": ""
+    },
+    "dotnet-desktopruntime": {
+      "winget": "Microsoft.DotNet.DesktopRuntime.11",
+      "note": "latest line, as the Chocolatey package"
+    },
+    "dotnet-6.0-runtime": {
+      "winget": "Microsoft.DotNet.Runtime.6",
+      "note": ""
+    },
+    "dotnet-8.0-runtime": {
+      "winget": "Microsoft.DotNet.Runtime.8",
+      "note": ""
+    },
+    "dotnet-runtime": {
+      "winget": "Microsoft.DotNet.Runtime.11",
+      "note": "latest line, as the Chocolatey package"
+    },
+    "dotnet-6.0-sdk": {
+      "winget": "Microsoft.DotNet.SDK.6",
+      "note": ""
+    },
+    "dotnetcore": {
+      "winget": "Microsoft.DotNet.Runtime.3_1",
+      "note": "line 3.1, as the Chocolatey package"
+    },
+    "dotnetcore-sdk": {
+      "winget": "Microsoft.DotNet.SDK.3_1",
+      "note": "line 3.1, as the Chocolatey package"
+    },
+    "dotnetcore-windowshosting": {
+      "winget": "Microsoft.DotNet.HostingBundle.3_1",
+      "note": "line 3.1, as the Chocolatey package"
+    },
+    "eid-belgium": {
+      "winget": "BelgianGovernment.eIDmiddleware",
+      "note": ""
+    },
+    "ffmpeg": {
+      "winget": "Gyan.FFmpeg",
+      "note": "Windows builds of gyan.dev, the same build source as the Chocolatey package"
+    },
+    "git.install": {
+      "winget": "Git.Git",
+      "note": ""
+    },
+    "jre8": {
+      "winget": "Oracle.JavaRuntimeEnvironment",
+      "note": "Java 8"
+    },
+    "javaruntime": {
+      "winget": "Oracle.JavaRuntimeEnvironment",
+      "note": "Java 8"
+    },
+    "keeper": {
+      "winget": "KeeperSecurity.KeeperDesktop",
+      "note": ""
+    },
+    "libreoffice-fresh": {
+      "winget": "TheDocumentFoundation.LibreOffice",
+      "note": "winget carries the Fresh line"
+    },
+    "make": {
+      "winget": "ezwinports.make",
+      "note": "GNU make for Windows (ezwinports), same version line"
+    },
+    "microsoft-office-deployment": {
+      "winget": "Microsoft.OfficeDeploymentTool",
+      "note": ""
+    },
+    "microsoft-teams": {
+      "winget": "Microsoft.Teams.Classic",
+      "note": "Teams classic"
+    },
+    "microsoft-teams-new-bootstrapper": {
+      "winget": "Microsoft.Teams",
+      "note": "new Teams"
+    },
+    "nextcloud-client": {
+      "winget": "Nextcloud.NextcloudDesktop",
+      "note": ""
+    },
+    "office365business": {
+      "winget": "Microsoft.Office",
+      "note": "Microsoft 365 Apps (Click-to-Run)"
+    },
+    "office365proplus": {
+      "winget": "Microsoft.Office",
+      "note": "Microsoft 365 Apps (Click-to-Run)"
+    },
+    "powershell-core": {
+      "winget": "Microsoft.PowerShell",
+      "note": ""
+    },
+    "psexec": {
+      "winget": "Microsoft.Sysinternals.PsTools",
+      "note": "the PsTools suite contains PsExec; winget has no PsExec-only package"
+    },
+    "python": {
+      "winget": "Python.Python.3.15",
+      "note": "latest 3.x line, same as python3"
+    },
+    "scratch": {
+      "winget": "MITMediaLab.Scratch.3",
+      "note": "Scratch 3 desktop"
+    },
+    "sonos-controller": {
+      "winget": "Sonos.Controller",
+      "note": "S2 controller"
+    },
+    "sql-server-express": {
+      "winget": "Microsoft.SQLServer.2022.Express",
+      "note": "the title names the 2022 edition"
+    },
+    "temurin21": {
+      "winget": "EclipseAdoptium.Temurin.21.JDK",
+      "note": ""
+    },
+    "temurin21jre": {
+      "winget": "EclipseAdoptium.Temurin.21.JRE",
+      "note": ""
+    },
+    "temurin8jre": {
+      "winget": "EclipseAdoptium.Temurin.8.JRE",
+      "note": ""
+    },
+    "untis": {
+      "winget": "Untis.Untis.2026",
+      "note": "versioned id: 2026 is the newest line in winget (Chocolatey is at 2027)"
+    },
+    "visualstudio2017buildtools": {
+      "winget": "Microsoft.VisualStudio.2017.BuildTools",
+      "note": ""
+    },
+    "visualstudio2019buildtools": {
+      "winget": "Microsoft.VisualStudio.2019.BuildTools",
+      "note": ""
+    },
+    "visualstudio2022buildtools": {
+      "winget": "Microsoft.VisualStudio.2022.BuildTools",
+      "note": ""
+    },
+    "visualstudio2026buildtools": {
+      "winget": "Microsoft.VisualStudio.BuildTools",
+      "note": "the id without year is the 2026 line"
+    },
+    "dell-update": {
+      "winget": "Dell.CommandUpdate.Universal",
+      "note": ""
+    },
+    "dellcommandupdate-uwp": {
+      "winget": "Dell.CommandUpdate.Universal",
+      "note": ""
+    },
+    "webview2-runtime": {
+      "winget": "Microsoft.EdgeWebView2Runtime",
+      "note": ""
+    },
+    "winget-cli": {
+      "winget": "Microsoft.AppInstaller",
+      "note": "App Installer is the winget client"
+    },
+    "wps-office-free": {
+      "winget": "Kingsoft.WPSOffice",
+      "note": ""
+    },
+    "wsl2": {
+      "winget": "Microsoft.WSL",
+      "note": ""
+    },
+    "firefoxesr": {
+      "winget": "Mozilla.Firefox.ESR",
+      "note": ""
+    },
+    "chromium": {
+      "winget": "Hibbiki.Chromium",
+      "note": "the Chocolatey package ships the same community builds"
+    },
+    "wget": {
+      "winget": "JernejSimoncic.Wget",
+      "note": ""
+    },
+    "googlechrome": {
+      "winget": "Google.Chrome",
+      "note": ""
+    },
+    "firefox": {
+      "winget": "Mozilla.Firefox",
+      "note": ""
+    },
+    "thunderbird": {
+      "winget": "Mozilla.Thunderbird",
+      "note": ""
+    },
+    "ccleaner": {
+      "winget": "Piriform.CCleaner",
+      "note": ""
+    },
+    "gimp": {
+      "winget": "GIMP.GIMP.3",
+      "note": "versioned id: line 3 is the current one (GIMP.GIMP.2 is the old line)"
+    }
+  },
+  "noEquivalent": {
+    "powershell": "Windows Management Framework 5.1 (part of Windows), not PowerShell 7",
+    "libreoffice-still": "winget has only the Fresh line of LibreOffice (see libreoffice-fresh)",
+    "dotnet": "Meta package for the .NET SDK and runtimes, winget has one package per component and line",
+    "dotnet-aspnetcoremodule-v2": "IIS module that is part of the ASP.NET Core Hosting Bundle (Microsoft.DotNet.HostingBundle.*), no own package",
+    "skype": "Discontinued by Microsoft (May 2025)",
+    "ublockorigin-chrome": "Browser extension, not an installable application",
+    "adblockpluschrome": "Browser extension, not an installable application",
+    "visualstudio2017-workload-vctools": "Visual Studio workload, added through the Visual Studio installer, no own package",
+    "visualstudio2019-workload-vctools": "Visual Studio workload, added through the Visual Studio installer, no own package",
+    "visualstudio2022-workload-vctools": "Visual Studio workload, added through the Visual Studio installer, no own package",
+    "gsuite-sync-outlook": "Not in winget",
+    "onenote": "Part of Microsoft 365 Apps / Store app, no own winget package",
+    "vmware-tools": "Guest tools come with the hypervisor, not in winget",
+    "sql2016-smo": "SQL Server component (feature pack), not in winget",
+    "crystalreports2008runtime": "Legacy runtime, not in winget"
+  },
+  "reject": {}
+}
