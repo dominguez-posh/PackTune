@@ -1052,7 +1052,7 @@ function Get-ReadinessItems {
                     Fix = 'Confirm now'; Action = { Connect-Intune -Consent } } }
               else { @{ Key = 'appreg'; Title = 'App registration'; State = 'ok'; Text = "$($script:Settings.TenantID), client ID $($script:Settings.ClientID)." } } }
           else { @{ Key = 'appreg'; Title = 'App registration'; State = 'bad'; Wait = $busyAppReg
-                    Text = $(if ($busyAppReg) { 'Waiting for the administrator sign-in in your browser ...' } elseif (-not $script:Settings.ClientID) { "$(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'This tenant' }) has no app registration yet. Created with admin consent." } else { 'The tenant is missing (Settings).' })
+                    Text = $(if ($busyAppReg) { 'Waiting for the administrator sign-in in your browser ...' } elseif ($script:SetupClientRepaired -and -not $script:Settings.ClientID) { "App registration needed: the saved client ID was Microsoft's setup app (Microsoft Graph Command Line Tools), not PackTune's app registration, and is no longer used. Create finds PackTune's registration in the tenant (owned by you) or creates it, with admin consent." } elseif (-not $script:Settings.ClientID) { "$(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'This tenant' }) has no app registration yet. Created with admin consent." } else { 'The tenant is missing (Settings).' })
                     Fix = $(if ($script:Settings.ClientID) { 'Settings' } else { 'Create' }); Action = $(if ($script:Settings.ClientID) { { Show-Page 'Settings' } } else { { Start-AppRegistration } }) } })
         $(if (Test-SignedIn) { @{ Key = 'signin'; Title = 'Signed in to Intune'; State = 'ok'; Text = $(if ($script:AccountText) { "Signed in as $((Get-AccountInfo).Account)" } else { 'Signed in' }) } }
           else { @{ Key = 'signin'; Title = 'Signed in to Intune'; State = 'bad'; Wait = $busyConnect
@@ -1193,7 +1193,8 @@ New-PackTuneAppRegistration @Params
     $arguments = @{ TenantID = $script:Settings.TenantID; Authority = $script:SignInTest.Authority; UrlHandler = $script:SignInTest.UrlHandler; GraphUrl = $script:SignInTest.GraphUrl; Token = $setupToken }
     [void](Start-UiTask -Kind 'appreg' -Title 'Creating the app registration with admin consent' -Display 'App registration' -Pool $script:UserPool -Work $work -Arguments $arguments -OnDone {
         param($Result, $Job)
-        $reg = @($Result | Where-Object { $_ -and $_.ClientID }) | Select-Object -First 1
+        # Only the result object of the registration (tenant and client ID), never the setup client of a token
+        $reg = @($Result | Where-Object { $_ -and $_.ClientID -and $_.TenantID -and $_.PSObject.Properties['Account'] -and -not (Test-PackTuneSetupClient ([string]$_.ClientID)) }) | Select-Object -First 1
         if ($Job.Status -eq 'succeeded' -and $reg) {
             $s = Get-PackTuneSettings; $s.TenantID = $reg.TenantID; $s.ClientID = $reg.ClientID
             [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings
@@ -4313,6 +4314,8 @@ function Get-GrantedScopeMemory {
 function Save-GrantedScopes {
     # After a sign-in: the Graph scopes of the token are what the tenant granted (added to what is known)
     if (-not $Global:AccessToken -or -not $Global:AccessToken.Scopes -or -not $script:Settings.TenantID) { return }
+    # Scopes of a setup-client token are that app's consent, not PackTune's
+    if (Test-PackTuneSetupClient ([string]$Global:AccessToken.ClientID)) { return }
     $granted = @($Global:AccessToken.Scopes | ForEach-Object { $_ -replace '^https://graph\.microsoft\.com/', '' } | Where-Object { $_ -and $_ -notin 'offline_access', 'openid', 'profile', 'email' })
     $m = Get-GrantedScopeMemory
     $key = ([string]$script:Settings.TenantID).ToLower()
@@ -4875,6 +4878,7 @@ $window.Add_Closed({
 Update-ModuleState
 Set-DeployDefaults
 Write-UiLog "PackTune $script:ToolVersion started. Work folder: $script:WorkRoot"
+if ($script:SetupClientRepaired) { Write-UiLog "The saved client ID was Microsoft's setup app (Microsoft Graph Command Line Tools, $($script:SetupClientId)), not PackTune's app registration. It was removed from the settings; create or find PackTune's registration on the start page (Create). A package store grant made for that app has to be given again to PackTune's registration." 'Warning' }
 if (-not $script:ModuleState.Ok) { Write-UiLog "The IntuneWin32App module ($($script:MinimumModuleVersion) or newer) is missing: install it on the start page." 'Warning' }
 Update-CatalogRows
 Update-ConnectionStatus

@@ -123,6 +123,12 @@ $script:LicenseNotes = @{
     "oracle.javaruntimeenvironment"       = "Oracle Java: commercial use requires a paid Oracle Java SE subscription. Use Eclipse Temurin instead."
 }
 
+# Microsoft's "Microsoft Graph Command Line Tools" app: PackTune signs in with it ONLY for the one-time setup (creating the
+# app registration, the package store grant). It is never PackTune's own client ID: settings that name it (entered by hand
+# in earlier versions and copied by the migration) are treated as "no app registration" (Repair-PackTuneSetupClient).
+$script:SetupClientId = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
+function Test-PackTuneSetupClient([string]$ClientID) { return ([string]$ClientID).Trim() -ieq $script:SetupClientId }
+
 function Get-PackTuneSettings {
     $Settings = [ordered]@{}
     foreach ($Key in $script:DefaultSettings.Keys) { $Settings[$Key] = $script:DefaultSettings[$Key] }
@@ -135,8 +141,34 @@ function Get-PackTuneSettings {
         }
         catch { Write-Warning "Settings file $($script:SettingsPath) is unreadable, using defaults" }
     }
+    # The setup client is never used as PackTune's client ID, also not before the repair has saved the file
+    if (Test-PackTuneSetupClient $Settings.ClientID) { $Settings.ClientID = "" }
+    $Settings.TenantClients = Remove-PackTuneSetupClientEntries ([string]$Settings.TenantClients)
     return [pscustomobject]$Settings
 }#Returns the saved settings merged with the defaults
+
+function Remove-PackTuneSetupClientEntries([string]$TenantClients) {
+    # "tenant=client;..." without the pairs that name the setup client
+    return (@(([string]$TenantClients) -split ";" | Where-Object { $_ -and -not (Test-PackTuneSetupClient (($_ -split "=", 2)[1])) }) -join ";")
+}
+
+function Repair-PackTuneSetupClient {
+    <#
+        On start: when the saved settings name Microsoft's setup client as PackTune's client ID (or in TenantClients), it is
+        removed from the file, and the scopes remembered from its tokens (grantedscopes.json: they are the Graph CLI app's
+        consent, not PackTune's) are dropped. Returns $true when something was repaired: the start page then asks for the app
+        registration (Create finds PackTune's registration owned by the signed-in administrator, or creates it).
+    #>
+    if (-not (Test-Path $script:SettingsPath)) { return $false }
+    try { $Raw = Get-Content -Path $script:SettingsPath -Raw | ConvertFrom-Json } catch { return $false }
+    $Bad = (Test-PackTuneSetupClient $Raw.ClientID) -or ([string]$Raw.TenantClients -match [regex]::Escape($script:SetupClientId))
+    if (-not $Bad) { return $false }
+    $Raw.ClientID = ""
+    $Raw.TenantClients = Remove-PackTuneSetupClientEntries ([string]$Raw.TenantClients)
+    $Raw | ConvertTo-Json | Set-Content -Path $script:SettingsPath -Encoding UTF8
+    Remove-Item -LiteralPath (Join-Path (Split-Path $script:SettingsPath -Parent) "grantedscopes.json") -Force -ErrorAction SilentlyContinue
+    return $true
+}#Removes the setup client from the saved settings
 
 function Save-PackTuneSettings {
     param([Parameter(Mandatory = $true)]$Settings)
@@ -156,6 +188,8 @@ function Save-PackTuneSettings {
     if ($Clean.UpdateDelayMinMinutes -lt 0 -or $Clean.UpdateDelayMaxMinutes -lt $Clean.UpdateDelayMinMinutes) { throw "Update delay range is invalid" }
     if ($Clean.MetadataFeed -notmatch '^https?://') { throw "The metadata feed must be an http(s) URL" }
     Assert-ChocoPackageSource $Clean.PackageSource
+    if (Test-PackTuneSetupClient $Clean.ClientID) { throw "$($script:SetupClientId) is Microsoft's 'Microsoft Graph Command Line Tools' app, which PackTune uses only for the setup. Enter the client ID of PackTune's own app registration, or leave it empty and use Create on the start page." }
+    $Clean.TenantClients = Remove-PackTuneSetupClientEntries $Clean.TenantClients
     if ($Clean.StoreSiteUrl -and -not (Test-PackTuneStoreSiteUrl $Clean.StoreSiteUrl)) { throw "The SharePoint site must look like https://<tenant>.sharepoint.com/sites/<name>" }
     if ($Clean.StoreSiteName -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,40}$') { throw "The name of the site may contain letters, digits and hyphens" }
     if ($Clean.StoreLibrary -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,60}$') { throw "The name of the document library may contain letters, digits, spaces, . _ -" }
@@ -180,7 +214,7 @@ function ConvertFrom-TenantClients([string]$Text) {
     $Map = @{}
     foreach ($Pair in ($Text -split ";")) {
         $Tenant, $Client = $Pair -split "=", 2
-        if ($Tenant -and $Client) { $Map[$Tenant.Trim().ToLower()] = $Client.Trim() }
+        if ($Tenant -and $Client -and -not (Test-PackTuneSetupClient $Client)) { $Map[$Tenant.Trim().ToLower()] = $Client.Trim() }
     }
     return $Map
 }
@@ -254,6 +288,8 @@ function Get-PackTuneTenantClient {
     return $null
 }#The client id of the app registration used in that tenant before (by name or GUID), or $null
 
+# Settings that name the setup client as PackTune's client ID are repaired first (see Repair-PackTuneSetupClient)
+$script:SetupClientRepaired = Repair-PackTuneSetupClient
 $script:Settings = Get-PackTuneSettings
 
 function Get-ChocoLicenseNote {
@@ -585,6 +621,7 @@ function Connect-PackTune {
         [scriptblock]$ShouldCancel
     )
     Assert-PackTunePrerequisites
+    if (Test-PackTuneSetupClient $ClientID) { throw "$ClientID is Microsoft's setup app (Microsoft Graph Command Line Tools), not PackTune's app registration. Create the app registration first (New-PackTuneAppRegistration)." }
     $Params = @{ TenantID = $TenantID; ClientID = $ClientID; TimeoutSeconds = $TimeoutSeconds; Authority = $Authority; UrlHandler = $UrlHandler; ShouldCancel = $ShouldCancel }
     $Token = Invoke-PackTunePkceSignIn @Params
     Set-PackTuneToken -TokenResponse $Token -TenantID $TenantID -ClientID $ClientID -Authority $Authority
@@ -804,6 +841,7 @@ function New-PackTuneAppRegistration {
     else { & $Call POST "/v1.0/oauth2PermissionGrants" @{ clientId = $Sp.id; consentType = "AllPrincipals"; resourceId = $GraphSp.id; scope = $ScopeText } | Out-Null }
     Write-Host "Admin consent granted: $ScopeText"
 
+    if (-not $App.appId -or (Test-PackTuneSetupClient ([string]$App.appId))) { throw "The app registration came back without a usable client ID ('$($App.appId)'); nothing was saved." }
     $script:Settings.TenantID = $Tenant
     $script:Settings.ClientID = [string]$App.appId
     return [pscustomobject]@{ TenantID = $Tenant; ClientID = [string]$App.appId; Account = [string]$(if ($Claims.upn) { $Claims.upn } else { $Claims.preferred_username }) }
@@ -888,6 +926,10 @@ function Set-PackTuneToken {
     )
     # Same shape as the module's own New-DelegatedAccessToken, which the module functions expect
     if (-not $TokenResponse.access_token) { throw "The token response contains no access token" }
+    # The Intune session never runs on the setup client (it is for the one-time setup only)
+    if (Test-PackTuneSetupClient $ClientID) { throw "A sign-in with Microsoft's setup app ($ClientID) is not used for Intune: PackTune needs its own app registration (Create on the start page)." }
+    try { if (Test-PackTuneSetupClient ([string](Get-PackTuneTokenClaims ([string]$TokenResponse.access_token)).appid)) { throw "setup" } }
+    catch { if ($_.Exception.Message -eq "setup") { throw "The token was issued to Microsoft's setup app, not to PackTune's app registration: it is not used for Intune." } }
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "ClientID" -Value $ClientID -Force
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "client_id" -Value $ClientID -Force   # read by the module's own renewal
     $TokenResponse | Add-Member -MemberType NoteProperty -Name "Authority" -Value $Authority -Force
