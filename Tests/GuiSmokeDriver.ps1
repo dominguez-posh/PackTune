@@ -539,6 +539,26 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $s.Phase = 1
             Show-Page 'Tenant'
             $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_.Data.Package -eq 'scratch' })[0]
+            # a reload of the list while the app is selected: the id is remembered, the same app is selected again, nothing else
+            $wantId = [string]$ui.LstTenant.SelectedItem.Data.Id
+            $saved = $script:TenantApps; $script:TenantApps = $null; Update-TenantRows
+            Test-Smoke 'while the list is read again the panel closes and the id is remembered' (-not $ui.LstTenant.SelectedItem -and $script:TenantPendingSelect -eq $wantId) "$($script:TenantPendingSelect)"
+            $script:TenantApps = $saved; Update-TenantRows -Force
+            Test-Smoke 'after the reload the same app (same id) is selected again, the panel shows it' ($ui.LstTenant.SelectedItem -and $ui.LstTenant.SelectedItem.Data.Id -eq $wantId -and $ui.LstTenant.SelectedItem.Data.Package -eq 'scratch' -and -not $script:TenantPendingSelect)
+            # an action without an app id never reaches Graph, a plain message says what to do
+            $before = @($script:Tasks).Count; $toastsBefore = $script:Toasts.Count
+            Start-TenantRemoval ([pscustomobject]@{ Id = ''; DisplayName = '' })
+            Test-Smoke 'an action with an empty app id starts no job and says so in plain words' (@($script:Tasks).Count -eq $before -and $script:Toasts.Count -gt $toastsBefore -and ($script:Toasts[-1].Text -like 'Select an app in the list first*'))
+            $m = ''; try { Remove-PackTuneApp -Id '' } catch { $m = $_.Exception.Message }
+            Test-Smoke 'the remove command refuses an empty id in plain words (no raw parameter binding text)' ($m -like 'No app was given*') $m
+            Test-Smoke 'a raw localized parameter binding error becomes a short English cause' ((Get-FriendlyCause 'Das Argument kann nicht an den Parameter "Id" gebunden werden, da es sich um eine leere Zeichenfolge handelt.') -like 'An internal value was missing*')
+            # while the list is being read, the panel's actions are off and say why
+            $script:Tasks.Add(@{ Job = [pscustomobject]@{ Kind = 'tenant' }; Hidden = $true }) | Out-Null
+            Update-TenantButtons
+            $off = (-not $ui.BtnTenantRemove.IsEnabled) -and $ui.TxtDependencyNote.Text -eq 'Updating the list ...'
+            $r = Get-ActionApp
+            Test-Smoke 'while the list reloads: Remove is off, the panel says "Updating the list ...", actions get no app' ($off -and $null -eq $r)
+            $script:Tasks.RemoveAt($script:Tasks.Count - 1); Update-TenantButtons
             & $script:ClickActions[$ui.BtnTenantRemove]
             return $false
         }

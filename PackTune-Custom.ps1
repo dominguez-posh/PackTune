@@ -455,7 +455,8 @@ function Publish-PackTuneCustomVersion {
 function Remove-PackTuneCustomApp {
     # Removes a custom app from the tenant (only apps with the custom marker); devices keep the installed software.
     # -DeleteStore also deletes the stored files when this was the last Intune app of the application (SharePoint keeps them in its recycle bin).
-    param([Parameter(Mandatory = $true)][string]$Id, [switch]$DeleteStore)
+    param([AllowEmptyString()][string]$Id, [switch]$DeleteStore)
+    if (-not $Id) { throw "No app was given: nothing was removed." }
     $App = @(Get-PackTuneCustomApps | Where-Object { $_.Id -eq $Id }) | Select-Object -First 1
     if (-not $App) { throw "App $Id is not a custom application of this tool or does not exist any more, nothing was removed" }
     Write-Host "Removing $($App.DisplayName) ($Id) from Intune"

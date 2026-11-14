@@ -219,6 +219,7 @@ function Get-FriendlyCause([string]$Raw) {
        The raw text stays in the log and behind Details. #>
     $text = [string]$Raw
     if (-not $text) { return 'Something went wrong.' }
+    if ($text -match '(?i)Das Argument kann nicht|Cannot bind argument|cannot be bound|ParameterBinding|leere Zeichenfolge|empty string|empty collection|null or empty') { return 'An internal value was missing (for example no app selected). Nothing was changed; Details has the log.' }
     if ($text -match '(?i)\b403\b|forbidden|verboten|insufficient privileges|Authorization_RequestDenied|access is denied|zugriff verweigert') { return 'No permission: confirm the new permissions or check the license.' }
     if ($text -match '(?i)\b401\b|unauthorized|nicht autorisiert|token.*expired|InvalidAuthenticationToken') { return 'The sign-in expired or is not accepted: sign in again.' }
     if ($text -match '(?i)\b50[0234]\b|service unavailable|bad gateway|gateway time|internal server error|serverfehler') { return 'Microsoft Graph has a problem right now (server error). Try again in a moment.' }
@@ -503,7 +504,7 @@ function Complete-UiTask($Task) {
     $errors = @($job.Log.ToArray() | Where-Object Level -eq 'Error')
     foreach ($entry in @($job.Log.ToArray())) { Write-UiLog ("[{0}] {1}" -f $job.Display, $entry.Text) $entry.Level }
     if ($job.Status -eq 'failed' -and $job.Kind -notin 'meta', 'icons' -and -not ($job.Kind -in $script:GraphReadKinds -and @($errors | Where-Object { Test-GraphReadFailureText ([string]$_.Text) }).Count)) {
-        Show-Toast ("{0}: {1}" -f $job.Display, $(if ($errors.Count) { $errors[-1].Text } else { 'failed' })) 'bad'
+        Show-Toast ("{0}: {1}" -f $job.Display, (Get-FriendlyCause $(if ($errors.Count) { [string]$errors[-1].Text } else { 'failed' }))) 'bad' 'Details' { Show-Page 'Activity' }
     }
     if ($job.Kind -in $script:GraphReadKinds) {
         # A read that hit the network (or an expired sign-in) must never look like an empty tenant: the module only warns and returns nothing
@@ -2003,11 +2004,16 @@ Add-Click $ui.BtnCustomOpen {
     $app = Get-SelectedCustomApp
     if ($app) { Start-Process "https://intune.microsoft.com/#view/Microsoft_Intune_Apps/SettingsMenu/~/0/appId/$($app.Id)" }
 }
+function Test-AppId($App) {
+    # An action needs an app with an id: without one nothing is sent to Graph, a plain message says what to do
+    if (-not $App -or -not [string]$App.Id) { Show-Toast 'Select an app in the list first: nothing was changed.' 'info'; return $false }
+    $true
+}
 function Confirm-AppRemoval {
     # Reads the relationships of the app in the background, then asks (naming what is cleared first); apps that depend on it stop the removal.
-    # $Proceed gets called after the yes. In the smoke test the question is answered at once.
-    param([Parameter(Mandatory = $true)]$App, [Parameter(Mandatory = $true)][string]$Question, [Parameter(Mandatory = $true)][scriptblock]$Proceed)
-    if ($env:PACKTUNE_SMOKE) { if (Confirm-Action $Question 'Remove from Intune' 'Remove' 'Cancel') { & $Proceed }; return }
+    # $Proceed gets called after the yes, long after the click handler has ended: it must be a closure (.GetNewClosure()) that holds the app.
+    param($App, [Parameter(Mandatory = $true)][string]$Question, [Parameter(Mandatory = $true)][scriptblock]$Proceed)
+    if (-not (Test-AppId $App)) { return }
     $script:RemovalPending = @{ Question = $Question; Proceed = $Proceed; Name = $App.DisplayName }
     Update-UiToken
     [void](Start-UiTask -Kind 'removeinfo' -Title "Checking what $($App.DisplayName) is connected to" -Display $App.DisplayName -Hidden -NeedsAuth -Pool $script:UserPool -Arguments @{ Id = $App.Id } -Work 'param($Id) Get-PackTuneAppRemovalInfo -AppId $Id' -OnDone {
@@ -2033,9 +2039,10 @@ function Confirm-AppRemoval {
 Add-Click $ui.BtnCustomRemove {
     $app = Get-SelectedCustomApp
     if (-not $app) { return }
-    Confirm-AppRemoval $app "Remove '$($app.DisplayName) $($app.Version)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software." { Start-CustomRemoval $app }
+    Confirm-AppRemoval $app "Remove '$($app.DisplayName) $($app.Version)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software." { Start-CustomRemoval $app }.GetNewClosure()
 }
 function Start-CustomRemoval($app) {
+    if (-not (Test-AppId $app)) { return }
     $deleteStore = $false
     if ($script:Settings.StoreSiteUrl -and $app.AppId -and @($script:CustomApps | Where-Object { $_.AppId -eq $app.AppId }).Count -le 1) {
         $deleteStore = Confirm-Action "This is the last Intune app of '$($app.DisplayName)'.`n`nAlso delete its stored files (packages, original installer files, certificates) from the package store?`n`nDelete files: delete them (SharePoint keeps them in its recycle bin).`nKeep files: keep them, so the application can still be exported." 'Delete stored files' 'Delete files' 'Keep files'
@@ -2992,6 +2999,7 @@ function Get-IntentText($App) {
 function Update-TenantRows {
     param([switch]$Force)
     if ($null -eq $script:TenantApps) {
+        if ($ui.LstTenant.SelectedItem -and $ui.LstTenant.SelectedItem.Data.Id) { $script:TenantPendingSelect = [string]$ui.LstTenant.SelectedItem.Data.Id }
         $script:TenantRowList.Clear()
         $ui.TxtTenantEmpty.Visibility = 'Visible'
         $ui.TxtTenantEmpty.Text = if (Test-SignedIn) { 'Reading the apps in the tenant ...' } else { 'Sign in to see the apps this tool created in your tenant.' }
@@ -3008,7 +3016,7 @@ function Update-TenantRows {
         $app.LatestVersion = $latest
         $app.UpdateAvailable = [bool]($app.Version -and $latest -and (Compare-PackageVersion $latest $app.Version) -gt 0)
     }
-    $selected = if ($ui.LstTenant.SelectedItem) { $ui.LstTenant.SelectedItem.Data.Id } else { $null }
+    $selected = if ($ui.LstTenant.SelectedItem) { $ui.LstTenant.SelectedItem.Data.Id } else { $script:TenantPendingSelect }
     $list = New-Object System.Collections.ArrayList
     foreach ($app in $script:TenantApps) { if (-not $app.IsChocolatey) { [void]$list.Add($app) } }
     if ($script:RuntimeId) {
@@ -3054,6 +3062,7 @@ function Update-TenantRows {
         foreach ($r in $rows) { $script:TenantRowList.Add($r) }
         if ($selected) { $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { $_.Data.Id -eq $selected })[0] }
     }
+    $script:TenantPendingSelect = $null
     $ui.TxtTenantEmpty.Visibility = ConvertTo-Vis ($rows.Count -eq 0)
     $ui.TxtTenantEmpty.Text = 'This tool has not created any app in the tenant yet. Pick apps under Apps.'
     $apps = @($ordered | Where-Object { -not ($_.IsChocolatey -or $_.IsDependency) }).Count
@@ -3167,6 +3176,13 @@ function Start-OldDependencyCleanup {
 }
 
 function Get-SelectedTenantApp { if ($ui.LstTenant.SelectedItem) { $ui.LstTenant.SelectedItem.Data } }
+function Get-ActionApp {
+    # The app of the panel for an action: the selected row, with an id, and only while the list is not being updated
+    $app = Get-SelectedTenantApp
+    if (-not (Test-AppId $app)) { return $null }
+    if (Test-TaskRunning 'tenant') { Show-Toast 'Updating the list ... try again in a moment.' 'info'; return $null }
+    $app
+}
 
 function Get-TenantVersion { if ($ui.CmbTenantVersion.SelectedIndex -le 0) { 'latest' } else { [string]$ui.CmbTenantVersion.SelectedItem } }
 function Set-TenantVersionChoices($App, [string[]]$Versions) {
@@ -3222,8 +3238,11 @@ function Update-TenantButtons {
     $ui.TxtTenantAppTitle.Text = if ($app.IsOld) { "$($app.DisplayName) (old)" } elseif ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
     $ui.TxtTenantAppSub.Text = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($isDep) { 'Dependency of every app, updated daily' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source) $([char]0x00B7) $(Get-IntentText $app)" }
     $busy = Test-TaskRunning 'policy'
-    $ui.BtnTenantOpen.IsEnabled = $true
-    $ui.BtnTenantRemove.IsEnabled = (Test-SignedIn) -and -not (Test-TaskRunning 'remove') -and -not $app.IsDependency
+    $reading = (Test-TaskRunning 'tenant')
+    $ui.BtnTenantOpen.IsEnabled = -not $reading
+    $ui.BtnTenantOpen.ToolTip = if ($reading) { 'Updating the list ...' } else { $null }
+    $ui.BtnTenantRemove.IsEnabled = (Test-SignedIn) -and -not $reading -and -not (Test-TaskRunning 'remove') -and -not $app.IsDependency
+    $ui.BtnTenantRemove.ToolTip = if ($reading) { 'Updating the list ...' } else { $null }
     $ui.GbTenantPolicy.Visibility = ConvertTo-Vis (-not $isDep)
     $ui.BtnTenantApply.Visibility = ConvertTo-Vis (-not $isDep)
     Update-SandboxButtons
@@ -3231,8 +3250,8 @@ function Update-TenantButtons {
     $ui.BtnTenantRelease.Visibility = ConvertTo-Vis ($app.UpdateAvailable -and -not $isDep)
     $ui.TxtTenantAvailableNote.Visibility = ConvertTo-Vis ((-not $isDep) -and (@([string]$app.Intents -split ',') -contains 'available') -and (@([string]$app.Intents -split ',') -notcontains 'required'))
     $noRuntime = @($script:WingetNoRuntime | Where-Object { $_.Id -eq $app.Id }).Count -gt 0
-    $ui.TxtDependencyNote.Visibility = ConvertTo-Vis $noRuntime
-    $ui.TxtDependencyNote.Text = if ($noRuntime) { 'This app still uses the old dependency apps. Switch to PackTune Runtime (banner above the list) moves it over.' } else { '' }
+    $ui.TxtDependencyNote.Visibility = ConvertTo-Vis ($noRuntime -or $reading)
+    $ui.TxtDependencyNote.Text = if ($reading) { 'Updating the list ...' } elseif ($noRuntime) { 'This app still uses the old dependency apps. Switch to PackTune Runtime (banner above the list) moves it over.' } else { '' }
     if ($isDep) { $script:TenantPolicyApp = ''; return }
     $ui.BtnTenantApply.IsEnabled = (Test-SignedIn) -and -not $busy
     $ui.BtnTenantRelease.IsEnabled = (Test-SignedIn) -and -not $busy
@@ -3280,7 +3299,7 @@ else { Publish-PackTuneRelease -AppId $AppId -Version $Version -UpdateMode $Upda
     Update-TenantButtons
 }
 Add-Click $ui.BtnTenantApply {
-    $app = Get-SelectedTenantApp
+    $app = Get-ActionApp
     if (-not $app) { return }
     $policy = Read-TenantPolicy
     $version = Get-TenantVersion
@@ -3293,28 +3312,29 @@ function Start-ReleaseApp($App) {
     if (-not (Confirm-Action "Release version $($App.LatestVersion) of '$($App.DisplayName)'?`n`nIt goes from $($App.Version) to $($App.LatestVersion). Devices install it according to the update mode of the app: $(Format-UpdateText $App.UpdateMode $App.GraceHours).`n`nApps that are only Available are updated through a new app that supersedes the old one." 'Release update' 'Release' 'Cancel')) { return }
     Start-AppApply -App $App -Version $App.LatestVersion -Policy @{ UpdateMode = $App.UpdateMode; GraceHours = $App.GraceHours }
 }
-Add-Click $ui.BtnTenantRelease { Start-ReleaseApp (Get-SelectedTenantApp) }
+Add-Click $ui.BtnTenantRelease { Start-ReleaseApp (Get-ActionApp) }
 Add-Click $ui.BtnBannerRelease { $id = $ui.BtnBannerRelease.Uid; Start-ReleaseApp @($script:TenantApps | Where-Object { $_.Id -eq $id })[0] }
 Add-Click $ui.BtnTenantSchedule {
-    $app = Get-SelectedTenantApp
+    $app = Get-ActionApp
     if (-not $app) { return }
     $sched = if ($script:TenantSchedule) { New-ChocoSchedule -Values $script:TenantSchedule -Base $app.Schedule } elseif ($app.Schedule) { $app.Schedule } else { Get-ChocoScheduleDefaults }
     $grace = (Read-TenantPolicy).GraceHours
     Show-ScheduleDialog -Mode 'App' -Schedule $sched -Title "When $($app.DisplayName) updates on devices" -App $app -GraceHours $grace
 }
 Add-Click $ui.BtnTenantTest {
-    $app = Get-SelectedTenantApp
+    $app = Get-ActionApp
     if (-not $app) { return }
     Start-PackageTest -Package $app.Package -Source $app.Source -Title $app.DisplayName -Version (Get-TenantVersion) -Policy (Read-TenantPolicy)
 }
 Add-Click $ui.BtnTenantRemove {
-    $app = Get-SelectedTenantApp
+    $app = Get-ActionApp
     if (-not $app) { return }
     $others = @($script:TenantApps | Where-Object { -not $_.IsChocolatey -and $_.Source -eq 'Chocolatey' }).Count
     if ($app.IsChocolatey -and $others -gt 0) { throw "Chocolatey is the dependency of the $others app(s) created by this tool. Remove those first." }
-    Confirm-AppRemoval $app "Remove '$($app.DisplayName)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software and its update task; nothing is uninstalled." { Start-TenantRemoval $app }
+    Confirm-AppRemoval $app "Remove '$($app.DisplayName)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software and its update task; nothing is uninstalled." { Start-TenantRemoval $app }.GetNewClosure()
 }
 function Start-TenantRemoval($app) {
+    if (-not (Test-AppId $app)) { return }
     Update-UiToken
     [void](Start-UiTask -Kind 'remove' -Title "Removing $($app.DisplayName) from Intune" -Display $app.DisplayName -Package $app.Package -NeedsAuth -Arguments @{ Id = $app.Id; Source = $app.Source } -Work 'param($Id, $Source) Remove-PackTuneApp -Id $Id' -OnDone {
         param($Result, $Job)
@@ -3329,7 +3349,7 @@ function Start-TenantRemoval($app) {
     Update-TenantButtons
 }
 Add-Click $ui.BtnTenantOpen {
-    $app = Get-SelectedTenantApp
+    $app = Get-ActionApp
     if ($app) { Start-Process "https://intune.microsoft.com/#view/Microsoft_Intune_Apps/SettingsMenu/~/0/appId/$($app.Id)" }
 }
 

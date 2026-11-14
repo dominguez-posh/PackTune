@@ -2720,7 +2720,8 @@ function Get-PackTuneTenantApps {
 }#Lists the Win32 apps in the tenant that were created by this tool
 
 function Remove-PackTuneApp {
-    param([Parameter(Mandatory = $true)][string]$Id)
+    param([AllowEmptyString()][string]$Id)
+    if (-not $Id) { throw "No app was given: nothing was removed." }
 
     # Only apps this tool created (recognized by their notes) are removed, never anything else in the tenant
     $Apps = @(Get-PackTuneTenantApps) + @(Get-PackTuneCustomApps)
