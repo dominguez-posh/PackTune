@@ -35,7 +35,7 @@ function Get-TenantRow([string]$Title) { @($script:TenantRowList | Where-Object 
 $script:DocSteps = [System.Collections.ArrayList]@(
     @{ Do = {
         param($s)
-        $script:EmbeddedAvailableOverride = $false; $script:SandboxOverride = @{ Present = $true; Studio = $true }; Update-SandboxState
+        $script:EmbeddedAvailableOverride = $false; $script:SandboxOverride = @{ Present = $true }; Update-SandboxState
         $cfg = Get-PackTuneSettings; $cfg.ClientID = ''; [void](Save-PackTuneSettings -Settings $cfg); $script:Settings = Get-PackTuneSettings
         $script:SignInTest = @{ Authority = $env:PACKTUNE_SMOKE_AUTHORITY; GraphUrl = $env:PACKTUNE_SMOKE_AUTHORITY
             UrlHandler = 'param($Url) $global:DocsClient = New-Object System.Net.WebClient; [void]$global:DocsClient.DownloadStringTaskAsync([uri]$Url)' }
@@ -79,7 +79,7 @@ $script:DocSteps = [System.Collections.ArrayList]@(
         $script:CustomApps = $null; Show-Page 'Custom'; $true } }
     @{ Do = { param($s) if (-not (Test-DocsIdle 'customlist')) { return $false }; $ui.LstCustom.SelectedItem = @($script:CustomRows | Where-Object { $_['Title'] -eq 'Fabrikam Label Printer' })[0]; Save-DocShot 'custom'
         $demoFolder = Join-Path $env:LOCALAPPDATA 'Fabrikam Label Printer 1.3'; New-Item -ItemType Directory -Path $demoFolder -Force | Out-Null; 'x' | Set-Content (Join-Path $demoFolder 'setup.exe')
-        & $script:ClickActions[$ui.BtnCustomNew]; $ui.RbCustomOther.IsChecked = $true; Set-OtherFolder $demoFolder; $ui.TxtOtherFolder.Text = 'C:\Installers\Fabrikam Label Printer 1.3'; $ui.TxtOtherArgs.Text = '/VERYSILENT /NORESTART'; $ui.TxtOtherPublisher.Text = 'Fabrikam'; $ui.TxtOtherName.Text = 'Fabrikam Label Printer'
+        & $script:ClickActions[$ui.BtnCustomNew]; $ui.RbCustomOther.IsChecked = $true; Set-OtherFolder $demoFolder; $ui.TxtOtherFolder.Text = 'C:\Installers\Fabrikam Label Printer 1.3'; $ui.CmbOtherEntry.Text = 'setup.exe'; $ui.TxtOtherArgs.Text = '/VERYSILENT /NORESTART'; $ui.TxtOtherPublisher.Text = 'Fabrikam'; $ui.TxtOtherName.Text = 'Fabrikam Label Printer'
         Save-DocShot 'custom-dialog'; Close-Dialog
         $cfg2 = Get-PackTuneSettings; $cfg2.StoreSiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; [void](Save-PackTuneSettings -Settings $cfg2); $script:Settings = Get-PackTuneSettings
         $script:StoreState = [pscustomobject]@{ State = 'Ready'; Message = 'The package store ''PackTune Packages'' on PackTune is ready.' }

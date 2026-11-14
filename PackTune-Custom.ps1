@@ -467,13 +467,10 @@ function Remove-PackTuneCustomApp {
 
 function Test-PackTuneCustomApp {
     <#
-        Tests an MSI app in Windows Sandbox with the Win32 Test Lab of MSIX Sandbox Studio: the package scripts exactly as
-        deployed (Install, Detect, Uninstall with one click each, as SYSTEM). Returns the verdict.
+        Tests an MSI app in Windows Sandbox with the test lab of PackTune: the package scripts exactly as deployed (Install,
+        Detect, Uninstall with one click each, as SYSTEM). Returns the verdict.
     #>
-    param([Parameter(Mandatory = $true)][string]$MsiPath, [hashtable]$Properties = @{})
-    $Studio = Find-SandboxStudio
-    if (-not $Studio) { throw "MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) was not found. Set its folder in Settings (Sandbox Studio path)." }
-    Import-Module $Studio -Force -ErrorAction Stop
+    param([Parameter(Mandatory = $true)][string]$MsiPath, [hashtable]$Properties = @{}, [switch]$AutoRun)
     $Info = Get-PackTuneMsiInfo -Path $MsiPath
     $AppId = Get-PackTuneCustomAppId $Info
     $Scripts = Get-PackTuneCustomMsiScripts -Info $Info -AppId $AppId -ExtraArguments (ConvertTo-PackTuneMsiArguments $Properties)
@@ -483,12 +480,12 @@ function Test-PackTuneCustomApp {
     Copy-Item -LiteralPath $Info.Path -Destination (Join-Path $SourcePath $Info.FileName) -Force
     $LabInstall = "& `"`$PSScriptRoot\choco-app.ps1`"`r`nexit `$LASTEXITCODE"
     $LabUninstall = "& `"`$PSScriptRoot\choco-app.ps1`" -Uninstall`r`nexit `$LASTEXITCODE"
-    $Id = "Custom-$AppId"
-    $Project = Save-Win32AppProject -Id $Id -DisplayName "$($Info.Name) (custom MSI)" -Publisher $Info.Manufacturer -Version $Info.Version -Detection (New-Win32Detection -Type Script) -RunAs system `
-        -Scripts @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $Scripts.Detection; "Update.ps1" = "" }
-    Copy-LabPackageFiles -SourcePath $SourcePath -Destination $Project.SourcePath
-    Write-Host "Opening the Win32 Test Lab in Windows Sandbox for $($Info.Name): run Install, Detect, Uninstall there, then report the result"
-    $Result = Start-Win32TestLab -Id $Id
+    $LabFiles = Join-Path $WorkPath "lab"
+    New-Item -ItemType Directory -Path $LabFiles -Force | Out-Null
+    Copy-LabPackageFiles -SourcePath $SourcePath -Destination $LabFiles
+    Write-Host "Opening the test lab in Windows Sandbox for $($Info.Name): run Install, Detect, Uninstall there, then report the result"
+    $Result = Start-PackTuneWin32Lab -DisplayName "$($Info.Name) (custom MSI)" -Version $Info.Version -SourcePath $LabFiles -AutoRun:$AutoRun `
+        -Scripts @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $Scripts.Detection }
     Write-Host "Test result: $($Result.Verdict). $($Result.Message)"
     [pscustomobject]@{ Package = $Info.Name; Verdict = $Result.Verdict; Message = $Result.Message; JobPath = $Result.JobPath }
 }#Tests an MSI app in Windows Sandbox

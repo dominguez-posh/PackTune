@@ -2,8 +2,8 @@
 .SYNOPSIS
     Checks of the custom MSIX applications ("Other", PackTune-CustomMsix.ps1): identity and fixed subject, the device
     scripts, the build with a certificate per version (made and removed around the capture, also on errors), the package
-    store, deployment as ONE Win32 app, update on top of the stored previous version, export, delete. MSIX Sandbox Studio
-    is replaced by stand-ins (the capture needs Windows Sandbox: it is run by hand and by Tests\Spike-MsixWin32.ps1 for
+    store, deployment as ONE Win32 app, update on top of the stored previous version, export, delete. The sandbox
+    module (Modules\PackTune.Sandbox.psm1, tested in Check-Sandbox.ps1) is replaced by stand-ins (the capture needs Windows Sandbox: it is run by hand and by Tests\Spike-MsixWin32.ps1 for
     the device side). Fake IntuneWin32App module and fake SharePoint; no tenant, no network.
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\Tests\Check-CustomMsix.ps1
@@ -23,23 +23,6 @@ $Global:AuthenticationHeader = @{ Authorization = 'Bearer x'; ExpiresOn = $Globa
 $Global:AccessTokenTenantID = 'contoso.onmicrosoft.com'
 function Get-Store { $f = Join-Path $env:LOCALAPPDATA 'fake-intune.json'; if (Test-Path $f) { @(Get-Content $f -Raw | ConvertFrom-Json | ForEach-Object { $_ }) } else { @() } }
 . (Join-Path $PSScriptRoot 'Fakes\FakeSharePoint.ps1')
-
-# --- Sandbox Studio: missing, too old, ready (by the version in its manifest, nothing is imported)
-$studio = Join-Path $work 'Studio'
-function New-FakeStudio([string]$Version) {
-    New-Item -ItemType Directory -Path (Join-Path $studio 'MsixSandboxStudio') -Force | Out-Null
-    "@{ RootModule = 'MsixSandboxStudio.psm1'; ModuleVersion = '$Version' }" | Set-Content (Join-Path $studio 'MsixSandboxStudio\MsixSandboxStudio.psd1')
-}
-$script:Settings.SandboxStudioPath = Join-Path $work 'nowhere'
-function Find-SandboxStudio { $f = Join-Path $studio 'MsixSandboxStudio\MsixSandboxStudio.psd1'; if (Test-Path $f) { $f } }
-Test-Check 'studio: missing' ((Get-PackTuneStudioState).State -eq 'Missing')
-New-FakeStudio '2.4.0'
-$old = Get-PackTuneStudioState
-Test-Check 'studio: 2.4.0 is too old, the message says what is needed' (($old.State -eq 'TooOld') -and ($old.Message -like '*2.5.0*') -and ($old.Version -eq [version]'2.4.0'))
-$threw = $false; try { $null = Import-PackTuneStudio } catch { $threw = $_.Exception.Message -like '*2.5.0*' }
-Test-Check 'studio: importing an old module is refused with a clear message' $threw
-New-FakeStudio '2.5.0'
-Test-Check 'studio: 2.5.0 is ready' ((Get-PackTuneStudioState).State -eq 'Ready')
 
 # --- identity: fixed subject per app
 $id = Get-PackTuneCustomMsixIdentity -Name 'Contoso Helper Tool'
@@ -69,22 +52,23 @@ Test-Check 'uninstall: package removed, only the certificate of this version, ke
 Test-Check 'install script: the baked values' (($i -match "\`$Identity = 'PackTune.ContosoHelperTool'") -and ($i -match "\`$Version = '1.0.0.0'") -and ($i -match "\`$Thumbprint = '$thumb1'") -and ($i -match "\`$AppId = 'contoso-helper-tool-1a2b3c4d'"))
 Test-Check 'detection: the provisioned package of this identity and version or newer, no time limit' (($scripts.Detection -match 'Get-AppxProvisionedPackage -Online') -and ($scripts.Detection -match "\`$Identity = 'PackTune.ContosoHelperTool'") -and ($scripts.Detection -match '\[version\]\$Found.Version -ge \[version\]\$Version') -and ($scripts.Detection -notmatch 'Get-Date|UtcNow'))
 
-# --- stand-ins for MSIX Sandbox Studio
+# --- stand-ins for the sandbox module (it is checked on its own in Check-Sandbox.ps1)
 $script:Certs = New-Object System.Collections.ArrayList
 $script:CertsRemoved = New-Object System.Collections.ArrayList
 $script:Captures = New-Object System.Collections.ArrayList
 $script:FailCapture = $false
 $script:CertCounter = 0
-function Import-PackTuneStudio { [pscustomobject]@{ State = 'Ready'; Version = [version]'2.5.0' } }
-function New-EphemeralSigningCertificate { param([string]$Subject, [string]$OutputFolder)
+$script:SandboxHere = $true
+function Test-PackTuneSandboxAvailable { $script:SandboxHere }
+function New-PackTuneSigningCertificate { param([string]$Subject, [string]$OutputFolder)
     $script:CertCounter++
     $thumb = ('{0:X40}' -f $script:CertCounter)
     $cer = Join-Path $OutputFolder "$thumb.cer"; "public certificate $thumb" | Set-Content $cer
     [void]$script:Certs.Add(@{ Thumbprint = $thumb; Subject = $Subject })
     [pscustomobject]@{ Thumbprint = $thumb; Subject = $Subject; CerPath = $cer; NotAfter = (Get-Date).AddYears(5) }
 }
-function Remove-EphemeralSigningCertificate { param([string]$Thumbprint) [void]$script:CertsRemoved.Add($Thumbprint); $true }
-function Invoke-MsixFolderPackaging {
+function Remove-PackTuneSigningCertificate { param([string]$Thumbprint) [void]$script:CertsRemoved.Add($Thumbprint); $true }
+function Invoke-PackTuneMsixCapture {
     param([string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$PackageName, [string]$DisplayName, [string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertificateThumbprint)
     $baseBytes = if ($BasePackage) { [IO.File]::ReadAllBytes($BasePackage) } else { $null }
     [void]$script:Captures.Add(@{ Folder = $InstallerFolder; Entry = $EntryPoint; Arguments = $Arguments; PackageName = $PackageName; Version = $Version; Thumbprint = $CertificateThumbprint; Base = $BasePackage; BaseBytes = $baseBytes; Files = @(Get-ChildItem $InstallerFolder -Recurse -File).Name })
@@ -94,6 +78,12 @@ function Invoke-MsixFolderPackaging {
     $doc = Join-Path $work "doc-$Version"; New-Item -ItemType Directory -Path $doc -Force | Out-Null; '<html>doc</html>' | Set-Content (Join-Path $doc 'index.html')
     [pscustomobject]@{ State = 'Succeeded'; Message = 'ok'; PackagePath = $out; JobPath = 'C:\jobs\ok'; Identity = [pscustomobject]@{ Name = $PackageName; Version = $Version; FullName = "$PackageName`_$Version`_x64__abc" }; Documentation = $doc }
 }
+
+# --- the capture needs Windows Sandbox: without it nothing is started and no certificate is made
+$script:SandboxHere = $false
+$threw = $false; try { $null = Invoke-PackTuneCustomMsixBuild -Folder $work -EntryPoint 'x.exe' -Name 'Contoso Helper Tool' -Version '1.0.0.0' } catch { $threw = $_.Exception.Message -like '*Windows Sandbox is not installed*' }
+Test-Check 'capture: without Windows Sandbox it is refused before a certificate is made' ($threw -and ($script:Certs.Count -eq 0))
+$script:SandboxHere = $true
 
 # --- the store is needed
 $settings = Get-PackTuneSettings; $settings.StoreSiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; Save-PackTuneSettings -Settings $settings | Out-Null; $script:Settings = Get-PackTuneSettings
@@ -202,7 +192,7 @@ $another = (Get-PackTuneCustomAppId ([pscustomobject]@{ Name = 'PackTune.Another
 Test-Check 'delete with the store part: the stored files of the last version go too' (@($script:Fs.Keys | Where-Object { $_ -like "$another/*" }).Count -eq 0)
 
 # --- readiness texts exist
-Test-Check 'the readiness helpers exist for the interface' ((Get-Command Get-PackTuneStudioState, Get-PackTuneStoreState -ErrorAction SilentlyContinue).Count -eq 2)
+Test-Check 'the readiness helpers exist for the interface' ((Get-Command Get-PackTuneToolchainState, Get-PackTuneStoreState -ErrorAction SilentlyContinue).Count -eq 2)
 
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed -gt 0) { "$script:Failed check(s) failed."; exit 1 }

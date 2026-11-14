@@ -12,7 +12,7 @@ The user approved this plan with all recommendations of the first version, with 
 | 1 | Certificates: a new self-signed code-signing certificate per package VERSION, subject fixed per app (`CN=PackTune <App>`), key non-exportable, deleted right after signing, RFC 3161 timestamp required. |
 | 2 | SharePoint: private site, library "PackTune Packages", delegated `Sites.Selected` with a one-time admin grant, the admin creates the site, PackTune creates the library. Only the Intune administrator group may change the library. MSI versions are stored too. On delete the SharePoint copy is kept by default. |
 | 3 | **Change: a custom MSIX ends up as ONE Intune app.** MSIX is delivered as a Win32 app (.intunewin) containing the MSIX and the public certificate of that version. Install script: certificate into `LocalMachine\TrustedPeople`, then `Add-AppxProvisionedPackage` for all users. Detection checks the provisioned package version. Uninstall removes the package and only that version's certificate. Update = new Win32 app version with supersedence or in place, like the rest of PackTune. **No LOB app, no custom OMA-URI certificate profile, no certificate cleanup of profiles.** |
-| 4 | The module (MSIX Sandbox Studio) is changed directly for the gaps; PackTune checks a minimum module version; without the module the page stays disabled. |
+| 4 | **Replaced: the sandbox functions are integrated into PackTune, no dependency on MSIX Sandbox Studio.** `Modules\PackTune.Sandbox.psm1` and `Sandbox\*.ps1` hold only what PackTune needs: toolchain download on first use (Microsoft signature and SHA256 list), `.wsb` creation and launch, unattended capture of a folder and of an update on a previous MSIX, single-use certificate, signing by thumbprint with a mandatory timestamp, package identity reader, and the test lab (install, detect, uninstall as SYSTEM, verdict). Code taken over from Studio 2.5.0 (same author, MIT) and adapted; the registry restore of the update capture is fixed (a protected key no longer aborts it). The setting `SandboxStudioPath` is ignored. The Start item "Sandbox test" checks Windows Sandbox and the capture tools. (The earlier decision: Studio is changed directly, minimum version checked, page disabled without it.) |
 | 5 | Order of work: first the internal rename and the GitHub repository rename (PackTune), then Custom Applications (phase 0 spike needs a test tenant, still open), then Golden Master. |
 
 ## 1. Goal
@@ -270,7 +270,7 @@ Group.Read.All. New: `Sites.Selected` (daily), `Sites.FullControl.All` (one-time
 - Progress dialog with the activity log (preparing, installing, capturing, building, signing, wrapping, testing,
   uploading, storing); one sandbox job at a time, further jobs queue.
 - Dialogs for Update, Export (version list, target folder), Delete (what goes, checkboxes).
-- Readiness: Windows Sandbox available, MSIX Sandbox Studio found (minimum version), Package store.
+- Readiness: Windows Sandbox available, the capture tools (downloaded on first use), Package store (decision 4: integrated sandbox, no Studio).
 - Wired in phase 5 after the backend functions (section 11).
 
 ## 10. Failure handling

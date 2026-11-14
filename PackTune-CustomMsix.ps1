@@ -1,39 +1,13 @@
 <#
     Custom applications, "Other": anything that is not an MSI (EXE setups, scripts, several files). The user puts all
-    installation files into one folder; PackTune captures an MSIX from it in Windows Sandbox (MSIX Sandbox Studio, version
-    2.5.0 or newer), signs it on this machine with a certificate made for this version alone (non-exportable key, deleted
+    installation files into one folder; PackTune captures an MSIX from it in Windows Sandbox (Modules\PackTune.Sandbox.psm1,
+    built into PackTune), signs it on this machine with a certificate made for this version alone (non-exportable key, deleted
     right after signing) and delivers it as ONE Win32 app: the package holds the MSIX and the public certificate of the
     version; install.ps1 (SYSTEM) puts the certificate into LocalMachine\TrustedPeople and provisions the MSIX for all users.
     An update restores the previous MSIX in a fresh sandbox, runs the new installer and builds the next MSIX; a new app with
     supersedence carries it to the devices (docs\plans\custom-applications.md, sections 4, 5 and 10).
     Loaded by PackTune-Main.ps1.
 #>
-
-$script:StudioMinimum = [version]"2.5.0"
-
-#region Sandbox Studio
-
-function Get-PackTuneStudioState {
-    <# State of MSIX Sandbox Studio for the readiness list: Missing, TooOld or Ready, with version, path and what to do. #>
-    $Path = Find-SandboxStudio
-    if (-not $Path) { return [pscustomobject]@{ State = "Missing"; Version = $null; Path = $null; Message = "MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) was not found. Set its folder under Settings, Sandbox test." } }
-    $Version = $null
-    try { $Version = [version](Import-PowerShellDataFile -LiteralPath $Path).ModuleVersion } catch { }
-    if (-not $Version -or $Version -lt $script:StudioMinimum) {
-        return [pscustomobject]@{ State = "TooOld"; Version = $Version; Path = $Path; Message = "MSIX Sandbox Studio $script:StudioMinimum or newer is needed for custom applications (found: $(if ($Version) { $Version } else { 'unknown' })). Update it." }
-    }
-    [pscustomobject]@{ State = "Ready"; Version = $Version; Path = $Path; Message = "MSIX Sandbox Studio $Version is ready." }
-}
-
-function Import-PackTuneStudio {
-    # Loads the module; a clear error when it is missing or too old
-    $State = Get-PackTuneStudioState
-    if ($State.State -ne "Ready") { throw $State.Message }
-    Import-Module $State.Path -Force -ErrorAction Stop
-    return $State
-}
-
-#endregion
 
 #region identity and device scripts
 
@@ -251,22 +225,22 @@ function Invoke-PackTuneCustomMsixBuild {
         [Parameter(Mandatory = $true)][string]$Folder, [Parameter(Mandatory = $true)][string]$EntryPoint, [string]$Arguments = "",
         [Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertFolder
     )
-    $null = Import-PackTuneStudio
+    if (-not (Test-PackTuneSandboxAvailable)) { throw "Windows Sandbox is not installed on this computer: custom applications of type Other are captured there." }
     $Folder = Get-PackTuneLongPath -Path $Folder
     if ($BasePackage) { $BasePackage = Get-PackTuneLongPath -Path $BasePackage }
     $Identity = Get-PackTuneCustomMsixIdentity -Name $Name
     if (-not $CertFolder) { $CertFolder = Join-Path $script:WorkRoot ("certs\" + [guid]::NewGuid().ToString("N").Substring(0, 8)) }
     New-Item -ItemType Directory -Path $CertFolder -Force | Out-Null
-    $Cert = New-EphemeralSigningCertificate -Subject $Identity.Subject -OutputFolder $CertFolder
+    $Cert = New-PackTuneSigningCertificate -Subject $Identity.Subject -OutputFolder $CertFolder
     try {
         $Params = @{
             InstallerFolder = $Folder; EntryPoint = $EntryPoint; Arguments = $Arguments; PackageName = $Identity.PackageName; DisplayName = $Name
             Version = $Version; PublisherDisplayName = $(if ($PublisherDisplayName) { $PublisherDisplayName } else { $Name }); CertificateThumbprint = $Cert.Thumbprint
         }
         if ($BasePackage) { $Params.BasePackage = $BasePackage }
-        $Result = Invoke-MsixFolderPackaging @Params
+        $Result = Invoke-PackTuneMsixCapture @Params
     }
-    finally { [void](Remove-EphemeralSigningCertificate -Thumbprint $Cert.Thumbprint) }
+    finally { [void](Remove-PackTuneSigningCertificate -Thumbprint $Cert.Thumbprint) }
     if ($Result.State -ne "Succeeded" -or -not $Result.PackagePath) { throw "The capture failed: $($Result.Message) (logs: $($Result.JobPath))" }
     [pscustomobject]@{
         Msix = $Result.PackagePath; Cer = $Cert.CerPath; Thumbprint = $Cert.Thumbprint; Subject = $Cert.Subject; Identity = $Result.Identity

@@ -48,7 +48,7 @@ Start the interface with **Start.cmd** (or `powershell.exe -ExecutionPolicy Bypa
 
 ![Start](docs/screenshots/start.png)
 
-The readiness list checks the IntuneWin32App module, the app registration, the sign-in, the dependency app (PackTune Runtime) in the tenant and, as optional items, the status report and the sandbox test. The sandbox item checks for Windows Sandbox (not available on Windows Home; Install asks for administrator approval and needs a restart, and Set up everything never installs it) and for MSIX Sandbox Studio; until both are there the Test buttons are disabled and say why. A red item says why and has the button that fixes it. **Set up everything** runs all fixes one after another.
+The readiness list checks the IntuneWin32App module, the app registration, the sign-in, the dependency app (PackTune Runtime) in the tenant and, as optional items, the status report and the sandbox test. The sandbox item checks for Windows Sandbox (not available on Windows Home; Install asks for administrator approval and needs a restart, and Set up everything never installs it) and for the capture tools (Microsoft's MSIX Packaging Tool and signing tools, downloaded on first use or with **Download now**, checked against Microsoft's signature and a hash list); without Windows Sandbox the Test buttons are disabled and say why. Nothing else has to be installed: the sandbox functions are part of PackTune (`Modules\PackTune.Sandbox.psm1` and the scripts in `Sandbox\`). A red item says why and has the button that fixes it. **Set up everything** runs all fixes one after another.
 
 ### Apps
 
@@ -66,15 +66,21 @@ One list for both sources: the curated list in `catalog.json`, the 200 most down
 
 ### Custom applications
 
+![Custom applications](docs/screenshots/custom.png)
+
 Your own software next to the catalog apps, as Win32 apps in Intune. **New application** asks what you have:
 
 - **MSI**: fully automatic. PackTune reads the MSI without installing it (product code, name, version, manufacturer, upgrade code), builds the package with silent `msiexec` scripts (install as SYSTEM inside the device lock, remove by product code) and detects the app by product code and version. Extra public properties (`ALLUSERS=1 INSTALLDIR=...`) are passed to msiexec. **Test in sandbox** runs exactly these scripts in Windows Sandbox.
-- **Other** (EXE setups, scripts, several files): put ALL installation files into one folder and choose the entry point and the silent arguments. PackTune captures an MSIX from it automatically in a fresh Windows Sandbox (needs MSIX Sandbox Studio 2.5 or newer), signs it on this PC with a certificate made for this version alone (non-exportable key, deleted right after signing, never stored) and delivers it as **one** Win32 app: the package holds the MSIX and the public certificate of that version; `install.ps1` (SYSTEM) puts the certificate into `LocalMachine\TrustedPeople` and provisions the MSIX for all users. The publisher stays `CN=PackTune <name>` for every version, so updates keep the identity. A failed update puts the earlier version back and keeps its certificate; uninstall removes only the certificate of that version.
+- **Other** (EXE setups, scripts, several files): put ALL installation files into one folder and choose the entry point and the silent arguments. PackTune captures an MSIX from it automatically in a fresh Windows Sandbox (needs Windows Sandbox; Microsoft's capture tools are downloaded on first use), signs it on this PC with a certificate made for this version alone (non-exportable key, deleted right after signing, never stored) and delivers it as **one** Win32 app: the package holds the MSIX and the public certificate of that version; `install.ps1` (SYSTEM) puts the certificate into `LocalMachine\TrustedPeople` and provisions the MSIX for all users. The publisher stays `CN=PackTune <name>` for every version, so updates keep the identity. A failed update puts the earlier version back and keeps its certificate; uninstall removes only the certificate of that version.
 - **New version**: for an MSI a newer MSI of the same product (new product code); for an MSIX application the previous MSIX is restored from the package store in a fresh sandbox, the new installer (or the stored, possibly edited, files) runs on top, and the result goes out as a new version. Both create a new app that supersedes the old one (type update, assignments copied, auto-update for Available apps); **Remove-PackTuneSupersededApps** removes old versions no device has any more.
 - **Export to edit** downloads one version (package, original installer files, certificate, recipe, documentation) from the package store, checked against the manifest. Change the files, then **New version** with that folder.
 - **Remove from Intune** asks whether the stored files go too (SharePoint keeps them in its recycle bin). Devices keep the installed software.
 
-**Package store.** Intune cannot give content back, so every version is kept in the document library `PackTune Packages` of a private SharePoint site: `<app id>/<version>/` with `package.msix` or `package.intunewin`, `installer.zip` (the original installer files, always), `recipe.json`, `signing.cer`, `documentation.zip` and `manifest.json` (SHA256 of everything, written last). Set it up on the Start page: create a private site (members: the Intune administrators only, because whoever can write there could replace an installer that becomes an app for all devices), enter its address, let an administrator grant PackTune access to that one site (**Grant access**; the sign-in needs `Sites.FullControl.All` for this call only, daily work uses the delegated `Sites.Selected`), create the library. The start of the manifest hash is written into the notes of every Intune app, so an export or an update refuses files that do not match what was packaged. MSIX applications need the store; MSI applications use it when it is set up. Requirement for the capture: Windows Sandbox and MSIX Sandbox Studio 2.5.0 or newer (readiness items on the Start page).
+![New application](docs/screenshots/custom-dialog.png)
+
+**Package store.** Intune cannot give content back, so every version is kept in the document library `PackTune Packages` of a private SharePoint site: `<app id>/<version>/` with `package.msix` or `package.intunewin`, `installer.zip` (the original installer files, always), `recipe.json`, `signing.cer`, `documentation.zip` and `manifest.json` (SHA256 of everything, written last). Set it up on the Start page: create a private site (members: the Intune administrators only, because whoever can write there could replace an installer that becomes an app for all devices), enter its address, let an administrator grant PackTune access to that one site (**Grant access**; the sign-in needs `Sites.FullControl.All` for this call only, daily work uses the delegated `Sites.Selected`), create the library. The start of the manifest hash is written into the notes of every Intune app, so an export or an update refuses files that do not match what was packaged. MSIX applications need the store; MSI applications use it when it is set up. Requirement for the capture: Windows Sandbox (readiness item on the Start page).
+
+![Package store](docs/screenshots/package-store.png)
 ### Review and deploy
 
 ![Review and deploy](docs/screenshots/deploy.png)
@@ -156,7 +162,6 @@ Deployments run one after another in the background, and the window stays usable
 - **Tenant and app registration**: tenant (domain or ID) and client ID. *Create or update app registration* runs the setup again, adds missing permissions and the admin consent.
 - **Deployment defaults**: assignment, preferred source, architecture, version, update mode and the default schedule for new apps.
 - **Package sources**: the metadata feed (read on this computer), the package source used on the devices (`choco --source`), and the download URL of the Chocolatey bootstrap. Empty = the community repository.
-- **Sandbox test**: the folder of MSIX Sandbox Studio ([WindowsSandboxMSIXInstaller](https://github.com/dominguez-posh/WindowsSandboxMSIXInstaller)). It is found automatically in the folder next to this repository, in `C:\git\WindowsSandboxMSIXInstaller`, or as installed module. The tests need Windows Sandbox.
 - Module installation and the work folder.
 
 Settings are saved in `%LOCALAPPDATA%\PackTune\settings.json` and are also used by the command line functions. On the first start after the rename they are copied (not moved) from `%LOCALAPPDATA%\IntuneChocoDeployment`, together with the feed and icon caches. Package infos are cached for 24 hours; SVG icons are rendered once with Edge and kept in the work folder.
@@ -244,7 +249,8 @@ Without parameters you are asked for tenant and client ID. A browser window open
 | `Update-PackTuneApp` | Changes an app in place: version, update mode, schedule |
 | `Publish-PackTuneRelease` | Releases a version the right way for the assignment (supersedence for Available apps, in place for Required) |
 | `Remove-PackTuneSupersededApps` | Removes superseded apps that no device reports as installed |
-| `Test-PackTunePackage` | Tests a package in Windows Sandbox |
+| `Test-PackTunePackage` | Tests a package in Windows Sandbox (test lab built into PackTune) |
+| `Invoke-PackTuneMsixCapture` / `Update-PackTuneToolchain` | Sandbox module: capture a folder as MSIX (also as update), download the capture tools |
 | `New-PackTuneCustomMsiApp` | Deploys an MSI as a Win32 app (product code detection) |
 | `New-PackTuneCustomOtherApp` | Captures an installation folder as MSIX and deploys it as one Win32 app |
 | `Publish-PackTuneCustomVersion` / `Update-PackTuneCustomOtherApp` | New version of an MSI / MSIX application through supersedence |
@@ -292,7 +298,7 @@ Run in Windows PowerShell 5.1 from the repository folder. None of them contacts 
 - `Tests\Invoke-GuiSmoke.ps1`: starts the interface off-screen with a fake IntuneWin32App module (`Tests\Fakes`), its own `%LOCALAPPDATA%` and a stand-in for the Microsoft sign-in. It drives every page and checks the results. Package infos come from the real Chocolatey feed.
 - `Tests\Check-Insight.ps1`: import, status and device-log functions with fake Graph responses.
 - `Tests\Check-Schedule.ps1`: policy round trip through the notes, fingerprint, notes length and the generated device scripts (they are parsed, never run).
-- `Tests\Check-Custom.ps1`, `Check-CustomMsix.ps1`, `Check-Store.ps1`: custom applications (MSI read from a Property table, the device scripts, certificate per version made and removed around the capture, deployment, new version, export, delete) and the package store against a fake SharePoint in memory (upload sessions, manifest, tamper tests, zip slip). `Tests\Spike-MsixWin32.ps1` runs the MSIX install, detect, failed-update restore, update and uninstall scripts as SYSTEM in Windows Sandbox.
+- `Tests\Check-Sandbox.ps1`: the sandbox module without a sandbox (fake launcher, a real single-use certificate that is removed again, fake signtool, toolchain hashes, entry point rules, registry restore of the update capture). `Tests\Check-Custom.ps1`, `Check-CustomMsix.ps1`, `Check-Store.ps1`: custom applications (MSI read from a Property table, the device scripts, certificate per version made and removed around the capture, deployment, new version, export, delete) and the package store against a fake SharePoint in memory (upload sessions, manifest, tamper tests, zip slip). `Tests\Spike-MsixWin32.ps1` runs the MSIX install, detect, failed-update restore, update and uninstall scripts as SYSTEM in Windows Sandbox.
 - `Tests\Check-Sources.ps1`: recommended source, source filter, deployment per source, PackTune Runtime dependency and migration, release by supersedence or in place.
 
 The screenshots and the tour are rendered from the same demo data and refreshed with:

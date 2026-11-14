@@ -65,11 +65,11 @@ $script:InsightFake = Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) 'I
 $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'start page'; Do = {
         $script:EmbeddedAvailableOverride = $false   # simulates a missing WebView2 runtime: the sign-in uses the browser, as the fake authority needs
-        $script:SandboxOverride = @{ Present = $true; Studio = $true }
+        $script:SandboxOverride = @{ Present = $true }
         Update-SandboxState
         Test-Smoke 'settings were copied from the folder of the earlier name' ((Test-Path (Join-Path $env:LOCALAPPDATA 'PackTune\settings.json')) -and (Test-Path (Join-Path $env:LOCALAPPDATA 'PackTune\migrated-from-intunechoco.txt')) -and (Test-Path (Join-Path $env:LOCALAPPDATA 'IntuneChocoDeployment\settings.json'))) ''
         Test-Smoke 'fake module counts as installed' $script:ModuleState.Ok $script:ModuleState.Version
-        Test-Smoke 'readiness shows 8 items' ($ui.ReadinessPanel.Children.Count -eq 8) $ui.ReadinessPanel.Children.Count
+        Test-Smoke 'readiness shows 7 items' ($ui.ReadinessPanel.Children.Count -eq 7) $ui.ReadinessPanel.Children.Count
         Test-Smoke 'signed out: split button shown, account pill hidden' ((-not (Test-SignedIn)) -and $ui.PanelSignedOut.Visibility -eq 'Visible' -and $ui.BtnAccount.Visibility -eq 'Collapsed' -and $ui.BtnSignIn.IsEnabled)
         Test-Smoke 'navigation has the five entries, no package source switch' ($ui.NavStart -and $ui.NavApps -and $ui.NavTenant -and $ui.NavActivity -and $ui.NavSettings -and $ui.NavHelp -and -not $ui.ContainsKey('SrcWinget'))
         Test-Smoke 'help dialog opens' ($(Show-Help; $ui.DialogLayer.Visibility -eq 'Visible' -and $ui.DlgHelp.Visibility -eq 'Visible' -and $ui.HelpBody.Children.Count -ge 4))
@@ -427,10 +427,10 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Show-Page 'Tenant'
         $ui.LstTenant.SelectedItem = @($script:TenantRowList | Where-Object { -not ($_.Data.IsChocolatey -or $_.Data.IsDependency) })[0]
         # 1. Windows Sandbox missing (installable)
-        $script:SandboxOverride = @{ Present = $false; Home = $false; Studio = $true }
+        $script:SandboxOverride = @{ Present = $false; Home = $false }
         $item = Get-SandboxItem
         Test-Smoke 'start page: Sandbox item is optional and offers Install' ($item.Optional -and $item.State -eq 'warn' -and $item.Fix -eq 'Install' -and $item.Text -like '*not installed*administrator approval*restart*') $item.Text
-        Test-Smoke 'checklist has the Sandbox item (8 rows)' ($ui.ReadinessPanel.Children.Count -eq 8)
+        Test-Smoke 'checklist has the Sandbox item (7 rows)' ($ui.ReadinessPanel.Children.Count -eq 7)
         Test-Smoke 'Test buttons disabled with the reason and a pointer to the Start page' (-not $ui.BtnDetailTest.IsEnabled -and -not $ui.BtnTenantTest.IsEnabled -and $ui.BtnDetailTest.ToolTip -like '*Windows Sandbox is not installed*Start page*' -and $ui.BtnTenantTest.ToolTip -like '*Start page*') "$($ui.BtnDetailTest.IsEnabled) $($ui.BtnTenantTest.ToolTip)"
         # Set up everything does not install it
         Start-SetupAll
@@ -445,22 +445,22 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'after the install: restart required, buttons still disabled' ($item.Text -like '*restart required*' -and -not $item.Fix -and -not $ui.BtnDetailTest.IsEnabled -and $ui.BtnDetailTest.ToolTip -like '*restart*')
         $script:SandboxRestart = $false
         # 3. Windows Home
-        $script:SandboxOverride = @{ Present = $false; Home = $true; Studio = $true }
+        $script:SandboxOverride = @{ Present = $false; Home = $true }
         $item = Get-SandboxItem
         Test-Smoke 'Windows Home: says why, no Install button' ($item.Text -like '*Windows Home*' -and -not $item.Fix)
-        $script:SandboxOverride = @{ Present = $false; Home = $false; VirtualizationOff = $true; Studio = $true }
+        $script:SandboxOverride = @{ Present = $false; Home = $false; VirtualizationOff = $true }
         Test-Smoke 'virtualization off is named in the item' ((Get-SandboxItem).Text -like '*Virtualization is switched off*')
-        # 4. Sandbox there, Studio missing
-        $script:SandboxOverride = @{ Present = $true; Studio = $false }
+        # 4. Sandbox there, capture tools not downloaded yet: the Test buttons work (the lab needs no tools), the item offers the download
+        $script:SandboxOverride = @{ Present = $true; Toolchain = 'Missing' }
         $item = Get-SandboxItem
-        Test-Smoke 'Studio missing: item says where to get it, Test disabled' ($item.Fix -eq 'Get it' -and $item.Text -like '*dominguez-posh/WindowsSandboxMSIXInstaller*' -and -not $ui.BtnTenantTest.IsEnabled -and $ui.BtnTenantTest.ToolTip -like '*MSIX Sandbox Studio*Start page*')
-        Save-SmokeShot '25-sandbox-item-missing'
-        Show-Page 'Start'; Save-SmokeShot '26-start-sandbox-studio-missing'
+        Test-Smoke 'capture tools missing: item offers the download, says they are fetched when needed, Test buttons enabled' ($item.State -eq 'warn' -and $item.Optional -and $item.Fix -eq 'Download now' -and $item.Text -like '*downloaded the first time they are needed*' -and $ui.BtnTenantTest.IsEnabled) $item.Text
+        Save-SmokeShot '25-sandbox-item-tools'
+        Show-Page 'Start'; Save-SmokeShot '26-start-sandbox-tools-missing'
         # 5. both available
-        $script:SandboxOverride = @{ Present = $true; Studio = $true }
+        $script:SandboxOverride = @{ Present = $true }
         $item = Get-SandboxItem
         Show-Page 'Tenant'; Update-TenantButtons; Show-Page 'Apps'; Show-AppDetails $detailRow
-        Test-Smoke 'Sandbox and Studio there: item green, Test buttons enabled' ($item.State -eq 'ok' -and $ui.BtnDetailTest.IsEnabled -and $ui.BtnTenantTest.IsEnabled -and -not $ui.BtnDetailTest.ToolTip)
+        Test-Smoke 'Sandbox and capture tools there: item green, Test buttons enabled' ($item.State -eq 'ok' -and $ui.BtnDetailTest.IsEnabled -and $ui.BtnTenantTest.IsEnabled -and -not $ui.BtnDetailTest.ToolTip)
         $script:SandboxInstallOverride = $null
         $ui.PanelDetails.Visibility = 'Collapsed'; $script:DetailRow = $null
         $true } }
@@ -624,7 +624,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Save-SmokeShot '32-custom-empty'
             & $script:ClickActions[$ui.BtnCustomNew]
             Test-Smoke 'New application opens the dialog with MSI chosen' ($ui.DlgCustom.Visibility -eq 'Visible' -and $ui.RbCustomMsi.IsChecked -and -not $ui.BtnCustomDeploy.IsEnabled) ''
-            Test-Smoke 'Other is available when MSIX Sandbox Studio is ready' ($ui.RbCustomOther.IsEnabled -and $ui.TxtCustomOther.Text -like '*captured as an MSIX*') $ui.TxtCustomOther.Text
+            Test-Smoke 'Other is available when Windows Sandbox is ready' ($ui.RbCustomOther.IsEnabled -and $ui.TxtCustomOther.Text -like '*captured as an MSIX*') $ui.TxtCustomOther.Text
             Set-CustomPath (Join-Path $s.Dir 'missing.msi')
             Test-Smoke 'a missing file is reported, nothing to deploy' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.TxtCustomRead.Text) $ui.TxtCustomRead.Text
             Set-CustomPath (Join-Path $s.Dir 'tool-1.0.msi')
@@ -736,8 +736,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Save-SmokeShot '39-package-store'
             & $script:ClickActions[$ui.BtnStoreClose]
             Show-Page 'Start'
-            $items = @(Get-ReadinessItems | Where-Object { $_.Key -in 'studio', 'store' })
-            Test-Smoke 'readiness: Sandbox Studio ready, package store not ready yet (both optional)' ($items.Count -eq 2 -and ($items | Where-Object Key -eq 'studio').State -eq 'ok' -and ($items | Where-Object Key -eq 'store').State -eq 'warn' -and @($items | Where-Object { -not $_.Optional }).Count -eq 0) (($items | ForEach-Object { "$($_.Key)=$($_.State)" }) -join ',')
+            $items = @(Get-ReadinessItems | Where-Object { $_.Key -in 'sandbox', 'store' })
+            Test-Smoke 'readiness: Windows Sandbox with the capture tools ready, package store not ready yet (both optional)' ($items.Count -eq 2 -and ($items | Where-Object Key -eq 'sandbox').State -eq 'ok' -and ($items | Where-Object Key -eq 'store').State -eq 'warn' -and @($items | Where-Object { -not $_.Optional }).Count -eq 0) (($items | ForEach-Object { "$($_.Key)=$($_.State)" }) -join ',')
             # remove the test app and the saved site
             $s2 = Get-PackTuneSettings; $s2.StoreSiteUrl = ''; [void](Save-PackTuneSettings -Settings $s2); $script:Settings = Get-PackTuneSettings; $script:StoreState = $null
             $storePath = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
@@ -1150,10 +1150,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             0 {
                 Show-Page 'Settings'
                 Test-Smoke 'settings show the update defaults' ($ui.CmbDefaultUpdate.SelectedIndex -eq 1 -and $ui.CmbDefaultVersion.SelectedIndex -eq 0)
-                $ui.TxtSandboxStudioPath.Text = Join-Path (Split-Path $env:PACKTUNE_SMOKE) 'Fakes\MsixSandboxStudio'
-                Save-Settings
-                Test-Smoke 'sandbox studio found' ((Find-SandboxStudio) -like '*Fakes*MsixSandboxStudio.psd1') (Find-SandboxStudio)
-                Test-Smoke 'settings show where the studio is' ($ui.TxtSandboxStudioState.Text -like 'Found:*Fakes*') $ui.TxtSandboxStudioState.Text
+                Test-Smoke 'the old Sandbox Studio setting is gone from the settings' (-not (Get-PackTuneSettings).PSObject.Properties['SandboxStudioPath'] -and -not $ui.ContainsKey('TxtSandboxStudioPath'))
                 Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Title 'PuTTY' -Version 'latest' -Policy @{ UpdateMode = 'Custom'; GraceHours = 24 }
                 try { Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Version 'latest' -Policy @{ UpdateMode = 'Off'; GraceHours = 24 }; Test-Smoke 'only one sandbox test at a time' $false }
                 catch { Test-Smoke 'only one sandbox test at a time' ($_.Exception.Message -like '*already running*') $_.Exception.Message }
@@ -1162,7 +1159,8 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             }
             1 {
                 if (-not (Test-Idle 'test')) { return $false }
-                Test-Smoke 'Chocolatey test ran in the lab' (Test-Path (Join-Path $lab 'Choco-putty.install\started.txt'))
+                $first = Join-Path $lab '01-Lab'
+                Test-Smoke 'Chocolatey test ran in the lab' ((Test-Path (Join-Path $first 'started.txt')) -and ((Get-Content (Join-Path $first 'job.json') -Raw | ConvertFrom-Json).DisplayName -like '*(Chocolatey)') -and (Test-Path (Join-Path $first 'source\choco-app.ps1')))
                 Test-Smoke 'result in a toast and the log' ((Get-SmokeLog) -match 'sandbox test passed' -and @($script:Toasts | Where-Object { $_.Text -like '*passed*' }).Count -ge 1)
                 # From the details panel of the apps list (winget source)
                 Show-Page 'Apps'
@@ -1175,16 +1173,15 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             }
             2 {
                 if (-not (Test-Idle 'test')) { return $false }
-                $source = Join-Path $lab 'Winget-VideoLAN.VLC\source'
-                Test-Smoke 'winget test from the details panel ran in the lab' (Test-Path (Join-Path $lab 'Winget-VideoLAN.VLC\started.txt'))
+                $second = Join-Path $lab '02-Lab'
+                $source = Join-Path $second 'source'
+                Test-Smoke 'winget test from the details panel ran in the lab' ((Test-Path (Join-Path $second 'started.txt')) -and ((Get-Content (Join-Path $second 'job.json') -Raw | ConvertFrom-Json).DisplayName -like '*(Winget)'))
                 Test-Smoke 'winget test sets up winget first' ((Get-Content (Join-Path $source 'Install.ps1') -Raw) -match 'Repair-WinGetPackageManager')
                 foreach ($file in Get-ChildItem $source -Filter '*.ps1') {
                     $errors = $null
                     [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)
                     Test-Smoke "lab script $($file.Name) is valid" ($errors.Count -eq 0) (@($errors | ForEach-Object { $_.Message }) -join '; ')
                 }
-                $ui.TxtSandboxStudioPath.Text = ''
-                Save-Settings
                 $true
             }
         } } }

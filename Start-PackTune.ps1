@@ -719,7 +719,7 @@ $script:HelpTexts = @{
         @('One list', 'Chocolatey and winget packages in one list. Each card shows the version of every source and marks the source with the newer version as recommended. Type to filter, or search both repositories for apps that are not in the list.'),
         @('Sources', 'All sources shows everything, winget and Chocolatey the apps that only that source has, Both the apps that are available from both. Install with sets the source for apps without a recommendation; you can change it per app when you review.'),
         @('Deploy', 'Select apps, then Review and deploy: choose the source per app, the version, the assignment and how devices update. Deployments run one after another under Activity.'),
-        @('Test in sandbox', 'The details panel tests one app in a fresh Windows Sandbox before it goes to Intune. Needs MSIX Sandbox Studio and Windows Sandbox, no sign-in.'),
+        @('Test in sandbox', 'The details panel tests one app in a fresh Windows Sandbox before it goes to Intune. Needs Windows Sandbox (the test lab is part of PackTune), no sign-in.'),
         @('License notes', 'Apps whose license restricts business use carry a Check license note. They are deployed only after a confirmation; the license is still yours to clear.'))
     Tenant   = @(
         @('In tenant', 'The apps this tool created in the tenant, from both sources, with the dependency app PackTune Runtime (and the two older dependency apps until you remove them). Everything is read from Intune; there is no local database.'),
@@ -731,8 +731,7 @@ $script:HelpTexts = @{
     Settings = @(
         @('Tenant and app registration', 'The tenant (domain or ID) and the client ID of your app registration. Grant new permissions runs the app registration setup again, which adds missing permissions and the admin consent.'),
         @('Deployment defaults', 'What the deploy dialog starts with: assignment, preferred source, architecture, version and update mode. Schedule and conditions for new apps opens the schedule dialog.'),
-        @('Package sources', 'The metadata feed is read on this computer. The package source is what choco uses on the devices (--source); the download URL is where the Chocolatey bootstrap gets its nupkg. Both empty = community repository. Chocolatey rate limits downloads from its community repository; for larger environments put an internal repository or caching proxy in front.'),
-        @('Sandbox test', 'The Test buttons use the Win32 Test Lab of MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) and need Windows Sandbox.'))
+        @('Package sources', 'The metadata feed is read on this computer. The package source is what choco uses on the devices (--source); the download URL is where the Chocolatey bootstrap gets its nupkg. Both empty = community repository. Chocolatey rate limits downloads from its community repository; for larger environments put an internal repository or caching proxy in front.'))
 }
 function Show-Help {
     $page = if ($script:CurrentPage -eq 'Status') { 'Tenant' } else { $script:CurrentPage }
@@ -866,10 +865,10 @@ function Get-ReadinessItems {
         elseif (-not $sb.Present) { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'warn'; Optional = $true
                                        Text = "Windows Sandbox is not installed. It tests an app in a throw-away Windows before it goes to Intune. Installing needs administrator approval and a restart.$(if ($sb.Reason) { ' ' + $sb.Reason })"
                                        Fix = 'Install'; Action = { Start-SandboxInstall } } }
-        elseif (-not $sb.Studio) { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'warn'; Optional = $true
-                                      Text = 'MSIX Sandbox Studio was not found. Get WindowsSandboxMSIXInstaller from github.com/dominguez-posh/WindowsSandboxMSIXInstaller, or enter its folder in the settings.'
-                                      Fix = 'Get it'; Action = { Start-Process $script:SandboxStudioUrl } } }
-        else { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'ok'; Optional = $true; Text = 'Windows Sandbox and MSIX Sandbox Studio are ready for the Test buttons.' } }
+        elseif ($sb.Toolchain -ne 'Ready') { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'toolchain')
+                                      Text = 'Windows Sandbox is ready for the Test buttons. Custom applications of type Other also need Microsoft''s capture tools (MSIX Packaging Tool, signing tools; about 150 MB). They are downloaded the first time they are needed, or now.'
+                                      Fix = 'Download now'; Action = { Start-ToolchainDownload } } }
+        else { @{ Key = 'sandbox'; Title = 'Sandbox test (optional)'; State = 'ok'; Optional = $true; Text = 'Windows Sandbox and the capture tools are ready for the Test buttons and custom applications.' } }
     )
     $items += Get-StoreReadinessItems
     $items
@@ -1559,7 +1558,7 @@ function Show-CustomDialog([string]$Mode, $App) {
     $script:CustomUpdateApp = $App
     $script:CustomInfo = $null
     $isNew = $Mode -eq 'New'
-    $studio = Get-PackTuneStudioState
+    $studio = Get-CustomCaptureState
     $ui.RbCustomOther.IsEnabled = ($studio.State -eq 'Ready')
     $ui.RbCustomOther.ToolTip = if ($studio.State -eq 'Ready') { 'Installers, scripts and several files: captured as MSIX in Windows Sandbox' } else { $studio.Message }
     $ui.TxtCustomOther.Text = if ($studio.State -eq 'Ready') { 'Other: installers, scripts and several files are captured as an MSIX in Windows Sandbox.' } else { "Other (EXE setups, scripts, several files) is not available: $($studio.Message)" }
@@ -1599,7 +1598,7 @@ Add-Click $ui.BtnCustomNewVersion {
     $app = Get-SelectedCustomApp
     if (-not $app) { return }
     if ($app.Kind -eq 'msix') {
-        $studio = Get-PackTuneStudioState
+        $studio = Get-CustomCaptureState
         if ($studio.State -ne 'Ready') { throw $studio.Message }
         Show-CustomDialog 'Update' $app
     }
@@ -1675,7 +1674,6 @@ Add-Click $ui.BtnCustomDeploy {
 Add-Click $ui.BtnCustomTest {
     if (-not $script:CustomInfo) { return }
     if (Test-TaskRunning 'test') { throw 'A sandbox test is already running (Windows Sandbox runs one at a time).' }
-    if (-not (Find-SandboxStudio)) { throw 'MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) was not found. Enter its folder under Settings > Sandbox test.' }
     $props = ConvertFrom-CustomProps $ui.TxtCustomProps.Text
     $name = $script:CustomInfo.Name
     [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: run Install, Detect and Uninstall in the sandbox, then report the result there" -Display "Sandbox: $name" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props } `
@@ -1733,7 +1731,7 @@ Add-Click $ui.BtnCustomExport {
     })
 }
 
-# ---------------------------------------------------------------- package store and Sandbox Studio (readiness, dialog)
+# ---------------------------------------------------------------- package store (readiness, dialog)
 $script:StoreState = $null
 function Start-StoreCheck {
     if (-not (Test-SignedIn) -or (Test-TaskRunning 'storecheck')) { return }
@@ -1750,10 +1748,7 @@ function Start-StoreCheck {
     })
 }
 function Get-StoreReadinessItems {
-    $studio = Get-PackTuneStudioState
     $items = @()
-    $items += if ($studio.State -eq 'Ready') { @{ Key = 'studio'; Title = 'Custom applications: MSIX capture (optional)'; State = 'ok'; Optional = $true; Text = $studio.Message } }
-              else { @{ Key = 'studio'; Title = 'Custom applications: MSIX capture (optional)'; State = 'warn'; Optional = $true; Text = "$($studio.Message) MSI applications work without it."; Fix = 'Get it'; Action = { Start-Process $script:SandboxStudioUrl } } }
     $items += if (-not (Test-SignedIn)) { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Text = 'Keeps every version of a custom application in a private SharePoint library, so it can be updated and edited from any PC. Sign in first.' } }
               elseif (-not $script:Settings.StoreSiteUrl) { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Text = 'Keeps every version of a custom application in a private SharePoint library, so it can be updated and edited from any PC. MSIX applications need it.'; Fix = 'Set up'; Action = { Show-StoreDialog } } }
               elseif (-not $script:StoreState) { @{ Key = 'store'; Title = 'Package store (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'storecheck'); Text = 'Checking the package store ...'; Fix = 'Check'; Action = { Start-StoreCheck } } }
@@ -3267,27 +3262,26 @@ $script:JobRows.Add_CollectionChanged({
 })
 
 # ---------------------------------------------------------------- sandbox test
-# ---------------------------------------------------------------- Windows Sandbox and MSIX Sandbox Studio (optional, for the Test buttons)
-$script:SandboxOverride = $null          # tests: @{ Present; Home; VirtualizationOff; Studio = $true/$false }
+# ---------------------------------------------------------------- Windows Sandbox and the capture tools (optional, for the Test buttons and custom applications)
+$script:SandboxOverride = $null          # tests: @{ Present; Home; VirtualizationOff; Toolchain = 'Ready' or 'Missing' }
 $script:SandboxInstallOverride = $null   # tests: script block that gets the elevated command instead of starting it
 $script:SandboxRestart = $false          # installed in this session, Windows has to restart
 $script:SandboxState = $null
-$script:SandboxStudioUrl = 'https://github.com/dominguez-posh/WindowsSandboxMSIXInstaller'
 
 function Get-SandboxState {
     # Detected without administrator rights: the program file of the feature, the edition and (if known) the virtualization flag
     $o = $script:SandboxOverride
-    if ($o) { $present = [bool]$o.Present; $isHome = [bool]$o.Home; $virtOff = [bool]$o.VirtualizationOff; $studio = if ($o.Studio) { 'MsixSandboxStudio.psd1' } else { $null } }
+    if ($o) { $present = [bool]$o.Present; $isHome = [bool]$o.Home; $virtOff = [bool]$o.VirtualizationOff; $toolchain = if ($o.Toolchain) { [string]$o.Toolchain } else { 'Ready' } }
     else {
         $present = Test-Path (Join-Path $env:SystemRoot 'System32\WindowsSandbox.exe')
         $edition = try { [string](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -ErrorAction Stop).EditionID } catch { '' }
         $isHome = $edition -match '^Core'
         $virtOff = $false
         if (-not $present -and -not $isHome) { try { $virtOff = (@(Get-CimInstance Win32_Processor -ErrorAction Stop | Where-Object { $_.VirtualizationFirmwareEnabled -eq $false }).Count -gt 0) } catch { } }
-        $studio = Find-SandboxStudio
+        $toolchain = (Get-PackTuneToolchainState).State
     }
     $reason = if ($present) { '' } elseif ($isHome) { 'Windows Home does not include Windows Sandbox (it needs Pro, Enterprise or Education).' } elseif ($virtOff) { 'Virtualization is switched off in the BIOS or UEFI.' } else { '' }
-    [pscustomobject]@{ Present = $present; Installable = (-not $present -and -not $isHome); Reason = $reason; Studio = $studio; RestartPending = $script:SandboxRestart }
+    [pscustomobject]@{ Present = $present; Installable = (-not $present -and -not $isHome); Reason = $reason; Toolchain = $toolchain; RestartPending = $script:SandboxRestart }
 }
 function Update-SandboxState { $script:SandboxState = Get-SandboxState; Update-SandboxButtons }
 function Get-CachedSandboxState { if (-not $script:SandboxState) { $script:SandboxState = Get-SandboxState }; $script:SandboxState }
@@ -3297,7 +3291,6 @@ function Get-SandboxBlocker {
     $s = Get-CachedSandboxState
     if ($s.RestartPending) { return 'Windows Sandbox needs a restart of Windows first. See the Start page (Sandbox test).' }
     if (-not $s.Present) { return 'Windows Sandbox is not installed. Set it up on the Start page (Sandbox test).' }
-    if (-not $s.Studio) { return 'MSIX Sandbox Studio was not found. See the Start page (Sandbox test).' }
     $null
 }
 
@@ -3317,6 +3310,24 @@ function Get-SandboxInstallCommand {
     # The elevated command: only the optional feature, no restart (the user restarts when it suits)
     $script = '$ErrorActionPreference = ''Stop''; try { $r = Enable-WindowsOptionalFeature -Online -FeatureName Containers-DisposableClientVM -All -NoRestart; if ($r.RestartNeeded) { exit 3010 } else { exit 0 } } catch { Write-Error $_.Exception.Message; exit 1 }'
     @{ File = 'powershell.exe'; Arguments = "-NoProfile -ExecutionPolicy Bypass -Command `"$script`""; Verb = 'RunAs' }
+}
+
+function Get-CustomCaptureState {
+    # Custom applications of type Other are captured in Windows Sandbox; the capture tools are downloaded on first use
+    $blocker = Get-SandboxBlocker
+    if ($blocker) { return [pscustomobject]@{ State = 'Blocked'; Message = $blocker } }
+    [pscustomobject]@{ State = 'Ready'; Message = 'Windows Sandbox is ready.' }
+}
+
+function Start-ToolchainDownload {
+    if (Test-TaskRunning 'toolchain') { return }
+    [void](Start-UiTask -Kind 'toolchain' -Title 'Downloading the capture tools (MSIX Packaging Tool and signing tools from Microsoft)' -Display 'Capture tools' -Pool $script:UserPool -Work 'Update-PackTuneToolchain | Out-Null' -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'failed') { Show-Toast 'The capture tools could not be downloaded, see Activity.' 'bad' } else { Show-Toast 'The capture tools are ready.' 'ok' }
+        Update-SandboxState
+        Update-Readiness
+    })
+    Update-Readiness
 }
 
 function Start-SandboxInstall {
@@ -3347,7 +3358,6 @@ catch { [pscustomobject]@{ Exit = -1; Declined = ($_.Exception.Message -match 'c
 function Start-PackageTest {
     param([Parameter(Mandatory)][string]$Package, [Parameter(Mandatory)][string]$Source, [string]$Title, [string]$Version, [hashtable]$Policy)
     if (Test-TaskRunning 'test') { throw 'A sandbox test is already running (Windows Sandbox runs one at a time).' }
-    if (-not (Find-SandboxStudio)) { throw 'MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) was not found. Enter its folder under Settings > Sandbox test.' }
     if ($Source -eq 'Winget' -and -not $script:ModuleState.Winget) { throw 'winget packages need the Microsoft.WinGet.Client module: install it under Settings > Components.' }
     $name = if ($Title) { $Title } else { $Package }
     $arguments = @{ Package = $Package; Source = $Source; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours }
@@ -3666,16 +3676,10 @@ function Update-SettingsView {
     $ui.TxtSettingsPath.Text = $script:SettingsPath
     Set-PolicyControls 'Default' $s.UpdateMode $s.GraceHours
     $ui.CmbDefaultVersion.SelectedIndex = if ($s.VersionMode -eq 'Pinned') { 1 } else { 0 }
-    $ui.TxtSandboxStudioPath.Text = $s.SandboxStudioPath
     $t = Format-ScheduleSummary (Get-ChocoScheduleDefaults)
     $ui.TxtDefaultSchedule.Text = "$($t.When). $($t.Conditions)."
-    Update-SandboxStudioState
-    Update-ModuleState
-}
-function Update-SandboxStudioState {
-    $found = Find-SandboxStudio
-    $ui.TxtSandboxStudioState.Text = if ($found) { "Found: $found" } else { 'Not found: enter the folder of WindowsSandboxMSIXInstaller. The Test buttons need it and Windows Sandbox.' }
     $script:SandboxState = $null; Update-Readiness; Update-SandboxButtons
+    Update-ModuleState
 }
 $ui.CmbArchitecture.ItemsSource = @('x64x86', 'x64', 'x86', 'arm64', 'AllWithARM64')
 $ui.CmbAssignment.ItemsSource = @('Available', 'Required', 'None')
@@ -3687,7 +3691,6 @@ function Save-Settings {
         UpdateMode            = $defaults.UpdateMode
         GraceHours            = $defaults.GraceHours
         VersionMode           = $(if ($ui.CmbDefaultVersion.SelectedIndex -eq 1) { 'Pinned' } else { 'Latest' })
-        SandboxStudioPath     = $ui.TxtSandboxStudioPath.Text
         TenantID              = $ui.TxtTenantId.Text
         ClientID              = $ui.TxtClientId.Text
         MetadataFeed          = $ui.TxtMetadataFeed.Text
@@ -3706,7 +3709,7 @@ function Save-Settings {
     Write-UiLog "Settings saved to $script:SettingsPath." 'Success'
     Show-Toast 'Settings saved.' 'ok'
     Set-DeployDefaults
-    Update-SandboxStudioState
+    $script:SandboxState = $null; Update-Readiness; Update-SandboxButtons
     Update-ConnectionStatus
 }
 function Set-DeployDefaults {

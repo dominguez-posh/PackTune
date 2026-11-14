@@ -784,15 +784,6 @@
 
                                     <Border Style="{StaticResource CardBox}" Padding="20,18" Margin="0,14,0,0">
                                         <StackPanel>
-                                            <TextBlock Text="Sandbox test" Style="{StaticResource CardTitle}"/>
-                                            <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,12" Text="The Test buttons use the Win32 Test Lab of MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) and need Windows Sandbox. Empty = found automatically."/>
-                                            <TextBox x:Name="TxtSandboxStudioPath" AutomationProperties.Name="Sandbox studio folder"/>
-                                            <TextBlock x:Name="TxtSandboxStudioState" Style="{StaticResource Hint}" Margin="0,6,0,0"/>
-                                        </StackPanel>
-                                    </Border>
-
-                                    <Border Style="{StaticResource CardBox}" Padding="20,18" Margin="0,14,0,0">
-                                        <StackPanel>
                                             <TextBlock Text="Package sources" Style="{StaticResource CardTitle}"/>
                                             <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,12" Text="The metadata feed is read on this computer. The package source is what choco uses on the devices (--source); the download URL is where the Chocolatey bootstrap gets its nupkg. Both empty = community repository."/>
                                             <TextBlock Text="Metadata feed" Style="{StaticResource SmallLabel}"/>

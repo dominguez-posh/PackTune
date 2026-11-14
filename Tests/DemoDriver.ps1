@@ -123,7 +123,7 @@ function Select-ByName([string]$Name) { Set-AppSelected (@($script:SourceRows | 
 # Until (wait for background work: frames are then taken in fast forward), Hold (ms to stay afterwards)
 $script:Tour = [System.Collections.ArrayList]@(
     @{ Do = {
-        $script:EmbeddedAvailableOverride = $false; $script:SandboxOverride = @{ Present = $true; Studio = $true }; Update-SandboxState
+        $script:EmbeddedAvailableOverride = $false; $script:SandboxOverride = @{ Present = $true }; Update-SandboxState
         $cfg = Get-PackTuneSettings; $cfg.ClientID = ''; [void](Save-PackTuneSettings -Settings $cfg); $script:Settings = Get-PackTuneSettings
         $script:InsightFake = Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) 'InsightFake.txt') -Raw
         $script:SignInTest = @{ Authority = $env:PACKTUNE_SMOKE_AUTHORITY; GraphUrl = $env:PACKTUNE_SMOKE_AUTHORITY

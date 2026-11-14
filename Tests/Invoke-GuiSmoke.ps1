@@ -24,8 +24,7 @@ $repo = Split-Path $PSScriptRoot -Parent
 if (Test-Path $OutDir) { Remove-Item $OutDir -Recurse -Force }
 $appData = Join-Path $OutDir 'appdata'
 New-Item -ItemType Directory -Path (Join-Path $appData 'IntuneChocoDeployment') -Force | Out-Null
-# The fake Sandbox Studio (version 9.9.9) is the one the tool finds, whatever is installed on this machine
-@{ TenantID = 'contoso.onmicrosoft.com'; ClientID = '11111111-2222-3333-4444-555555555555'; SandboxStudioPath = (Join-Path $PSScriptRoot 'Fakes\MsixSandboxStudio') } | ConvertTo-Json |
+@{ TenantID = 'contoso.onmicrosoft.com'; ClientID = '11111111-2222-3333-4444-555555555555' } | ConvertTo-Json |
     Set-Content (Join-Path $appData 'IntuneChocoDeployment\settings.json')
 $realRoot = @('PackTune', 'IntuneChocoDeployment' | ForEach-Object { Join-Path $env:LOCALAPPDATA $_ } | Where-Object { Test-Path $_ }) | Select-Object -First 1
 $cache = Join-Path $realRoot 'feedcache.json'
@@ -124,6 +123,8 @@ $psi.RedirectStandardError = $true
 $psi.EnvironmentVariables['LOCALAPPDATA'] = $appData
 $psi.EnvironmentVariables['PSModulePath'] = (Join-Path $PSScriptRoot 'Fakes') + ';' + "$env:USERPROFILE\Documents\WindowsPowerShell\Modules;$env:ProgramFiles\WindowsPowerShell\Modules;$env:SystemRoot\System32\WindowsPowerShell\v1.0\Modules"
 $psi.EnvironmentVariables['PACKTUNE_SMOKE'] = $Driver
+# No Windows Sandbox opens: a launcher script plays the part of it (the test lab runs in background runspaces)
+$psi.EnvironmentVariables['PACKTUNE_SANDBOX_LAUNCHER'] = (Join-Path $PSScriptRoot 'Fakes\FakeSandboxLauncher.ps1')
 $psi.EnvironmentVariables['PACKTUNE_POPULAR_FIXTURE'] = $fixture
 $psi.EnvironmentVariables['PACKTUNE_SMOKE_OUT'] = $OutDir
 $psi.EnvironmentVariables['PACKTUNE_SMOKE_AUTHORITY'] = "http://localhost:$authorityPort"

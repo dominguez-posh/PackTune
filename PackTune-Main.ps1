@@ -81,8 +81,6 @@ $script:DefaultSettings = [ordered]@{
     GraceHours            = 48
     # Latest = devices follow the newest package version; Pinned = new apps stay on today's version until you release one
     VersionMode           = "Latest"
-    # Folder of WindowsSandboxMSIXInstaller (MSIX Sandbox Studio) for the Test button; empty = found automatically
-    SandboxStudioPath     = ""
     # Schedule of new apps (when and under which conditions updates install) as compact JSON with the property names of
     # New-ChocoSchedule, e.g. {"OnlyOnMains":true,"WindowFrom":"12:00"}; empty = the built-in defaults (like before)
     UpdateSchedule        = ""
@@ -2490,21 +2488,6 @@ function Update-PackTuneApp {
     $AppId
 }#Applies a changed update policy or released version to an app in Intune
 
-function Find-SandboxStudio {
-    <# Path of MsixSandboxStudio.psd1 (WindowsSandboxMSIXInstaller) for the Test button, or $null. #>
-    $Candidates = @()
-    if ($script:Settings.SandboxStudioPath) { $Candidates += $script:Settings.SandboxStudioPath }
-    $Candidates += (Join-Path (Split-Path $PSScriptRoot -Parent) "WindowsSandboxMSIXInstaller"), "C:\git\WindowsSandboxMSIXInstaller"
-    foreach ($Folder in $Candidates) {
-        foreach ($File in (Join-Path $Folder "MsixSandboxStudio\MsixSandboxStudio.psd1"), (Join-Path $Folder "MsixSandboxStudio.psd1")) {
-            if (Test-Path $File) { return (Resolve-Path $File).ProviderPath }
-        }
-    }
-    $Module = Get-Module -ListAvailable MsixSandboxStudio | Sort-Object Version -Descending | Select-Object -First 1
-    if ($Module) { return $Module.Path }
-    return $null
-}
-
 function Copy-LabPackageFiles {
     <#
         The package content for the Win32 Test Lab: every file of the generated source folder, like the Intune package
@@ -2520,7 +2503,7 @@ function Copy-LabPackageFiles {
 
 function Test-PackTunePackage {
     <#
-        Tests a package in Windows Sandbox with the Win32 Test Lab of MSIX Sandbox Studio (WindowsSandboxMSIXInstaller):
+        Tests a package in Windows Sandbox with the test lab built into PackTune (Modules\PackTune.Sandbox.psm1):
         a fresh sandbox installs Chocolatey (in Intune it is a dependency app), then you run Install, Detect and
         Uninstall with one click each, as SYSTEM like Intune, and report the result. Returns the verdict.
     #>
@@ -2530,12 +2513,10 @@ function Test-PackTunePackage {
         [ValidateSet("Off", "Startup", "Custom")][string]$UpdateMode = $script:Settings.UpdateMode,
         [ValidateRange(1, 2160)][int]$GraceHours = $script:Settings.GraceHours,
         [ValidateSet("Chocolatey", "Winget")][string]$Source = "Chocolatey",
-        $Schedule = (Get-ChocoScheduleDefaults)
+        $Schedule = (Get-ChocoScheduleDefaults),
+        [switch]$AutoRun
     )
     $IsWinget = $Source -eq "Winget"
-    $Studio = Find-SandboxStudio
-    if (-not $Studio) { throw "MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) was not found. Set its folder in Settings (Sandbox Studio path)." }
-    Import-Module $Studio -Force -ErrorAction Stop
     $Info = if ($IsWinget) { Get-WingetInfo -WingetId $ChocoName } else { Get-ChocoInfo -ChocoName $ChocoName }
     $Package = $Info.Name
     if ($Version -eq "latest") { $Version = "" }
@@ -2587,17 +2568,16 @@ exit $LASTEXITCODE
     $LabUninstall = "& `"`$PSScriptRoot\choco-app.ps1`" -Uninstall`r`nexit `$LASTEXITCODE"
     $LabDetect = Get-Content -Path $DetectionFile -Raw
 
-    $Id = $(if ($IsWinget) { "Winget-" } else { "Choco-" }) + ($Package -replace '[^A-Za-z0-9._-]', '')
-    $Project = Save-Win32AppProject -Id $Id -DisplayName "$($Info.Title) ($Source)" -Publisher $(if ($Info.Authors) { [string]$Info.Authors } else { "" }) `
-        -Version $(if ($Version) { $Version } else { $Info.Version }) -Detection (New-Win32Detection -Type Script) -RunAs system `
-        -Scripts @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $LabDetect; "Update.ps1" = "" }
-    Copy-LabPackageFiles -SourcePath $SourcePath -Destination $Project.SourcePath
+    $LabFiles = Join-Path $WorkPath "lab"
+    New-Item -ItemType Directory -Path $LabFiles -Force | Out-Null
+    Copy-LabPackageFiles -SourcePath $SourcePath -Destination $LabFiles
 
-    Write-Host "Opening the Win32 Test Lab in Windows Sandbox for $($Info.Title): run Install, Detect, Uninstall there, then report the result"
-    $Result = Start-Win32TestLab -Id $Id
+    Write-Host "Opening the test lab in Windows Sandbox for $($Info.Title): run Install, Detect, Uninstall there, then report the result"
+    $Result = Start-PackTuneWin32Lab -DisplayName "$($Info.Title) ($Source)" -Version $(if ($Version) { $Version } else { $Info.Version }) -SourcePath $LabFiles -AutoRun:$AutoRun `
+        -Scripts @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $LabDetect }
     Write-Host "Test result: $($Result.Verdict). $($Result.Message)"
     [pscustomobject]@{ Package = $Package; Source = $Source; Verdict = $Result.Verdict; Message = $Result.Message; JobPath = $Result.JobPath }
-}#Tests a package in Windows Sandbox (Win32 Test Lab of MSIX Sandbox Studio)
+}#Tests a package in Windows Sandbox (test lab of PackTune)
 
 function Get-PackTuneTenantApps {
 
@@ -2697,6 +2677,9 @@ function New-PackTuneAppFromCatalog {
 . (Join-Path $PSScriptRoot "PackTune-Store.ps1")
 . (Join-Path $PSScriptRoot "PackTune-CustomMsix.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Aliases.ps1")
+
+# Windows Sandbox functions (test lab, MSIX capture, signing, capture tools): own module, no other tool needed
+Import-Module (Join-Path $PSScriptRoot "Modules\PackTune.Sandbox.psm1") -Force -Global
 
 # Tenant insight (import of existing apps, install status): own module, gets the functions it needs from here
 Import-Module (Join-Path $PSScriptRoot "Modules\TenantInsight.psm1") -Force -Global

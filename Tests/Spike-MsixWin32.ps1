@@ -17,8 +17,8 @@
 #>
 [CmdletBinding()]
 param(
-    # MSIX Sandbox Studio toolchain (makeappx, signtool)
-    [string]$Toolchain = 'C:\git\WindowsSandboxMSIXInstaller\Workspace\Toolchain',
+    # The capture tools of PackTune (makeappx, signtool): downloaded by PackTune on first use (Update-PackTuneToolchain)
+    [string]$Toolchain = (Join-Path $env:LOCALAPPDATA 'PackTune\Sandbox\Toolchain'),
     [int]$TimeoutMinutes = 15,
     # Build everything but do not start the sandbox
     [switch]$BuildOnly,
@@ -28,7 +28,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $makeappx = Join-Path $Toolchain 'SdkTools\makeappx.exe'
 $signtool = Join-Path $Toolchain 'SdkTools\signtool.exe'
-foreach ($tool in $makeappx, $signtool) { if (-not (Test-Path -LiteralPath $tool)) { throw "Not found: $tool (run Update-MsixToolchain of MSIX Sandbox Studio)" } }
+foreach ($tool in $makeappx, $signtool) { if (-not (Test-Path -LiteralPath $tool)) { throw "Not found: $tool (PackTune downloads the capture tools on first use: Update-PackTuneToolchain from Modules\PackTune.Sandbox.psm1)" } }
 if (-not $BuildOnly) {
     if (-not (Test-Path "$env:SystemRoot\System32\WindowsSandbox.exe")) { throw 'Windows Sandbox is not available on this machine (WindowsSandbox.exe missing). Stopping.' }
     if (Get-Process -Name WindowsSandbox, WindowsSandboxClient, WindowsSandboxRemoteSession -ErrorAction SilentlyContinue) { throw 'A Windows Sandbox is already running; Windows allows only one. Close it first.' }
