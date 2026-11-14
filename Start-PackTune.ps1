@@ -1791,6 +1791,7 @@ Add-Click $ui.BtnStoreCreate {
 }
 Add-Click $ui.BtnStoreGrant {
     if (-not $script:Settings.StoreSiteUrl) { throw 'Save the address of the site first.' }
+    if (-not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permission Sites.FullControl.All, which PackTune uses for this one grant only.`n`n$($script:StoreGrantConsentNote)`n`nContinue?" 'Grant access to the SharePoint site')) { return }
     $token = $null
     try { $token = Get-EmbeddedToken -TenantID $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'organizations' }) -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Sites.FullControl.All') -Hint 'Sign in with an administrator account: it grants PackTune access to this one SharePoint site.' }
     catch { if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Write-UiLog 'Sign-in cancelled.' }; return }
@@ -1799,7 +1800,7 @@ Add-Click $ui.BtnStoreGrant {
     [void](Start-UiTask -Kind 'store' -Title "Granting PackTune access to the SharePoint site (role $role)" -Display 'Package store' -Pool $script:UserPool -Arguments @{ Site = $script:Settings.StoreSiteUrl; Client = $script:Settings.ClientID; Token = $access; Role = $role } `
         -Work 'param($Site, $Client, $Token, $Role) $p = @{ SiteUrl = $Site; ClientID = $Client; Role = $Role }; if ($Token) { $p.Token = $Token }; Grant-PackTuneStoreAccess @p | Out-Null' -OnDone {
         param($Result, $Job)
-        if ($Job.Status -eq 'succeeded') { Write-UiLog 'PackTune has access to the SharePoint site now.' 'Success'; Show-Toast 'Access to the SharePoint site granted.' 'ok' }
+        if ($Job.Status -eq 'succeeded') { Write-UiLog 'PackTune has access to the SharePoint site now.' 'Success'; Write-UiLog $script:StoreGrantConsentNote 'Warning'; Show-Toast 'Access to the SharePoint site granted.' 'ok' }
         $script:StoreState = $null; Start-StoreCheck
     })
 }

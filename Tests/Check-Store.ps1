@@ -140,6 +140,16 @@ Test-Check 'notes: the short anchor of the first release is still read' ((Conver
 $longest = ConvertTo-PackTuneCustomNotes -Info ([pscustomobject]@{ Version = '65535.65535.65535.65535'; ProductCode = $info.ProductCode; UpgradeCode = $info.UpgradeCode }) -AppId ('a' * 80) -Manifest $hash
 Test-Check 'notes: within the length budget with the full hash' ($longest.Length -lt $script:NotesMaxLength -and $longest.Length -lt 400) $longest.Length
 
+# --- the one-time grant: the consent of the Microsoft Graph CLI app stays in the tenant, and it is said where and how to remove it
+$note = $script:StoreGrantConsentNote
+$guiText = Get-Content (Join-Path $repo 'Start-PackTune.ps1') -Raw
+$xamlText = Get-Content (Join-Path $repo 'UI\MainWindow.xaml') -Raw
+$readmeText = Get-Content (Join-Path $repo 'README.md') -Raw
+$storeText = Get-Content (Join-Path $repo 'PackTune-Store.ps1') -Raw
+Test-Check 'grant: the note says the consent stays and how to remove it (portal and PowerShell)' ($note -like '*stays in the tenant*' -and $note -like '*Microsoft Graph Command Line Tools*' -and $note -like '*Revoke*' -and $note -like '*Remove-MgOauth2PermissionGrant*')
+Test-Check 'grant: shown before the sign-in in the interface, logged after it, warned on the command line' ($guiText.IndexOf('$script:StoreGrantConsentNote)') -gt 0 -and $guiText.IndexOf('$script:StoreGrantConsentNote)') -lt $guiText.IndexOf("-Scopes @('Sites.FullControl.All')") -and $guiText -match "Write-UiLog \`$script:StoreGrantConsentNote 'Warning'" -and $storeText -match 'Write-Warning \$script:StoreGrantConsentNote')
+Test-Check 'grant: the dialog text and the README say it too' ($xamlText -match 'The consent stays in the tenant' -and $readmeText -match 'stays in the tenant\*\*' -and $readmeText -match 'Remove-MgOauth2PermissionGrant')
+
 # --- delete
 Remove-PackTuneStoreApp -AppId 'my-app-1a2b3c4d' -Store $ready.Store
 Test-Check 'delete: the folder of the app is gone from the store' (@(Get-PackTuneStoreApps -Store $ready.Store).Count -eq 0 -and $script:Fs.Count -eq 0)

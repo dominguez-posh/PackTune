@@ -23,6 +23,8 @@ $script:StoreSmallLimit = 4MB
 $script:StoreChunk = 327680 * 32
 $script:StoreSegment = '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$'
 $script:StoreFileNames = "package.intunewin", "package.msix", "installer.zip", "recipe.json", "signing.cer", "documentation.zip"
+# Shown before and after the one-time site grant (interface, command line, README)
+$script:StoreGrantConsentNote = "The consent for Sites.FullControl.All that the grant sign-in gives Microsoft's app 'Microsoft Graph Command Line Tools' stays in the tenant afterwards; PackTune uses it for the grant only. Remove it when it is not needed any more: Entra admin center > Enterprise applications > Microsoft Graph Command Line Tools > Permissions (Admin consent and User consent) > Revoke, or with Microsoft Graph PowerShell remove its oauth2PermissionGrant (Remove-MgOauth2PermissionGrant) or take Sites.FullControl.All out of its scope (Update-MgOauth2PermissionGrant)."
 
 #region settings and state
 
@@ -144,8 +146,11 @@ function Initialize-PackTuneStore {
 function Grant-PackTuneStoreAccess {
     <#
         One-time setup by an administrator: gives the PackTune app registration the role write (manage: also creates the
-        library) on this one site. Needs a sign-in with Sites.FullControl.All, which is used for this call only; the
+        library) on this one site. Needs a sign-in with Sites.FullControl.All, which PackTune uses for this call only; the
         daily work needs Sites.Selected only. -Token is that administrator's access token.
+        The sign-in goes through Microsoft's app "Microsoft Graph Command Line Tools" (14d82eec-...). The consent for
+        Sites.FullControl.All given there STAYS in the tenant after this call ($script:StoreGrantConsentNote says where
+        and how to remove it); PackTune does not remove it, because other tools of the tenant may use that app too.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$SiteUrl, [Parameter(Mandatory = $true)][string]$ClientID, [string]$Token,
@@ -163,6 +168,7 @@ function Grant-PackTuneStoreAccess {
     $Site = Invoke-RestMethod -Uri "$($script:StoreGraph)/sites/$($Uri.Host):$($Uri.AbsolutePath.TrimEnd('/'))?`$select=id" -Headers $Headers -ErrorAction Stop
     $Body = @{ roles = @($Role); grantedToIdentities = @(@{ application = @{ id = $ClientID; displayName = "PackTune" } }) } | ConvertTo-Json -Depth 6 -Compress
     Invoke-RestMethod -Method Post -Uri "$($script:StoreGraph)/sites/$($Site.id)/permissions" -Headers $Headers -ContentType "application/json" -Body $Body -ErrorAction Stop | Out-Null
+    Write-Warning $script:StoreGrantConsentNote
     return [pscustomobject]@{ SiteId = $Site.id; Role = $Role }
 }#Grants PackTune access to the one site (administrator, once)
 

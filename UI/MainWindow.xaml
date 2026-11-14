@@ -1106,7 +1106,7 @@
                             <TextBox x:Name="TxtStoreSite" AutomationProperties.Name="SharePoint site address" ToolTip="https://contoso.sharepoint.com/sites/PackTune"/>
                             <TextBlock Text="Document library" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
                             <TextBox x:Name="TxtStoreLibrary" AutomationProperties.Name="Document library"/>
-                            <TextBlock Text="3. An administrator grants PackTune access to this one site (role write, or manage when the library has to be created). The sign-in needs Sites.FullControl.All and is used for this call only; daily work uses Sites.Selected." Style="{StaticResource Hint}" TextWrapping="Wrap" Margin="0,12,0,0"/>
+                            <TextBlock Text="3. An administrator grants PackTune access to this one site (role write, or manage when the library has to be created). The sign-in needs Sites.FullControl.All and PackTune uses it for this call only; daily work uses Sites.Selected. The consent stays in the tenant (Enterprise applications, Microsoft Graph Command Line Tools, Permissions): revoke it there when it is not needed any more." Style="{StaticResource Hint}" TextWrapping="Wrap" Margin="0,12,0,0"/>
                             <WrapPanel Margin="0,8,0,0">
                                 <Button x:Name="BtnStoreGrant" Content="Grant access (administrator) ..." Margin="0,0,8,6"/>
                                 <Button x:Name="BtnStoreCreate" Content="Create library" Margin="0,0,8,6"/>
