@@ -90,7 +90,7 @@ $script:DefaultSettings = [ordered]@{
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
 # Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
-$script:DeviceScriptRevision = 8
+$script:DeviceScriptRevision = 9
 # Longest random delay of the update tasks that is read back from the notes (one week)
 $script:MaxDelayMinutes = 10080
 

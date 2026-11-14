@@ -206,12 +206,15 @@ function Resolve-ToastActivation {
     if (-not $TaskMatch.Success) { return $null }
     $Root = Join-Path (Join-Path $ProgramRoot $TaskMatch.Groups[1].Value) $Package
     try { $Config = Get-Content -LiteralPath (Join-Path $Root "config.json") -Raw | ConvertFrom-Json } catch { return $null }
-    if ([string]$Config.Package -cne $Package) { return $null }
+    # The id of the package folder and task: TaskId for both sources (Chocolatey: the package, winget: the safe id); older config: Package
+    $ConfigId = if ($Config.TaskId) { [string]$Config.TaskId } else { [string]$Config.Package }
+    if ($ConfigId -cne $Package) { return $null }
     if ([string]$Config.TaskPath -cne [string]$Entry.TaskPath) { return $null }
     # The action only makes sense while the thing it answers is pending
     $Pending = if ($Verb -in "install", "later") { "state.json" } else { "restart.json" }
     if (-not (Test-Path -LiteralPath (Join-Path $Root $Pending))) { return $null }
     $Name = if ($Config.DisplayName) { [string]$Config.DisplayName } else { $Package }
+    $Name = [regex]::Replace($Name, '[\x00-\x1F"]', "")
     return [pscustomobject]@{ Verb = $Verb; Package = $Package; TaskPath = [string]$Config.TaskPath; DisplayName = $Name; TokenFile = $TokenFile }
 }
 
@@ -227,7 +230,11 @@ function Invoke-ToastAction {
         }
         "later" { New-Item -Path $SnoozeFolder -ItemType Directory -Force | Out-Null; Set-Content -Path (Join-Path $SnoozeFolder "$($Action.Package).snooze") -Value (Get-Date).AddHours(4).ToString("o") }
         "remind" { New-Item -Path $SnoozeFolder -ItemType Directory -Force | Out-Null; Set-Content -Path (Join-Path $SnoozeFolder "$($Action.Package).restart") -Value (Get-Date).AddHours(1).ToString("o") }
-        "restart" { & shutdown.exe /r /t 60 /c "Restart for the update of $($Action.DisplayName)" | Out-Null }
+        "restart" {
+            $Comment = [regex]::Replace([string]$Action.DisplayName, '[\x00-\x1F"]', "")
+            if ($Comment.Length -gt 80) { $Comment = $Comment.Substring(0, 80) }
+            & shutdown.exe /r /t 60 /c "Restart for the update of $Comment" | Out-Null
+        }
     }
     if ($Action.TokenFile) { Remove-Item -LiteralPath $Action.TokenFile -Force -ErrorAction SilentlyContinue }
     return $Text

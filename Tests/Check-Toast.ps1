@@ -24,7 +24,7 @@ foreach ($taskPath in '\PackTune\Chocolatey\', '\PackTune\Winget\') {
     [void][System.Management.Automation.Language.Parser]::ParseInput($text, [ref]$tokens, [ref]$errors)
     Test-Check "notify.ps1 ($taskPath): valid PowerShell, plain ASCII, no placeholder left" (($errors.Count -eq 0) -and ($text -notmatch '[^\x00-\x7F]') -and ($text -notmatch '__[A-Z]+__') -and ($text -match [regex]::Escape("`$TaskPath = `"$taskPath`""))) (@($errors | ForEach-Object Message) -join '; ')
 }
-Test-Check 'the device scripts have a new revision (devices pick up the notifications)' ($script:DeviceScriptRevision -ge 8)
+Test-Check 'the device scripts have a new revision (devices pick up the notifications)' ($script:DeviceScriptRevision -ge 9)
 Test-Check 'no MessageBox is left in notify.ps1' ((Get-UpdateNotifyScript -TaskPath '\PackTune\Chocolatey\') -notmatch 'MessageBox')
 
 # --- the library in a scope of its own, with a fake program folder
@@ -57,15 +57,17 @@ $cases = @(
 foreach ($c in $cases) { Test-Check "route: setting $($c[0]), shell state $($c[1]), deadline $($c[2]) -> $($c[3])" ((Get-ToastRoute -Setting $c[0] -UserState $c[1] -Deadline $c[2]) -eq $c[3]) }
 
 # --- an installed package with a pending update (protected folder as the install makes it), tokens, activation
-function New-FakePackage([string]$Source, [string]$Package, [switch]$Update, [switch]$Restart) {
+function New-FakePackage([string]$Source, [string]$Package, [switch]$Update, [switch]$Restart, [switch]$Winget) {
     $root = Join-Path (Join-Path $ProgramRoot $Source) $Package
     New-Item -ItemType Directory -Path $root -Force | Out-Null
-    @{ Package = $Package; TaskPath = "\PackTune\$Source\"; DisplayName = "$Package display" } | ConvertTo-Json | Set-Content (Join-Path $root 'config.json')
+    # the config.json of each source as install.ps1 writes it: winget has Id, SafeId, TaskId and no Package
+    $cfg = if ($Winget) { @{ Id = "$Package.id"; SafeId = $Package; TaskId = $Package; TaskPath = "\PackTune\$Source\"; DisplayName = "$Package display" } } else { @{ Package = $Package; TaskId = $Package; TaskPath = "\PackTune\$Source\"; DisplayName = "$Package display" } }
+    $cfg | ConvertTo-Json | Set-Content (Join-Path $root 'config.json')
     if ($Update) { '{}' | Set-Content (Join-Path $root 'state.json') }
     if ($Restart) { '{}' | Set-Content (Join-Path $root 'restart.json') }
 }
 New-FakePackage 'Chocolatey' 'contosoapp' -Update -Restart
-New-FakePackage 'Winget' 'Contoso.Tool' -Update
+New-FakePackage 'Winget' 'Contoso.Tool' -Update -Winget
 New-FakePackage 'Chocolatey' 'idleapp'
 $script:Schtasks = New-Object System.Collections.ArrayList; $script:Shutdowns = New-Object System.Collections.ArrayList; $script:SchtasksExit = 0
 function schtasks.exe { [void]$script:Schtasks.Add(($args -join ' ')); $global:LASTEXITCODE = $script:SchtasksExit }
@@ -121,6 +123,14 @@ $t2 = Save-ToastToken 'Contoso.Tool' '\PackTune\Winget\' @('install')
 $msg = Invoke-ToastAction (Resolve-ToastActivation (Get-ToastUri 'install' $t2))
 Test-Check 'install: a task that cannot start is reported, the winget task folder is used for a winget app' (($msg -like '*could not be started*') -and ($script:Schtasks[0] -eq '/run /tn \PackTune\Winget\Update Contoso.Tool now'))
 $script:SchtasksExit = 0
+$tw = Save-ToastToken 'Contoso.Tool' '\PackTune\Winget\' @('install')
+$aw = Resolve-ToastActivation (Get-ToastUri 'install' $tw)
+Test-Check 'activation: a winget app (config with TaskId and no Package field) resolves to its package and task folder' ($aw -and $aw.Package -eq 'Contoso.Tool' -and $aw.TaskPath -eq '\PackTune\Winget\')
+Test-Check 'activation: a Chocolatey app (config with Package and TaskId) still resolves' ($null -ne (Resolve-ToastActivation (Get-ToastUri 'install' (Save-ToastToken 'contosoapp' '\PackTune\Chocolatey\' @('install')))))
+$script:Shutdowns.Clear()
+[void](Invoke-ToastAction ([pscustomobject]@{ Verb = 'restart'; Package = 'contosoapp'; TaskPath = '\PackTune\Chocolatey\'; DisplayName = ('Evil" /f ' + [char]10 + 'App'); TokenFile = $null }))
+Test-Check 'restart: double quotes and control characters are stripped from the name in the shutdown comment' (($script:Shutdowns.Count -eq 1) -and ($script:Shutdowns[0] -notmatch '"') -and ($script:Shutdowns[0] -notmatch "`n") -and ($script:Shutdowns[0] -like '*Evil /f App'))
+$script:Shutdowns.Clear()
 $t3 = Save-ToastToken 'contosoapp' '\PackTune\Chocolatey\' @('later', 'install')
 $before = Get-Date
 [void](Invoke-ToastAction (Resolve-ToastActivation (Get-ToastUri 'later' $t3)))
