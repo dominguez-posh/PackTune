@@ -546,7 +546,7 @@ function Get-PackTuneStoreVersions {
 function Get-PackTuneStoreApps {
     param($Store = (Resolve-PackTuneStore))
     if (-not $Store.DriveId) { return @() }
-    @(Get-PackTuneStoreChildren -DriveId $Store.DriveId | Where-Object { $_.folder } | ForEach-Object { [string]$_.name })
+    @(Get-PackTuneStoreChildren -DriveId $Store.DriveId | Where-Object { $_.folder -and [string]$_.name -ne $script:ProtocolFolderName } | ForEach-Object { [string]$_.name })
 }
 
 function ConvertTo-PackTuneManifestAnchor {
