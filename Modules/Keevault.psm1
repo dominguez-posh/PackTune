@@ -217,7 +217,8 @@ $script:SignInPageScript = @'
   let last = '';
   setInterval(() => {
     let step = '';
-    if (empty('input[name="otc"]')) step = 'otp';
+    if (/AADSTS(65001|90094|90008|650056)|need admin approval|admin approval required|Genehmigung durch einen Administrator|Administratorgenehmigung/i.test((document.body && document.body.innerText) || '')) step = 'admin-needed';
+    else if (empty('input[name="otc"]')) step = 'otp';
     else if (toPasskey()) step = 'to-passkey';
     else if (empty('input[name="passwd"]')) step = 'password';
     else if (empty('input[name="loginfmt"]')) step = 'username';
@@ -294,6 +295,8 @@ $script:PasskeyShimScript = @'
 })();
 '@
 
+# Entra refuses the consent of a user who is no administrator: the tool says this instead of an error
+$script:AdminConsentMessage = 'An administrator must confirm these permissions.'
 function Get-PackTuneSessionFolder {
     <# The WebView2 profile of all embedded sign-ins of this Windows user (one Microsoft session: no second password or passkey).
        Only the current user gets access. Sign out clears it (Clear-PackTuneSession). #>
@@ -452,7 +455,7 @@ function Invoke-PackTuneBrowserSignIn {
     [void]$grid.Children.Add($wv)
     $win.Content = $grid
 
-    $ctx = @{ Redirect = $null; Done = @{}; Otp = 0; ToPasskey = 0; PasskeyBusy = $false; Error = $null }
+    $ctx = @{ AdminNeeded = $false; Redirect = $null; Done = @{}; Otp = 0; ToPasskey = 0; PasskeyBusy = $false; Error = $null }
     $wv.Add_CoreWebView2InitializationCompleted({
         param($s, $e)
         if (-not $e.IsSuccess) { $ctx.Error = "The embedded browser could not start: $($e.InitializationException.Message)"; $win.Close(); return }
@@ -491,6 +494,7 @@ function Invoke-PackTuneBrowserSignIn {
             return
         }
         switch ($step) {
+            'admin-needed' { $ctx.AdminNeeded = $true }
             'to-passkey' {
                 # Keevault has the passkey: take "Face, fingerprint, PIN or security key" instead of the password
                 if (-not $Passkey -or $ctx.ToPasskey -ge 2) { return }
@@ -540,8 +544,9 @@ function Invoke-PackTuneBrowserSignIn {
     }
 
     if ($ctx.Error) { throw $ctx.Error }
-    if (-not $ctx.Redirect) { throw 'Sign-in cancelled.' }
+    if (-not $ctx.Redirect) { if ($ctx.AdminNeeded) { throw $script:AdminConsentMessage }; throw 'Sign-in cancelled.' }
     $result = [System.Web.HttpUtility]::ParseQueryString(([Uri]$ctx.Redirect).Query)
+    if ($result['error'] -in 'consent_required', 'interaction_required' -or "$($result['error_description'])" -match 'AADSTS(65001|90094|90008|650056)') { throw $script:AdminConsentMessage }
     if ($result['error']) { throw "Sign-in failed: $($result['error_description'])" }
     if ($result['state'] -ne $state) { throw 'Sign-in failed: the answer does not belong to this sign-in.' }
     Request-PackTuneToken -TenantID $TenantID -ClientID $ClientID -Scopes $Scopes -Body @{

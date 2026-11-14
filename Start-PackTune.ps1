@@ -3409,11 +3409,38 @@ function Test-EmbeddedSignIn {
 # One WebView2 profile per Windows user (%LOCALAPPDATA%\PackTune\WebView2Session, current user only, cleared on Sign out):
 # the normal sign-in, the setup sign-in and the Keevault sign-in share the Microsoft session (no second password or passkey)
 $script:SignInSession = if ($env:PACKTUNE_SMOKE) { Get-PackTuneSessionFolder -Root (Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSmoke-' + [guid]::NewGuid().ToString('N'))) } else { Get-PackTuneSessionFolder }
-function Get-PackTuneSignInScopes {
-    # Everything the normal sign-in asks for (dynamic consent): the deploy permissions plus the ones of the status views and package store
-    @($script:GraphScopeString -split ' ' | Where-Object { $_ -like 'https://graph.microsoft.com/*' } | ForEach-Object { $_ -replace '^https://graph\.microsoft\.com/', '' }) + @($script:GraphInsightScopes) | Select-Object -Unique
+# What the tenant granted so far, per tenant (next to the settings): the normal sign-in asks for exactly this, so a user who is
+# no administrator is never sent to a consent page. Missing scopes are asked for by "Confirm now" only.
+$script:GrantedScopesPath = Join-Path (Split-Path $script:SettingsPath -Parent) 'grantedscopes.json'
+function Get-GrantedScopeMemory {
+    $m = @{}
+    try { if (Test-Path $script:GrantedScopesPath) { $j = Get-Content $script:GrantedScopesPath -Raw | ConvertFrom-Json; foreach ($p in $j.PSObject.Properties) { $m[$p.Name] = @($p.Value) } } } catch { }
+    $m
 }
-$script:SignInHint = ''
+function Save-GrantedScopes {
+    # After a sign-in: the Graph scopes of the token are what the tenant granted (added to what is known)
+    if (-not $Global:AccessToken -or -not $Global:AccessToken.Scopes -or -not $script:Settings.TenantID) { return }
+    $granted = @($Global:AccessToken.Scopes | ForEach-Object { $_ -replace '^https://graph\.microsoft\.com/', '' } | Where-Object { $_ -and $_ -notin 'offline_access', 'openid', 'profile', 'email' })
+    $m = Get-GrantedScopeMemory
+    $key = ([string]$script:Settings.TenantID).ToLower()
+    $m[$key] = @(@($m[$key]) + $granted | Where-Object { $_ } | Select-Object -Unique)
+    try { ($m | ConvertTo-Json -Depth 4) | Set-Content -Path $script:GrantedScopesPath -Encoding UTF8 } catch { }
+}
+function Get-PackTuneSignInScopes {
+    # Normal sign-in: the base set on the very first sign-in, afterwards what was granted (remembered per tenant).
+    # -Consent ("Confirm now"): everything the tool wants, the missing ones included; the administrator consents for the organization.
+    param([switch]$Consent)
+    $base = @($script:GraphScopeString -split ' ' | Where-Object { $_ -like 'https://graph.microsoft.com/*' } | ForEach-Object { $_ -replace '^https://graph\.microsoft\.com/', '' })
+    $known = @((Get-GrantedScopeMemory)[([string]$script:Settings.TenantID).ToLower()] | Where-Object { $_ })
+    if ($Consent) { return @($base + $known + @($script:GraphInsightScopes) | Select-Object -Unique) }
+    if ($known.Count) { return @($known | Select-Object -Unique) }
+    $base
+}
+function Test-AdminConsentRefusal($ErrorRecord) { $ErrorRecord.Exception.Message -like 'An administrator must confirm these permissions*' }
+function Show-AdminConsentRefusal {
+    Show-Toast 'An administrator must confirm these permissions.' 'warn'
+    Write-UiLog 'An administrator must confirm these permissions (the sign-in of a user who is no administrator cannot grant them for the organization).' 'Warning'
+}$script:SignInHint = ''
 $script:BrowserSignIn = 'Invoke-PackTuneBrowserSignIn'   # tests replace it
 function Set-SignInHintFromToken {
     # Signed in already (browser, Keevault or this window): that account is the login hint, so a second sign-in lands on its session
@@ -3481,19 +3508,20 @@ function Connect-Intune {
         $window.Cursor = 'Wait'
         try {
             $pump = { $window.Dispatcher.Invoke([action] {}, [System.Windows.Threading.DispatcherPriority]::Background) }
-            $token = Connect-PackTuneWithKeevault -TenantID $tenant -ClientID $clientId -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -UserDataFolder $script:SignInSession -Scopes (Get-PackTuneSignInScopes) -Prompt $prompt -Owner $window -OnWait $pump -OnAccount { param($User) Resolve-AccountTenant $User }
+            $token = Connect-PackTuneWithKeevault -TenantID $tenant -ClientID $clientId -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -UserDataFolder $script:SignInSession -Scopes (Get-PackTuneSignInScopes -Consent:$Consent) -Prompt $prompt -Owner $window -OnWait $pump -OnAccount { param($User) Resolve-AccountTenant $User }
             Set-PackTuneToken -TokenResponse $token -TenantID $token.SignInTenantID -ClientID $token.SignInClientID
             if ($token.SignInTenantID -ne $tenant) { Switch-Tenant $token.SignInTenantID $token.SignInClientID }
             $script:Shared.Auth = Get-PackTuneAuthState
             Complete-SignIn 'via Keevault'
         }
+        catch { if (Test-AdminConsentRefusal $_) { Show-AdminConsentRefusal; Complete-SetupStep $false 'the sign-in' } else { throw } }
         finally { $window.IsEnabled = $true; $window.Cursor = $null; [void]$window.Activate() }
         return
     }
     if ($Method -eq 'Microsoft') {
         # Default: the sign-in window of this app; the browser only when it cannot be used
         try {
-            $token = Get-EmbeddedToken -TenantID $tenant -ClientID $clientId -Scopes (Get-PackTuneSignInScopes) -Prompt $prompt
+            $token = Get-EmbeddedToken -TenantID $tenant -ClientID $clientId -Scopes (Get-PackTuneSignInScopes -Consent:$Consent) -Prompt $prompt
             if ($token) {
                 Set-PackTuneToken -TokenResponse $token -TenantID $tenant -ClientID $clientId
                 $script:Shared.Auth = Get-PackTuneAuthState
@@ -3502,6 +3530,7 @@ function Connect-Intune {
             }
         }
         catch {
+            if (Test-AdminConsentRefusal $_) { Show-AdminConsentRefusal; Complete-SetupStep $false 'the sign-in'; return }
             if ($_.Exception.Message -eq 'Sign-in cancelled.') { Write-UiLog 'Sign-in cancelled.'; Complete-SetupStep $false 'the sign-in'; return }
             Complete-SetupStep $false 'the sign-in'
             throw
@@ -3563,6 +3592,7 @@ function Complete-SignIn([string]$How) {
     $script:TenantApps = $null
     Update-ConnectionStatus
     $identity = Get-PackTuneIdentity
+    Save-GrantedScopes
     Write-UiLog "Signed in $How as $($identity.Account) (tenant $($identity.TenantId))." 'Success'
     Start-TenantRefresh
 }

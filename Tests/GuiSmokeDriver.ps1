@@ -1256,12 +1256,13 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $script:EmbeddedAvailableOverride = $true
                 $script:EmbeddedSignInOverride = { param($t, $c, $sc, $h, $pr, $folder) [void]$script:EmbeddedCalls.Add(@($t, $c, ($sc -join ','), $h, $pr, $folder)); New-FakeToken 'Embedded Admin' ($pr -eq 'consent') }
                 $script:Shared.UrlHit = $false
+                Remove-Item $script:GrantedScopesPath -ErrorAction SilentlyContinue   # the very first sign-in of this tenant
                 Connect-Intune
                 Test-Smoke 'normal sign-in uses the embedded window by default' ($script:LastSignInPath -eq 'embedded' -and $script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][0] -eq 'contoso.onmicrosoft.com' -and $script:EmbeddedCalls[0][1] -eq $script:Settings.ClientID) ($script:EmbeddedCalls | ConvertTo-Json -Compress)
                 Test-Smoke 'embedded sign-in signs in, no browser opened, no task needed' ((Test-SignedIn) -and $script:AccountText -like '*Embedded Admin*' -and -not $script:Shared.UrlHit -and -not (Test-TaskRunning 'connect'))
                 # Missing permissions are confirmed in the normal sign-in (dynamic consent), not in a setup window
                 $call = $script:EmbeddedCalls[0]
-                Test-Smoke 'normal sign-in asks for the new scopes (managed devices, Sites.Selected), no forced prompt' ($call[2] -like '*DeviceManagementManagedDevices.Read.All*' -and $call[2] -like '*Sites.Selected*' -and $call[2] -like '*DeviceManagementApps.ReadWrite.All*' -and $call[4] -eq 'default') ($call -join ' | ')
+                Test-Smoke 'first sign-in: base scopes only (no Sites.Selected, no managed devices), no prompt' ($call[2] -like '*DeviceManagementApps.ReadWrite.All*' -and $call[2] -like '*Group.Read.All*' -and $call[2] -notlike '*Sites.Selected*' -and $call[2] -notlike '*DeviceManagementManagedDevices*' -and $call[4] -eq 'default') ($call -join ' | ')
                 $ar = @(Get-ReadinessItems | Where-Object { $_.Key -eq 'appreg' })[0]
                 Test-Smoke 'missing permission: item says they are confirmed at the next sign-in, button Confirm now' ($ar.State -eq 'warn' -and $ar.Text -like 'New permissions needed*next sign-in*DeviceManagementManagedDevices.Read.All*' -and $ar.Fix -eq 'Confirm now') "$($ar.State) $($ar.Fix) $($ar.Text)"
                 $script:EmbeddedCalls.Clear()
@@ -1274,6 +1275,19 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'authorize URL (v2) with the new scopes: prompt=consent when permissions are missing' ($urlC -like '*/oauth2/v2.0/authorize?*' -and $urlC -like '*prompt=consent*' -and $urlC -like '*Sites.Selected*' -and $urlC -like '*DeviceManagementManagedDevices.Read.All*' -and $urlC -like '*login_hint=*') $urlC
                 Test-Smoke 'authorize URL without missing permissions: no prompt at all (never login)' ($urlD -notlike '*prompt=*' -and $urlD -like '*Sites.Selected*') $urlD
                 Test-Smoke 'sign-in profile folder: per Windows user, current user only' (($script:SignInSession -like '*WebView2Session') -and (Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..\Start-PackTune.ps1') -Raw) -match 'Get-PackTuneSessionFolder \}' -and (Get-PackTuneSessionFolder -Root (Join-Path (Split-Path $script:SignInSession) 'acl')).Length -gt 0 -and (New-Object System.IO.DirectoryInfo (Join-Path (Split-Path $script:SignInSession) 'acl\WebView2Session')).GetAccessControl().AreAccessRulesProtected) $script:SignInSession
+                # Later sign-in: the granted set (remembered per tenant), still no prompt
+                Disconnect-Intune
+                $script:EmbeddedCalls.Clear()
+                Connect-Intune
+                $call = $script:EmbeddedCalls[0]
+                Test-Smoke 'later sign-in asks for the granted set (incl. what Confirm now added), no prompt' ($call[2] -like '*Sites.Selected*' -and $call[2] -like '*DeviceManagementManagedDevices.Read.All*' -and $call[4] -eq 'default') ($call -join ' | ')
+                # A user who is no administrator: Entra refuses the consent, the tool says so (no error)
+                $okOverride = $script:EmbeddedSignInOverride
+                $script:EmbeddedSignInOverride = { throw 'An administrator must confirm these permissions.' }
+                $script:Toasts.Clear()
+                Connect-Intune -Consent
+                Test-Smoke 'non-admin refusal: clear message instead of an error, still signed in' (@($script:Toasts | Where-Object { $_.Kind -eq 'warn' -and $_.Text -like '*An administrator must confirm these permissions*' }).Count -ge 1 -and -not @($script:Toasts | Where-Object { $_.Kind -eq 'bad' }).Count -and (Test-SignedIn)) (($script:Toasts | ForEach-Object { $_.Kind + ':' + $_.Text }) -join ' / ')
+                $script:EmbeddedSignInOverride = $okOverride
                 Disconnect-Intune
                 Test-Smoke 'sign out clears the sign-in profile' (-not (Test-Path $script:SignInSession)) $script:SignInSession
                 # Setup: the sign-in of the app registration in the embedded window, the Graph work in the task
