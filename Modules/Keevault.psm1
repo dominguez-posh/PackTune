@@ -297,6 +297,34 @@ $script:PasskeyShimScript = @'
 
 # Entra refuses the consent of a user who is no administrator: the tool says this instead of an error
 $script:AdminConsentMessage = 'An administrator must confirm these permissions.'
+$script:SignInDiag = @{ Count = 0; LastFolder = $null; LastBrowserPid = $null; FirstMethod = '' }
+function Set-PackTuneSignInMethod([string]$Method) {
+    # How the first sign-in of this run was done (embedded Microsoft / browser / Keevault), for the log
+    if (-not $script:SignInDiag.FirstMethod) { $script:SignInDiag.FirstMethod = $Method }
+}
+function Get-PackTuneCookieSummary {
+    # Names (never values) of the Microsoft sign-in cookies of a WebView2, read through its CookieManager before the navigation
+    param($CoreWebView2, [int]$TimeoutMs = 3000)
+    $out = @()
+    foreach ($site in 'https://login.microsoftonline.com', 'https://login.live.com') {
+        try {
+            $task = $CoreWebView2.CookieManager.GetCookiesAsync($site)
+            $until = (Get-Date).AddMilliseconds($TimeoutMs)
+            while (-not $task.IsCompleted -and (Get-Date) -lt $until) {
+                [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([action] {}, [System.Windows.Threading.DispatcherPriority]::Background)
+            }
+            if ($task.IsCompleted -and -not $task.IsFaulted) {
+                $cookies = @($task.Result)
+                $names = @($cookies | ForEach-Object { if ($_.IsSession) { "$($_.Name) (session)" } else { "$($_.Name) (persistent)" } } | Sort-Object -Unique)
+                $out += "$($site -replace '^https://', ''): $($cookies.Count) cookie(s)$(if ($names.Count) { ' [' + ($names -join ', ') + ']' })"
+            }
+            else { $out += "$($site -replace '^https://', ''): not readable" }
+        }
+        catch { $out += "$($site -replace '^https://', ''): not readable ($($_.Exception.Message))" }
+    }
+    $out -join '; '
+}
+
 function Get-PackTuneSessionFolder {
     <# The WebView2 profile of all embedded sign-ins of this Windows user (one Microsoft session: no second password or passkey).
        Only the current user gets access. Sign out clears it (Clear-PackTuneSession). #>
@@ -405,6 +433,7 @@ function Invoke-PackTuneBrowserSignIn {
     )
     [void](Get-PackTuneWebView2 -CacheFolder $CacheFolder)
     Add-Type -AssemblyName System.Web
+    if ($Prompt -eq 'consent' -and -not $Hint) { $Hint = 'Microsoft asks you to confirm your identity for this permission change. An administrator then confirms the permissions for the organization.' }
 
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
     $bytes = New-Object byte[] 32
@@ -462,6 +491,22 @@ function Invoke-PackTuneBrowserSignIn {
         $s.CoreWebView2.Settings.AreDevToolsEnabled = $false
         $s.CoreWebView2.Settings.IsStatusBarEnabled = $false
         if ($Passkey) { [void]$s.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync($script:PasskeyShimScript) }
+        # Diagnostics (no tokens, no cookie values): profile, browser process, cookies before the navigation, request parameters
+        try {
+            $d = $script:SignInDiag; $d.Count++
+            $browserPid = $s.CoreWebView2.BrowserProcessId
+            $holdPid = $null; try { if ($script:SessionHold -and $script:SessionHold.View.CoreWebView2) { $holdPid = $script:SessionHold.View.CoreWebView2.BrowserProcessId } } catch { }
+            $sameFolder = $d.LastFolder -and $d.LastFolder -eq $userData
+            $sameProc = $d.LastBrowserPid -and $d.LastBrowserPid -eq $browserPid
+            $q = [System.Web.HttpUtility]::ParseQueryString(([Uri]$url).Query)
+            Write-SignInLog ("Sign-in window #{0}: first sign-in of this run: {1}; user data folder: {2} (persistent profile: {3}, same folder as the previous window: {4}); browser process {5} (same as the previous window: {6}; hidden session window runs: {7}{8})" -f `
+                $d.Count, $(if ($d.FirstMethod) { $d.FirstMethod } else { 'embedded Microsoft' }), $userData, $persistent, $(if ($d.LastFolder) { $sameFolder } else { 'n/a (first window)' }), $browserPid, $(if ($d.LastBrowserPid) { $sameProc } else { 'n/a (first window)' }), [bool]$script:SessionHold, $(if ($holdPid) { ", same process as this window: $($holdPid -eq $browserPid)" } else { '' })) 'Info'
+            Write-SignInLog ("Sign-in window #{0}: client id {1}; prompt {2}; login_hint sent: {3}; domain_hint sent: {4}; scopes: {5}" -f $d.Count, $ClientID, $(if ($q['prompt']) { $q['prompt'] } else { '(none)' }), [bool]$q['login_hint'], [bool]$q['domain_hint'], $q['scope']) 'Info'
+            Write-SignInLog ("Sign-in window #{0}: cookies before the navigation: {1}" -f $d.Count, (Get-PackTuneCookieSummary $s.CoreWebView2)) 'Info'
+            $d.LastFolder = $userData; $d.LastBrowserPid = $browserPid
+        }
+        catch { Write-SignInLog "Sign-in diagnostics failed: $($_.Exception.Message)" 'Warning' }
+        $s.CoreWebView2.Navigate($url)
     })
     $wv.Add_NavigationStarting({
         param($s, $e)
@@ -519,7 +564,10 @@ function Invoke-PackTuneBrowserSignIn {
                 $v = & $Fill 'otp'
                 if ($v) { & $js '__kvFill' 'input[name="otc"]', $v, '#idSubmit_SAOTCC_Continue' }
             }
-            'kmsi' { & $js '__kvClick' '#idBtn_Back' }   # "Stay signed in?" -> No (the profile is temporary anyway)
+            'kmsi' {
+                # "Stay signed in?": Yes in the shared profile, so Microsoft sets the persistent cookie (ESTSAUTHPERSISTENT) and the next window needs no new sign-in. Temporary profile: No.
+                if ($persistent) { & $js '__kvClick' '#idSIButton9'; Write-SignInLog 'Sign-in window: Stay signed in? answered Yes (the session cookie is kept in the profile).' } else { & $js '__kvClick' '#idBtn_Back' }
+            }
             'choose-otp' {
                 if (-not $HasOtp -or $ctx.Done.chooseOtp) { return }
                 $ctx.Done.chooseOtp = $true
@@ -535,7 +583,6 @@ function Invoke-PackTuneBrowserSignIn {
     # Come to the front even if another app (Keevault) has the focus right now
     $win.Add_ContentRendered({ if ($win.ShowActivated) { $win.Topmost = $true; [void]$win.Activate(); $win.Topmost = $false } })
     if ($Configure) { & $Configure $win $wv }
-    $wv.Source = [Uri]$url
     try { [void]$win.ShowDialog() }
     finally {
         $wv.Dispose()
@@ -644,4 +691,4 @@ function Connect-PackTuneWithKeevault {
 }
 
 Export-ModuleMember -Function Set-PackTuneSignInLog, Find-KeevaultMcp, Connect-KeevaultMcp, Invoke-KeevaultMcpRequest, Invoke-KeevaultMcpTool, Close-KeevaultMcp,
-    Get-PackTuneWebView2, Get-PackTuneSessionFolder, Start-PackTuneSessionHold, Close-PackTuneSessionHold, Clear-PackTuneSession, Get-PackTuneAuthorizeUrl, Request-PackTuneToken, Invoke-PackTuneBrowserSignIn, Connect-PackTuneWithKeevault
+    Get-PackTuneWebView2, Set-PackTuneSignInMethod, Get-PackTuneCookieSummary, Get-PackTuneSessionFolder, Start-PackTuneSessionHold, Close-PackTuneSessionHold, Clear-PackTuneSession, Get-PackTuneAuthorizeUrl, Request-PackTuneToken, Invoke-PackTuneBrowserSignIn, Connect-PackTuneWithKeevault

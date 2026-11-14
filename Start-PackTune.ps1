@@ -220,12 +220,59 @@ function Get-FriendlyCause([string]$Raw) {
     $text = [string]$Raw
     if (-not $text) { return 'Something went wrong.' }
     if ($text -match '(?i)\b403\b|forbidden|verboten|insufficient privileges|Authorization_RequestDenied|access is denied|zugriff verweigert') { return 'No permission: confirm the new permissions or check the license.' }
+    if ($text -match '(?i)\b401\b|unauthorized|nicht autorisiert|token.*expired|InvalidAuthenticationToken') { return 'The sign-in expired or is not accepted: sign in again.' }
+    if ($text -match '(?i)\b50[0234]\b|service unavailable|bad gateway|gateway time|internal server error|serverfehler') { return 'Microsoft Graph has a problem right now (server error). Try again in a moment.' }
     if ($text -match '(?i)\b40[04]\b|bad request|not found|nicht gefunden|ung(Ã¼|u|ue)ltige anforderung|BadRequest|ResourceNotFound') { return 'Not available in this tenant (Remediations need Windows Enterprise E3/E5 licensing).' }
     if ($text -match '(?i)remoteserver|remote server|remotename|could not be resolved|unable to connect|no such host|timed out|timeout|zeit(Ã¼|u|ue)berschreitung|network|netzwerk|connection (was )?(closed|refused|reset)|Verbindung|name or service not known|SSL|TLS') { return "Can't reach Microsoft Graph." }
     $one = ($text -replace '\s+', ' ').Trim()
     if ($one.Length -gt 140) { $one = $one.Substring(0, 137) + '...' }
     $one
 }
+
+# ---- Graph not reachable (network, VPN, 5xx, expired sign-in): lists stay, a banner says why, retries run by themselves
+$script:GraphDown = $null            # @{ Since; Cause; Raw } while the last read of the tenant failed that way
+$script:GraphReadKinds = @('tenant', 'deps', 'customlist', 'counts', 'supercheck')
+$script:GraphRetryDelay = 15
+$script:GraphRetryAt = $null
+function Test-GraphReadFailureText([string]$Text) {
+    $Text -match '(?i)remoteserver|remotename|remote name|remote server|could not be resolved|unable to connect|no such host|name or service not known|timed out|timeout|zeit(ue|Ã¼)berschreitung|network|netzwerk|connection (was )?(closed|refused|reset)|\b50[0234]\b|service unavailable|bad gateway|\b401\b|\b403\b|unauthorized|forbidden|verboten|InvalidAuthenticationToken'
+}
+function Update-GraphDownBanner {
+    $d = $script:GraphDown
+    $ui.BoxGraphDown.Visibility = ConvertTo-Vis ([bool]$d -and (Test-SignedIn))
+    if ($d) {
+        $known = @($script:TenantApps).Count -or @($script:CustomApps).Count
+        $cause = if ($d.Cause -like "Can't reach*") { "Can't reach Microsoft Graph - check the network/VPN." } else { $d.Cause }
+        $ui.TxtGraphDown.Text = "$cause$(if ($known) { ' The lists show the last known state and are not current.' }) Trying again automatically."
+    }
+}
+function Set-GraphDown([string]$Raw) {
+    $script:GraphDown = @{ Since = $(if ($script:GraphDown) { $script:GraphDown.Since } else { Get-Date }); Cause = (Get-FriendlyCause $Raw); Raw = $Raw }
+    if (-not $script:GraphRetryAt) { $script:GraphRetryDelay = 15; $script:GraphRetryAt = (Get-Date).AddSeconds($script:GraphRetryDelay) }
+    Write-UiLog "Microsoft Graph could not be read: $Raw" 'Warning'
+    Update-GraphDownBanner
+}
+function Clear-GraphDown {
+    if (-not $script:GraphDown) { return }
+    $script:GraphDown = $null; $script:GraphRetryAt = $null; $script:GraphRetryDelay = 15
+    Write-UiLog 'Microsoft Graph is reachable again.' 'Success'
+    Update-GraphDownBanner
+    try { Update-TenantRows } catch { }; try { Update-CustomRows } catch { }; try { Update-Readiness } catch { }
+}
+function Invoke-GraphRetry {
+    $script:GraphRetryAt = (Get-Date).AddSeconds($script:GraphRetryDelay)
+    if (-not (Test-SignedIn)) { return }
+    try { Start-TenantRefresh } catch { }
+    try { $script:CustomApps = $script:CustomApps; Start-CustomRefresh } catch { }
+}
+function Step-GraphRetry {
+    # Backoff 15 s, 30 s, 60 s ... up to 2 minutes, while Graph is down
+    if (-not $script:GraphDown -or -not $script:GraphRetryAt -or (Get-Date) -lt $script:GraphRetryAt) { return }
+    if (Test-TaskRunning 'tenant') { return }
+    $script:GraphRetryDelay = [Math]::Min(120, $script:GraphRetryDelay * 2)
+    Invoke-GraphRetry
+}
+$ui.BtnGraphRetry.Add_Click({ try { $script:GraphRetryDelay = 15; Invoke-GraphRetry; Show-Toast 'Trying again ...' 'info' } catch { Show-Error $_.Exception.Message } })
 
 function Show-SignInCancelled {
     # A cancelled sign-in is no error: a quiet note, and the header shows Sign in again
@@ -449,8 +496,17 @@ function Complete-UiTask($Task) {
     if ($script:Shared.Auth) { Set-PackTuneAuthState $script:Shared.Auth }
     $errors = @($job.Log.ToArray() | Where-Object Level -eq 'Error')
     foreach ($entry in @($job.Log.ToArray())) { Write-UiLog ("[{0}] {1}" -f $job.Display, $entry.Text) $entry.Level }
-    if ($job.Status -eq 'failed' -and $job.Kind -notin 'meta', 'icons') {
+    if ($job.Status -eq 'failed' -and $job.Kind -notin 'meta', 'icons' -and -not ($job.Kind -in $script:GraphReadKinds -and @($errors | Where-Object { Test-GraphReadFailureText ([string]$_.Text) }).Count)) {
         Show-Toast ("{0}: {1}" -f $job.Display, $(if ($errors.Count) { $errors[-1].Text } else { 'failed' })) 'bad'
+    }
+    if ($job.Kind -in $script:GraphReadKinds) {
+        # A read that hit the network (or an expired sign-in) must never look like an empty tenant: the module only warns and returns nothing
+        $bad = @($job.Log.ToArray() | Where-Object { Test-GraphReadFailureText ([string]$_.Text) }) | Select-Object -First 1
+        if ($bad) {
+            if ($job.Status -eq 'succeeded') { $job.Status = 'failed'; $job.HadError = $true; Update-JobRow $job }
+            Set-GraphDown ([string]$bad.Text)
+        }
+        elseif ($job.Status -eq 'succeeded') { Clear-GraphDown }
     }
     if ($Task.OnDone) {
         try { & $Task.OnDone $job.Result $job } catch { Show-Error $_.Exception.Message }
@@ -493,6 +549,7 @@ $timer.Add_Tick({
             if ($task.Handle.IsCompleted) { Complete-UiTask $task } else { Update-JobRow $task.Job }
         }
         Update-Toasts
+        if ($script:Tick % 8 -eq 0) { Step-GraphRetry }
         # App cards fill up while the feed lookups run
         if ($script:Refreshing -and $script:Tick % 4 -eq 0) { Update-RefreshButton }
         if ($script:Refreshing -and $script:Tick % 8 -eq 0 -and $script:CurrentPage -eq 'Apps') { Update-AppList -Reload }
@@ -908,6 +965,8 @@ function Get-ReadinessItems {
     $depsText = 'PackTune Runtime puts Chocolatey and winget on the devices (for SYSTEM) and keeps both up to date. Created once per tenant; every app depends on it'
     $info = $script:RuntimeInfo
     $items += $(if (-not (Test-SignedIn)) { @{ Key = 'deps'; Title = 'Dependency app (PackTune Runtime)'; State = 'warn'; Text = $depsText } }
+                elseif ($null -eq $info -and $script:GraphDown) {
+                    @{ Key = 'tenant'; Title = 'Dependency app (PackTune Runtime)'; State = 'warn'; Text = "Can't check right now: $($script:GraphDown.Cause)"; Fix = 'Retry'; Action = { Invoke-GraphRetry } } }
                 elseif ($null -eq $info) {
                     $reading = (Test-TaskRunning 'tenant') -or (Test-TaskRunning 'deps') -or $busyDeps
                     @{ Key = 'tenant'; Title = 'Dependency app (PackTune Runtime)'; State = 'warn'; Wait = $reading
@@ -923,6 +982,7 @@ function Get-ReadinessItems {
                        Fix = 'Switch'; Action = { Start-RuntimeSwitch } } }
                 else { @{ Key = 'deps'; Title = 'Dependency app (PackTune Runtime)'; State = 'ok'; Text = 'PackTune Runtime is in the tenant; every app depends on it.' } })
     $items += $(if (-not (Test-SignedIn)) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = 'Devices report their update log to Intune, so failures show up under In tenant. Needs Remediations (Windows Enterprise E3/E5).' } }
+                elseif ($script:GraphDown -and -not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = "Can't check right now: $($script:GraphDown.Cause)" } }
                 elseif (-not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statuscheck'); Text = 'Checking ...' } }
                 elseif ($script:StatusScript.State -eq 'Present') { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'ok'; Optional = $true; Text = 'The status script is in Intune; devices report their update log hourly.' } }
                 elseif ($script:StatusScript.State -eq 'NotAvailable') { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = "Not available in this tenant. The install status still works; the device log needs Remediations. $(Get-FriendlyCause $script:StatusScript.Reason)" } }
@@ -1054,6 +1114,7 @@ New-PackTuneAppRegistration @Params
 }
 
 function Start-DependencyDeploy {
+    if ($script:GraphDown) { throw "Can't check the tenant right now ($($script:GraphDown.Cause)). PackTune Runtime is not created from a failed read." }
     # Chocolatey app and winget runtime app, once per tenant (each is created only when it is missing)
     if (Test-TaskRunning 'chocolatey') { return }
     Update-UiToken
@@ -1094,6 +1155,7 @@ $State = if ($Avail.Available) { try { Get-InsightStatusScriptState -Context $Ct
     [void](Start-UiTask -Kind 'statuscheck' -Title 'Checking the status script' -Hidden -Arguments @{ Fake = $script:InsightFake } -Work $work -OnDone {
         param($Result, $Job)
         $r = @($Result | Where-Object { $_ -and $null -ne $_.Available }) | Select-Object -First 1
+        if ($r -and -not $r.Available -and ([string]$r.Reason -match '(?i)remote|network|netzwerk|timed out|timeout|resolved|\b50[0234]\b')) { Set-GraphDown ([string]$r.Reason); $script:StatusScript = $null; Update-Readiness; return }
         if ($Job.Status -ne 'succeeded' -or -not $r) { $script:StatusScript = @{ State = 'NotAvailable'; Id = $null; Reason = 'It could not be checked.' } }
         else { $script:StatusScript = @{ State = $(if (-not $r.Available) { 'NotAvailable' } elseif ($r.Id) { 'Present' } else { 'Missing' }); Id = $r.Id; Reason = $r.Reason }; if (-not $r.Available) { Write-UiLog "Status report check: $($r.Reason)" 'Warning' } }
         Update-Readiness
@@ -1112,7 +1174,7 @@ function Start-DependencyCheck {
             $script:RuntimeId = [string]$r.RuntimeId
             $script:WingetNoRuntime = @(@($r.AppsOnOldDependencies) + @($r.AppsWithoutRuntime) | Where-Object { $_ } | Group-Object Id | ForEach-Object { $_.Group[0] })
         }
-        else { $script:RuntimeInfo = $null; $script:RuntimeId = $null }
+        elseif (-not $script:GraphDown) { $script:RuntimeInfo = $null; $script:RuntimeId = $null }   # a failed read keeps what was known
         Start-AppIconTask
         Update-TenantRows
         Update-Readiness
@@ -1549,7 +1611,7 @@ function Update-CustomRows {
     $count = @($apps | Where-Object { $a = $_; -not (@($apps | Where-Object { $_.AppId -eq $a.AppId -and $_.Id -ne $a.Id -and (Compare-SourceVersion $_.Version $a.Version) -eq 1 }).Count) }).Count
     $ui.TxtCustomSubtitle.Text = if (-not (Test-SignedIn)) { 'Your own software as Win32 apps: an MSI is read, packaged and deployed automatically. Sign in to see the custom applications in your tenant.' }
     elseif ($null -eq $script:CustomApps) { 'Reading the custom applications of your tenant ...' }
-    else { "$count custom application(s) in your tenant. An MSI is read, packaged and deployed automatically." }
+    else { "$count custom application(s) in your tenant.$(if ($script:GraphDown) { ' Last known list, not current.' }) An MSI is read, packaged and deployed automatically." }
     $ui.TxtCustomEmpty.Text = if (-not (Test-SignedIn)) { 'Sign in first.' } elseif ($null -eq $script:CustomApps) { '' } elseif (-not $apps.Count) { 'No custom applications yet. New application starts with an MSI.' } else { '' }
     $ui.BtnCustomRefresh.IsEnabled = (Test-SignedIn)
 }
@@ -1559,7 +1621,7 @@ function Start-CustomRefresh {
     [void](Start-UiTask -Kind 'customlist' -Title 'Reading the custom applications' -Display 'Custom applications' -Hidden -NeedsAuth -Pool $script:UserPool -Work 'Get-PackTuneCustomApps -WithAssignments' -OnDone {
         param($Result, $Job)
         # (an if-expression would turn an empty list into $null)
-        if ($Job.Status -eq 'succeeded') { $script:CustomApps = @($Result | Where-Object { $_ -and $_.Id }) } else { $script:CustomApps = $null }
+        if ($Job.Status -eq 'succeeded') { $script:CustomApps = @($Result | Where-Object { $_ -and $_.Id }) } elseif (-not $script:GraphDown) { $script:CustomApps = $null }   # a failed read keeps the last list
         if ($Job.Status -eq 'failed') { Write-UiLog 'The custom applications could not be read, see above.' 'Warning' }
         Update-CustomRows
     })
@@ -2800,7 +2862,10 @@ Get-PackTuneTenantApps | ForEach-Object {
 '@
     [void](Start-UiTask -Kind 'tenant' -Title 'Reading the apps this tool created in the tenant' -Display 'Tenant apps' -Hidden -NeedsAuth -Work $work -OnDone {
         param($Result, $Job)
-        if ($Job.Status -eq 'failed') { $ui.TxtTenantCount.Text = 'Could not read the tenant, see Activity'; Complete-SetupStep $false 'reading the tenant'; return }
+        if ($Job.Status -eq 'failed') {
+            $ui.TxtTenantCount.Text = if ($script:GraphDown -and @($script:TenantApps).Count) { "$(@($script:TenantApps).Count) app(s) - last known list, not current" } elseif ($script:GraphDown) { "Can't read the tenant right now - see the banner" } else { 'Could not read the tenant, see Activity' }
+            Update-Readiness; Complete-SetupStep $false 'reading the tenant'; return
+        }
         $script:TenantApps = @($Result | Where-Object { $_ -and $_.Id } | ForEach-Object {
             $_ | Add-Member -NotePropertyName LatestVersion -NotePropertyValue '' -Force -PassThru | Add-Member -NotePropertyName UpdateAvailable -NotePropertyValue $false -Force -PassThru
         } | Sort-Object { -not $_.IsChocolatey }, DisplayName)
@@ -2919,7 +2984,7 @@ function Update-TenantRows {
     $ui.TxtTenantEmpty.Text = 'This tool has not created any app in the tenant yet. Pick apps under Apps.'
     $apps = @($ordered | Where-Object { -not ($_.IsChocolatey -or $_.IsDependency) }).Count
     $tenant = if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'the tenant' }
-    $ui.TxtTenantCount.Text = "$apps app$(if ($apps -ne 1) { 's' }) and $($deps.Count) dependency app$(if ($deps.Count -ne 1) { 's' }) this tool created in $tenant"
+    $ui.TxtTenantCount.Text = "$apps app$(if ($apps -ne 1) { 's' }) and $($deps.Count) dependency app$(if ($deps.Count -ne 1) { 's' }) this tool created in $tenant$(if ($script:GraphDown) { ' (last known list, not current)' })"
     # Banners
     $updates = @($ordered | Where-Object UpdateAvailable)
     if ($updates.Count) {
@@ -3803,6 +3868,7 @@ function Show-AdminConsentRefusal {
     Show-Toast 'An administrator must confirm these permissions.' 'warn'
     Write-UiLog 'An administrator must confirm these permissions (the sign-in of a user who is no administrator cannot grant them for the organization).' 'Warning'
 }$script:SignInHint = ''
+$script:FirstSignInHow = ''
 $script:BrowserSignIn = 'Invoke-PackTuneBrowserSignIn'   # tests replace it
 function Set-SignInHintFromToken {
     # Signed in already (browser, Keevault or this window): that account is the login hint, so a second sign-in lands on its session
@@ -3813,6 +3879,16 @@ function Invoke-EmbeddedSignIn {
     # Sign-in window, modal to the main window (its timer keeps the background tasks running). Returns the token response.
     param([Parameter(Mandatory)][string]$TenantID, [Parameter(Mandatory)][string]$ClientID, [string[]]$Scopes, [string]$Hint, [ValidateSet('default', 'consent')][string]$Prompt = 'default')
     Set-SignInHintFromToken
+    $first = if ($script:FirstSignInHow) { $script:FirstSignInHow } else { 'this window (embedded Microsoft)' }
+    Write-UiLog "Sign-in request: client id $ClientID; prompt $Prompt; login_hint sent: $([bool]$script:SignInHint); domain_hint sent: False; user data folder: $script:SignInSession; first sign-in of this run: $first; scopes: $(@($Scopes) -join ' ')"
+    if ($script:FirstSignInHow -eq 'Keevault') {
+        # The run was signed in through Keevault: every follow-up sign-in (consent, setup, package store grant) goes the same way,
+        # so a re-authentication is confirmed in Keevault (passkey shim + auto-fill), never in the Windows passkey dialog
+        Write-UiLog "Sign-in method of this run: Keevault (account $script:SignInHint); this window uses Keevault too."
+        if ($script:KeevaultSignInOverride) { return (& $script:KeevaultSignInOverride $TenantID $ClientID $Scopes $Prompt $script:SignInSession) }
+        $pump = { $window.Dispatcher.Invoke([action] {}, [System.Windows.Threading.DispatcherPriority]::Background) }
+        return (Connect-PackTuneWithKeevault -TenantID $TenantID -ClientID $ClientID -CacheFolder (Join-Path $script:WorkRoot 'WebView2') -UserDataFolder $script:SignInSession -Scopes $Scopes -Prompt $Prompt -Owner $window -OnWait $pump -OnAccount { param($User) @{ TenantID = $TenantID; ClientID = $ClientID } })
+    }
     if ($script:EmbeddedSignInOverride) { return (& $script:EmbeddedSignInOverride $TenantID $ClientID $Scopes $script:SignInHint $Prompt $script:SignInSession) }
     $params = @{ TenantID = $TenantID; ClientID = $ClientID; Scopes = $Scopes; CacheFolder = (Join-Path $script:WorkRoot 'WebView2'); Owner = $window; Title = 'Sign in to Microsoft'; Hint = $Hint; UserDataFolder = $script:SignInSession }
     $params.Prompt = $Prompt   # never 'login': the session of the shared profile goes straight on
@@ -3951,6 +4027,7 @@ function Switch-Tenant([string]$TenantID, [string]$ClientID) {
 $script:SignInTest = @{}
 
 function Complete-SignIn([string]$How) {
+    if (-not $script:FirstSignInHow) { $script:FirstSignInHow = $(switch -Wildcard ($How) { '*browser*' { 'system browser' } '*Keevault*' { 'Keevault' } default { 'embedded Microsoft' } }); try { Set-PackTuneSignInMethod $script:FirstSignInHow } catch { } }
     $script:TenantApps = $null
     Update-ConnectionStatus
     $identity = Get-PackTuneIdentity
@@ -3960,6 +4037,7 @@ function Complete-SignIn([string]$How) {
 }
 
 function Disconnect-Intune {
+    $script:GraphDown = $null; $script:GraphRetryAt = $null; try { Update-GraphDownBanner } catch { }
     $script:Shared.Auth = $null
     Set-PackTuneAuthState @{}
     $script:TenantApps = $null; $script:CustomApps = $null; $script:TenantPackages = @{}; $script:RuntimeId = $null; $script:RuntimeInfo = $null; $script:StatusScript = $null; $script:SupersededOld = @()

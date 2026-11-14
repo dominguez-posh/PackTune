@@ -320,6 +320,14 @@
                 <!-- Content surface -->
                 <Border Grid.Column="1" Background="{StaticResource Surface}" BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="1,1,0,0" CornerRadius="8,0,0,0" ClipToBounds="True">
                     <Grid>
+                        <!-- Graph not reachable: the lists stay as they were, this says so -->
+                        <Border x:Name="BoxGraphDown" Panel.ZIndex="50" Visibility="Collapsed" VerticalAlignment="Top" HorizontalAlignment="Center" MaxWidth="820" Margin="24,10,24,0" Background="{StaticResource WarningBg}" BorderBrush="{StaticResource CardBorder}" BorderThickness="1" CornerRadius="8" Padding="14,8">
+                            <Grid>
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBlock x:Name="TxtGraphDown" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{StaticResource Warning}"/>
+                                <Button x:Name="BtnGraphRetry" Grid.Column="1" Content="Retry" Padding="16,6" Margin="14,0,0,0"/>
+                            </Grid>
+                        </Border>
                         <!-- ============ Start ============ -->
                         <Grid x:Name="PageStart" Margin="40,32,40,0">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="32"/><ColumnDefinition Width="380"/></Grid.ColumnDefinitions>

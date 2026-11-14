@@ -1328,6 +1328,43 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Show-Page 'Start'
         Test-Smoke 'no button or toggle is clipped (ActualHeight >= DesiredSize.Height and ActualWidth >= DesiredSize.Width) on any page, dialog and the confirmation at 100/125/150%' ($all.Count -eq 0) ($all -join '; ')
         $true } }
+    @{ Name = 'Graph not reachable: banner, kept lists, no create offer'; Phase = 0; Do = {
+        param($s)
+        $flag = Join-Path $env:LOCALAPPDATA 'fake-network-down'
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle)) { return $false }
+                $script:KeptCount = @($script:TenantApps).Count
+                $script:KeptCustom = @($script:CustomApps).Count
+                $script:RuntimeInfo = $null; $script:RuntimeId = $null
+                Set-Content $flag 'down'
+                $script:Toasts.Clear()
+                Start-TenantRefresh; Start-DependencyCheck; $script:CustomApps = $script:CustomApps; Start-CustomRefresh
+                $s.Phase = 1; return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                Show-Page 'Tenant'
+                Test-Smoke 'network error: banner "Can''t reach Microsoft Graph" with Retry' ($script:GraphDown -and $ui.BoxGraphDown.Visibility -eq 'Visible' -and $ui.TxtGraphDown.Text -like "Can't reach Microsoft Graph*check the network/VPN*" -and $ui.BtnGraphRetry.IsEnabled) $ui.TxtGraphDown.Text
+                Test-Smoke 'last known lists are kept (In tenant and custom), marked not current' (@($script:TenantApps).Count -eq $script:KeptCount -and $script:KeptCount -gt 0 -and $ui.TxtTenantCount.Text -like '*not current*' -and @($script:CustomApps).Count -eq $script:KeptCustom) "$(@($script:TenantApps).Count)/$script:KeptCount $($ui.TxtTenantCount.Text)"
+                $item = @(Get-ReadinessItems | Where-Object { $_.Title -like 'Dependency app*' })[0]
+                Test-Smoke 'readiness says "Can''t check right now" and offers Retry, never Create' ($item.Text -like "Can't check right now*" -and $item.Fix -eq 'Retry' -and $item.State -eq 'warn') "$($item.Text) / $($item.Fix)"
+                $threw = $false; try { Start-DependencyDeploy } catch { $threw = $true }
+                Test-Smoke 'PackTune Runtime is not created from a failed read' ($threw -and -not (Test-TaskRunning 'chocolatey'))
+                Test-Smoke 'no red toast per failed background read, no raw exception in the banner' (-not @($script:Toasts | Where-Object { $_.Kind -eq 'bad' }).Count -and $ui.TxtGraphDown.Text -notmatch 'Remotename|System\.')
+                Test-Smoke 'automatic retry is scheduled' ([bool]$script:GraphRetryAt)
+                Remove-Item $flag -Force
+                $script:RuntimeInfo = $null
+                $ui.BtnGraphRetry.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+                Start-DependencyCheck
+                $s.Phase = 2; return $false
+            }
+            2 {
+                if (-not (Test-Idle)) { return $false }
+                Test-Smoke 'network back: banner gone, list refreshed, runtime state read again' (-not $script:GraphDown -and $ui.BoxGraphDown.Visibility -eq 'Collapsed' -and @($script:TenantApps).Count -eq $script:KeptCount -and $script:RuntimeInfo) "$($ui.TxtGraphDown.Text)"
+                $true
+            }
+        } } }
     @{ Name = 'sign out'; Do = {
         Test-Smoke 'account menu offers sign out and the other tenants' ($true)
         Disconnect-Intune
@@ -1357,6 +1394,19 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $script:Shared.UrlHit = $false
                 Remove-Item $script:GrantedScopesPath -ErrorAction SilentlyContinue   # the very first sign-in of this tenant
                 Connect-Intune
+                # The method of the run is remembered: after a Keevault sign-in, Confirm now / setup use Keevault too (no plain Microsoft window)
+                $savedHow = $script:FirstSignInHow; $script:FirstSignInHow = 'Keevault'
+                $script:KvCalls = New-Object System.Collections.ArrayList
+                $script:KeevaultSignInOverride = { param($t, $c, $sc, $pr, $folder) [void]$script:KvCalls.Add(@($t, $c, ($sc -join ','), $pr, $folder)); New-FakeToken 'Keevault Admin' ($pr -eq 'consent') }
+                $before = $script:EmbeddedCalls.Count
+                [void](Get-EmbeddedToken -TenantID 'contoso.onmicrosoft.com' -ClientID $script:Settings.ClientID -Scopes (Get-PackTuneSignInScopes -Consent) -Prompt 'consent')
+                Test-Smoke 'run signed in via Keevault: Confirm now uses Keevault (same profile folder, prompt=consent), not the plain Microsoft window' ($script:KvCalls.Count -eq 1 -and $script:KvCalls[0][3] -eq 'consent' -and $script:KvCalls[0][4] -eq $script:SignInSession -and $script:KvCalls[0][2] -like '*Sites.Selected*' -and $script:EmbeddedCalls.Count -eq $before)
+                [void](Get-EmbeddedToken -TenantID 'contoso.onmicrosoft.com' -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Application.ReadWrite.All'))
+                Test-Smoke 'setup / store grant sign-in of a Keevault run also goes through Keevault' ($script:KvCalls.Count -eq 2 -and $script:KvCalls[1][1] -eq '14d82eec-204b-4c2f-b7e8-296a70dab67e' -and $script:EmbeddedCalls.Count -eq $before)
+                $script:KeevaultSignInOverride = $null; $script:FirstSignInHow = $savedHow
+                $src = Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..\Modules\Keevault.psm1') -Raw
+                Test-Smoke 'Keevault window: passkey shim injected and cookies/process logged before the navigation' ($src -match 'AddScriptToExecuteOnDocumentCreatedAsync\(\$script:PasskeyShimScript\)' -and $src -match 'cookies before the navigation' -and $src -match 'Navigate\(\$url\)')
+                Test-Smoke 'sign-in diagnostics in the log: client id, prompt, hint, folder, scopes (no tokens)' ((Get-SmokeLog) -match 'Sign-in request: client id 11111111.*prompt default.*login_hint sent.*user data folder:.*first sign-in of this run:.*scopes:' -and (Get-SmokeLog) -notmatch 'refresh-Embedded|access_token')
                 Test-Smoke 'normal sign-in uses the embedded window by default' ($script:LastSignInPath -eq 'embedded' -and $script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][0] -eq 'contoso.onmicrosoft.com' -and $script:EmbeddedCalls[0][1] -eq $script:Settings.ClientID) ($script:EmbeddedCalls | ConvertTo-Json -Compress)
                 Test-Smoke 'embedded sign-in signs in, no browser opened, no task needed' ((Test-SignedIn) -and $script:AccountText -like '*Embedded Admin*' -and -not $script:Shared.UrlHit -and -not (Test-TaskRunning 'connect'))
                 # Missing permissions are confirmed in the normal sign-in (dynamic consent), not in a setup window

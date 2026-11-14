@@ -20,6 +20,8 @@ function Test-FakeAccessToken {
 
 function Get-IntuneWin32App { param([string]$DisplayName, [string]$ID)
     Test-FakeAccessToken
+    # Tests: the network is down (like the real module: a warning and no result)
+    if (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-network-down')) { Write-Warning ("Der Remotename konnte nicht aufgel" + [char]0xF6 + "st werden: 'graph.microsoft.com'"); return }
     $Apps = Read-Store
     if ($ID) { $Apps = $Apps | Where-Object { $_.id -eq $ID } }
     if ($DisplayName) { $Apps = $Apps | Where-Object { $_.displayName -like "*$DisplayName*" } }
