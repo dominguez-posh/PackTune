@@ -507,6 +507,13 @@
                                             <Button x:Name="BtnCustomRefresh" Content="Refresh" Tag="&#xE72C;"/>
                                         </StackPanel>
                                     </Grid>
+                                    <Border x:Name="BoxCustomStore" Visibility="Collapsed" Background="{StaticResource WarningBg}" CornerRadius="8" Padding="16,12" Margin="0,14,0,0">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock x:Name="TxtCustomStoreBanner" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="{StaticResource Warning}" Text="Set up the package store first. Custom applications keep every version in the package store, so New application, New version and Export need it. Existing applications are shown and can be removed."/>
+                                            <Button x:Name="BtnCustomStoreSetup" Grid.Column="1" Content="Set up" Margin="16,0,0,0" Padding="16,6"/>
+                                        </Grid>
+                                    </Border>
                                     <Grid Margin="0,18,0,0">
                                         <Grid.ColumnDefinitions><ColumnDefinition Width="36"/><ColumnDefinition Width="*"/><ColumnDefinition Width="150"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
                                         <Grid.Resources><Style TargetType="TextBlock"><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{StaticResource MutedText}"/></Style></Grid.Resources>

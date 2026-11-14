@@ -2790,6 +2790,9 @@ Set-TenantInsightHooks -Markers @{ Tool = $script:AppMarker; Winget = $script:Wi
     -ConvertFromNotes ${function:ConvertFrom-PackTuneAppNotes} -ConvertToNotes ${function:ConvertTo-PackTuneAppNotes} -NewPolicy ${function:New-PackTuneAppPolicy} `
     -NewChocoApp ${function:New-PackTuneChocolateyApp} -NewWingetApp ${function:New-PackTuneWingetApp} -SignIn ${function:Invoke-PackTunePkceSignIn}
 
+# Tests: the package store is a fake in memory (file given by the environment variable)
+if ($env:PACKTUNE_FAKE_STORE -and (Test-Path -LiteralPath $env:PACKTUNE_FAKE_STORE)) { . $env:PACKTUNE_FAKE_STORE }
+
 # Run interactively when started as a script, only load the functions when dot-sourced
 if ($MyInvocation.InvocationName -ne '.') {
     if (-not $TenantID) { $TenantID = $script:Settings.TenantID }

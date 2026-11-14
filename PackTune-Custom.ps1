@@ -351,14 +351,13 @@ function Get-PackTuneMsiIconBase64 {
 
 function Save-PackTuneCustomMsiToStore {
     <#
-        Keeps the MSI version in the package store when a store is set up (the MSI as the "installer files", the package, the
-        recipe). No site set: nothing is stored (a warning). A site that is set but not ready is an error: the version
-        could not be exported later. Returns the manifest hash or $null.
+        Keeps the MSI version in the package store (the MSI as the "installer files", the package, the recipe). Custom
+        applications need the store: a store that is not ready is an error, so the state of an application is always kept
+        somewhere. Returns the manifest hash.
     #>
     param([Parameter(Mandatory = $true)]$Info, [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)]$Built, [string]$Extra)
-    if (-not $script:Settings.StoreSiteUrl) { Write-Warning "No package store is set up: this version cannot be exported or edited later (Start page, Package store)."; return $null }
     $State = Get-PackTuneStoreState
-    if ($State.State -ne "Ready") { throw "The package store is not ready: $($State.Message)" }
+    if ($State.State -ne "Ready") { throw "Custom applications need the package store, and it is not ready: $($State.Message) Set it up on the Start page first." }
     $Folder = Join-Path ([IO.Path]::GetTempPath()) ("packtune-msi-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Path $Folder -Force | Out-Null
     try {

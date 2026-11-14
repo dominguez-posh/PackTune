@@ -22,6 +22,10 @@ $Global:AccessToken = [pscustomobject]@{ ExpiresOn = (Get-Date).AddHours(2).ToUn
 $Global:AuthenticationHeader = @{ Authorization = 'Bearer x'; ExpiresOn = $Global:AccessToken.ExpiresOn }
 $Global:AccessTokenTenantID = 'contoso.onmicrosoft.com'
 function Get-Store { @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ }) }
+# custom applications need the package store: a fake SharePoint with the library
+. (Join-Path $PSScriptRoot 'Fakes\FakeSharePoint.ps1')
+$settings = Get-PackTuneSettings; $settings.StoreSiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; Save-PackTuneSettings -Settings $settings | Out-Null; $script:Settings = Get-PackTuneSettings
+$null = Initialize-PackTuneStore
 
 function New-TestMsi {
     # A Property table is all PackTune reads; the file is not installable
@@ -113,7 +117,7 @@ Test-Check 'notes stay short' ($notes.Length -lt 300) $notes.Length
 # --- deploy
 $id1 = New-PackTuneCustomMsiApp -MsiPath $msi1 -Assignment Available -Properties @{ ALLUSERS = '1' }
 $a1 = Get-Store | Where-Object id -eq $id1
-Test-Check 'deploy: a Win32 app with the MSI name, version, publisher, notes and assignment' (($a1.displayName -eq 'Contoso Tool') -and ($a1.displayVersion -eq '1.0.0') -and ($a1.publisher -eq 'Contoso Ltd') -and ($a1.notes -eq $notes) -and ($a1.assignment -eq 'available'))
+Test-Check 'deploy: a Win32 app with the MSI name, version, publisher, notes and assignment' (($a1.displayName -eq 'Contoso Tool') -and ($a1.displayVersion -eq '1.0.0') -and ($a1.publisher -eq 'Contoso Ltd') -and ($a1.notes -like "$notes;manifest=*") -and ($a1.assignment -eq 'available'))
 $detText = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($a1.detection))
 Test-Check 'deploy: detection rule is the product code script' (($detText -match [regex]::Escape($info1.ProductCode)) -and ($a1.install -match 'install\.ps1'))
 Test-Check 'deploy: no dependency app (msiexec is part of Windows)' (@($a1.dependencies).Count -eq 0)
