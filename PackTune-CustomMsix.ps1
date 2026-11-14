@@ -307,7 +307,7 @@ function Add-PackTuneCustomMsixIntuneApp {
     $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }
     $RequirementRule = Invoke-IntuneModule { New-IntuneWin32AppRequirementRule -Architecture $Architecture -MinimumSupportedWindowsRelease $MinimumWindows }
     $Notes = "$($script:CustomMarker)msix;app=$AppId;ver=$($Build.Version);identity=$($Build.PackageName);thumb=$($Build.Thumbprint)"
-    if ($Manifest) { $Notes += ";manifest=$($Manifest.Substring(0, 16).ToLower())" }
+    if ($Manifest) { $Notes += ";manifest=$(ConvertTo-PackTuneManifestAnchor $Manifest)" }
     $AppParams = @{
         FilePath = $Package.Package.Path; DisplayName = $DisplayName; Description = $(if ($Description) { $Description } else { $DisplayName }); Publisher = $(if ($Publisher) { $Publisher } else { "-" })
         AppVersion = $Build.Version; Notes = $Notes; InstallExperience = "system"; RestartBehavior = "suppress"; DetectionRule = $DetectionRule; RequirementRule = $RequirementRule
@@ -460,10 +460,70 @@ function Export-PackTuneCustomApp {
     }
     if (-not $Version) { throw "No stored version of $AppId was found" }
     $Known = @($Apps | Where-Object { $_.Version -eq $Version }) | Select-Object -First 1
-    $Expected = if ($Known) { $Known.Manifest } else { "" }
-    if (-not $Expected) { Write-Warning "The Intune app of this version is gone, the manifest cannot be checked against Intune; the files are checked against the manifest only." }
-    Save-PackTuneStoreVersion -AppId $AppId -Version $Version -Destination $Destination -ExpectedManifest $Expected -Store $State.Store
+    # Fail closed: without the Intune app of this version (or without manifest= in its notes) nothing vouches for the store
+    if (-not $Known) { throw "There is no Intune app of $AppId $Version, so the stored files cannot be checked against Intune: nothing was downloaded." }
+    Save-PackTuneStoreVersion -AppId $AppId -Version $Version -Destination $Destination -ExpectedManifest ([string]$Known.Manifest) -Store $State.Store
 }#Downloads a stored version for editing
+
+function Get-PackTuneCustomAnchorReport {
+    <#
+        Read only, for an administrator before Set-PackTuneCustomManifestAnchor: what the package store holds now for the
+        version of one Intune custom app (the manifest, its SHA256, when it was made, every file with size and SHA256) next
+        to the manifest hash recorded in the notes. Changed = the store differs from what Intune recorded.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Id)
+    # Read only: its temporary download also runs when the caller previews with -WhatIf
+    $WhatIfPreference = $false
+    Assert-PackTunePrerequisites
+    Assert-PackTuneConnection
+    Update-PackTuneToken
+    $App = Invoke-IntuneModule { Get-IntuneWin32App -ID $Id }
+    if ($null -eq $App) { throw "App $Id was not found in Intune" }
+    $Notes = ConvertFrom-PackTuneCustomNotes ([string]$App.notes)
+    if (-not $Notes -or -not $Notes.AppId -or -not $Notes.Version) { throw "$($App.displayName) is not a custom application of this tool" }
+    $State = Get-PackTuneStoreState
+    if ($State.State -ne "Ready") { throw "The package store is not ready: $($State.Message)" }
+    $Temp = Join-Path ([IO.Path]::GetTempPath()) ("packtune-anchor-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    New-Item -ItemType Directory -Path $Temp -Force | Out-Null
+    try {
+        $File = Join-Path $Temp "manifest.json"
+        Receive-PackTuneStoreFile -DriveId $State.Store.DriveId -Segments @($Notes.AppId, $Notes.Version, "manifest.json") -Destination $File
+        $Hash = (Get-FileHash -LiteralPath $File -Algorithm SHA256).Hash.ToLower()
+        $Manifest = Get-Content -LiteralPath $File -Raw | ConvertFrom-Json
+    }
+    finally { Remove-Item -LiteralPath $Temp -Recurse -Force -ErrorAction SilentlyContinue }
+    $Recorded = [string]$Notes.Manifest
+    [pscustomobject]@{
+        Id = $Id; DisplayName = [string]$App.displayName; AppId = $Notes.AppId; Version = $Notes.Version
+        Recorded = $Recorded; StoreManifest = $Hash; Changed = -not ($Recorded -and $Hash.StartsWith($Recorded)); Created = [string]$Manifest.created
+        Files = @($Manifest.files | ForEach-Object { [pscustomobject]@{ Name = [string]$_.name; Size = $_.size; Sha256 = [string]$_.sha256 } })
+    }
+}#What the store holds against the anchor in Intune
+
+function Set-PackTuneCustomManifestAnchor {
+    <#
+        Re-anchor (administrator, after Get-PackTuneCustomAnchorReport): records the manifest that is in the store NOW as the
+        trusted one in the notes of the Intune app. -StoreManifest must be the hash shown in the report: when the store
+        changed again since, nothing is written. Every file is downloaded and checked against that manifest first.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param([Parameter(Mandatory = $true)][string]$Id, [Parameter(Mandatory = $true)][string]$StoreManifest)
+    $Report = Get-PackTuneCustomAnchorReport -Id $Id
+    $Wanted = ConvertTo-PackTuneManifestAnchor $StoreManifest
+    if ($Report.StoreManifest -ne $Wanted) { throw "The manifest in the store is $($Report.StoreManifest) now, not the $Wanted that was shown: the store changed again. Nothing was recorded; look at the report again." }
+    if (-not $PSCmdlet.ShouldProcess($Report.DisplayName, "record the store manifest $Wanted (recorded so far: '$($Report.Recorded)')")) { return $Report }
+    # Every file must match the manifest before it becomes the trusted one
+    $State = Get-PackTuneStoreState
+    $Temp = Join-Path ([IO.Path]::GetTempPath()) ("packtune-anchor-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    try { $null = Save-PackTuneStoreVersion -AppId $Report.AppId -Version $Report.Version -Destination $Temp -ExpectedManifest $Wanted -Store $State.Store }
+    finally { Remove-Item -LiteralPath $Temp -Recurse -Force -ErrorAction SilentlyContinue }
+    $App = Invoke-IntuneModule { Get-IntuneWin32App -ID $Id }
+    $Old = [string]$App.notes
+    $New = if ($Old -match '(?:^|;)manifest=[0-9a-f]+(?=;|$)') { $Old -replace '(^|;)manifest=[0-9a-f]+(?=;|$)', "`${1}manifest=$Wanted" } else { "$Old;manifest=$Wanted" }
+    Invoke-IntuneModule { Set-IntuneWin32App -ID $Id -Notes $New } | Out-Null
+    Write-Host "$($Report.DisplayName) $($Report.Version): the manifest $Wanted is recorded as the trusted one."
+    return $Report
+}#Records the current store manifest in the notes (after the report)
 
 function Remove-PackTuneCustomStore {
     # Deletes the stored files of an app (all versions). Only when no Intune app of it is left.

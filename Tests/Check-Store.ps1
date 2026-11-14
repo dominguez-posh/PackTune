@@ -83,14 +83,22 @@ $script:Fs.Remove('my-app-1a2b3c4d/1.1.0/package.msix')
 
 # --- export / download with verification
 $out = Join-Path $work 'export1'
-$saved = Save-PackTuneStoreVersion -AppId 'my-app-1a2b3c4d' -Version '1.0.0' -Destination $out -ExpectedManifest $hash.Substring(0, 16).ToLower() -Store $ready.Store
+$saved = Save-PackTuneStoreVersion -AppId 'my-app-1a2b3c4d' -Version '1.0.0' -Destination $out -ExpectedManifest $hash.ToLower() -Store $ready.Store
+# Fail closed without an anchor; the short anchor of the first release is still accepted, with a warning
+$outNone = Join-Path $work 'export-none'
+$threw = $false; $msg = ''; try { $null = Save-PackTuneStoreVersion -AppId 'my-app-1a2b3c4d' -Version '1.0.0' -Destination $outNone -Store $ready.Store } catch { $threw = $true; $msg = $_.Exception.Message }
+Test-Check 'anchor: without manifest= in the notes nothing is downloaded, the message names the re-anchor action' ($threw -and $msg -like '*records no manifest*' -and $msg -like '*Set-PackTuneCustomManifestAnchor*' -and -not (Test-Path (Join-Path $outNone 'manifest.json'))) $msg
+$warn = @(); $legacy = Save-PackTuneStoreVersion -AppId 'my-app-1a2b3c4d' -Version '1.0.0' -Destination (Join-Path $work 'export-legacy') -ExpectedManifest $hash.Substring(0, 16).ToLower() -Store $ready.Store -WarningVariable warn -WarningAction SilentlyContinue
+Test-Check 'anchor: the short anchor of the first release still works, with a warning to record the full one' ($legacy.ManifestHash -eq $hash -and @($warn).Count -eq 1 -and "$($warn[0])" -like '*Set-PackTuneCustomManifestAnchor*')
+$threw = $false; try { $null = Save-PackTuneStoreVersion -AppId 'my-app-1a2b3c4d' -Version '1.0.0' -Destination (Join-Path $work 'export-bad') -ExpectedManifest ('0' * 64) -Store $ready.Store } catch { $threw = $_.Exception.Message -like '*does not match the one recorded in Intune*' }
+Test-Check 'anchor: a full hash that differs is refused' $threw
 Test-Check 'export: all files verified and saved, the installer folder unpacked' ((Test-Path (Join-Path $out 'package.msix')) -and (Test-Path (Join-Path $out 'installer\setup.exe')) -and (Test-Path (Join-Path $out 'installer\sub\a.txt')) -and ($saved.Files.Count -eq 4) -and ($saved.ManifestHash -eq $hash) -and ($saved.Kind -eq 'msix'))
 Test-Check 'export: the package is the one that was stored' ((Get-FileHash (Join-Path $out 'package.msix') -Algorithm SHA256).Hash -eq (Get-FileHash (Join-Path $src 'package.msix') -Algorithm SHA256).Hash)
 # tampered file: one changed byte in installer.zip
 $orig = $script:Fs['my-app-1a2b3c4d/1.0.0/installer.zip']
 $tamper = $orig.Clone(); $tamper[10] = [byte](($tamper[10] + 1) % 256); $script:Fs['my-app-1a2b3c4d/1.0.0/installer.zip'] = $tamper
 $out2 = Join-Path $work 'export2'
-$threw = $false; $msg = ''; try { $null = Save-PackTuneStoreVersion -AppId 'my-app-1a2b3c4d' -Version '1.0.0' -Destination $out2 -Store $ready.Store } catch { $threw = $true; $msg = $_.Exception.Message }
+$threw = $false; $msg = ''; try { $null = Save-PackTuneStoreVersion -AppId 'my-app-1a2b3c4d' -Version '1.0.0' -Destination $out2 -ExpectedManifest $hash -Store $ready.Store } catch { $threw = $true; $msg = $_.Exception.Message }
 Test-Check 'tamper: a changed byte in a stored file stops the export, nothing is unpacked' ($threw -and ($msg -like '*installer.zip*does not match*') -and -not (Test-Path (Join-Path $out2 'installer'))) $msg
 $script:Fs['my-app-1a2b3c4d/1.0.0/installer.zip'] = $orig
 # swapped manifest: a manifest that describes other files (made consistent) does not match the Intune notes
@@ -103,11 +111,12 @@ $script:Fs['my-app-1a2b3c4d/1.0.0/manifest.json'] = $manifestBytes
 # manifest of another version copied here
 $wrong = [Text.Encoding]::UTF8.GetString($manifestBytes).Replace('"appVersion":  "1.0.0"', '"appVersion":  "9.9.9"')
 $script:Fs['my-app-1a2b3c4d/1.0.0/manifest.json'] = [Text.Encoding]::UTF8.GetBytes($wrong)
-$threw = $false; try { $null = Save-PackTuneStoreVersion -AppId 'my-app-1a2b3c4d' -Version '1.0.0' -Destination (Join-Path $work 'export4') -Store $ready.Store } catch { $threw = $_.Exception.Message -like '*does not belong*' }
+$wrongHash = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($script:Fs['my-app-1a2b3c4d/1.0.0/manifest.json']) | ForEach-Object { $_.ToString('x2') })
+$threw = $false; try { $null = Save-PackTuneStoreVersion -AppId 'my-app-1a2b3c4d' -Version '1.0.0' -Destination (Join-Path $work 'export4') -ExpectedManifest $wrongHash -Store $ready.Store } catch { $threw = $_.Exception.Message -like '*does not belong*' }
 Test-Check 'tamper: a manifest of another version is refused' $threw
 $script:Fs['my-app-1a2b3c4d/1.0.0/manifest.json'] = $manifestBytes
 $script:Fs.Remove('my-app-1a2b3c4d/1.0.0/recipe.json')
-$threw = $false; try { $null = Save-PackTuneStoreVersion -AppId 'my-app-1a2b3c4d' -Version '1.0.0' -Destination (Join-Path $work 'export5') -Store $ready.Store } catch { $threw = $true }
+$threw = $false; try { $null = Save-PackTuneStoreVersion -AppId 'my-app-1a2b3c4d' -Version '1.0.0' -Destination (Join-Path $work 'export5') -ExpectedManifest $hash -Store $ready.Store } catch { $threw = $true }
 Test-Check 'a file that is missing in the store stops the export' $threw
 $script:Fs['my-app-1a2b3c4d/1.0.0/recipe.json'] = [IO.File]::ReadAllBytes((Join-Path $src 'recipe.json'))
 
@@ -126,7 +135,10 @@ Test-Check 'zip slip: an entry outside the target refuses the whole archive, not
 $info = [pscustomobject]@{ Version = '1.0.0'; ProductCode = '{AAAAAAAA-0000-0000-0000-000000000001}'; UpgradeCode = '{11111111-2222-3333-4444-555555555555}' }
 $notes = ConvertTo-PackTuneCustomNotes -Info $info -AppId 'my-app-1a2b3c4d' -Manifest $hash
 $parsed = ConvertFrom-PackTuneCustomNotes $notes
-Test-Check 'notes: the start of the manifest hash is recorded and read back' (($notes -like '*;manifest=????????????????') -and ($parsed.Manifest -eq $hash.Substring(0, 16).ToLower()))
+Test-Check 'notes: the full manifest hash is recorded and read back' (($notes -match ';manifest=[0-9a-f]{64}$') -and ($parsed.Manifest -eq $hash.ToLower()))
+Test-Check 'notes: the short anchor of the first release is still read' ((ConvertFrom-PackTuneCustomNotes ($notes -replace 'manifest=[0-9a-f]{64}', "manifest=$($hash.Substring(0, 16).ToLower())")).Manifest -eq $hash.Substring(0, 16).ToLower())
+$longest = ConvertTo-PackTuneCustomNotes -Info ([pscustomobject]@{ Version = '65535.65535.65535.65535'; ProductCode = $info.ProductCode; UpgradeCode = $info.UpgradeCode }) -AppId ('a' * 80) -Manifest $hash
+Test-Check 'notes: within the length budget with the full hash' ($longest.Length -lt $script:NotesMaxLength -and $longest.Length -lt 400) $longest.Length
 
 # --- delete
 Remove-PackTuneStoreApp -AppId 'my-app-1a2b3c4d' -Store $ready.Store

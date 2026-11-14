@@ -151,7 +151,7 @@ Test-Check 'deploy: ONE Intune app (no second app, no certificate profile), Win3
 Test-Check 'deploy: the capture got the folder, entry point, arguments and the identity; the version certificate signed it' (($cap.Folder -eq $folder) -and ($cap.Entry -eq 'setup.exe') -and ($cap.Arguments -eq '/S') -and ($cap.PackageName -eq 'PackTune.ContosoHelperTool') -and $cap.SkipSigning -and ($cap.Publisher -eq 'CN=PackTune Contoso Helper Tool') -and ($script:Signed[0].Thumbprint -eq $thumb) -and $script:Signed[0].CertLive -and ([string]::IsNullOrEmpty($cap.Base))) "folder=$($cap.Folder) entry=$($cap.Entry) args=$($cap.Arguments) pn=$($cap.PackageName) skip=$($cap.SkipSigning) base=$($cap.Base)"
 Test-Check 'certificate: made only after the capture finished, removed right after signing' (($script:Events -join ',') -eq 'capture,cert,sign,remove') ($script:Events -join ',')
 Test-Check 'certificate: made for the call with the fixed subject, removed right after, also the only one' (($script:Certs.Count -eq 1) -and ($script:Certs[0].Subject -eq 'CN=PackTune Contoso Helper Tool') -and ($script:CertsRemoved -contains $thumb) -and ($script:CertsRemoved.Count -eq 1))
-Test-Check 'notes: custom=msix with app, version, identity, certificate thumbprint and the manifest start' (($notes1.Kind -eq 'msix') -and ($notes1.Version -eq '1.0.0.0') -and ($notes1.Identity -eq 'PackTune.ContosoHelperTool') -and ($notes1.Thumbprint -eq $thumb) -and ($notes1.Manifest.Length -eq 16) -and ($a1.notes.Length -lt 400)) $a1.notes
+Test-Check 'notes: custom=msix with app, version, identity, certificate thumbprint and the full manifest hash' (($notes1.Kind -eq 'msix') -and ($notes1.Version -eq '1.0.0.0') -and ($notes1.Identity -eq 'PackTune.ContosoHelperTool') -and ($notes1.Thumbprint -eq $thumb) -and ($notes1.Manifest.Length -eq 64) -and ($a1.notes.Length -lt 400)) $a1.notes
 $detText = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($a1.detection))
 Test-Check 'deploy: the detection checks the provisioned package of the identity and version' (($detText -match 'PackTune.ContosoHelperTool') -and ($detText -match "1.0.0.0"))
 $src = Join-Path $work "PackTune\package\custom-$($notes1.AppId)\source"
@@ -162,7 +162,7 @@ Test-Check 'store: package, original installer files (zip), recipe, certificate,
 $recipe = [Text.Encoding]::UTF8.GetString($script:Fs["$($notes1.AppId)/1.0.0.0/recipe.json"]) | ConvertFrom-Json
 Test-Check 'store: the recipe holds entry point, arguments, subject and thumbprint' (($recipe.entryPoint -eq 'setup.exe') -and ($recipe.arguments -eq '/S') -and ($recipe.subject -eq 'CN=PackTune Contoso Helper Tool') -and ($recipe.thumbprint -eq $thumb))
 $sha = [Security.Cryptography.SHA256]::Create(); $mh = -join ($sha.ComputeHash($script:Fs["$($notes1.AppId)/1.0.0.0/manifest.json"]) | ForEach-Object { $_.ToString('x2') })
-Test-Check 'trust anchor: the manifest start in the Intune notes is the hash of the stored manifest' ($mh.StartsWith($notes1.Manifest))
+Test-Check 'trust anchor: the full manifest hash in the Intune notes is the hash of the stored manifest' ($mh -eq $notes1.Manifest)
 $dup = $false; try { $null = New-PackTuneCustomOtherApp -Folder $folder -EntryPoint 'setup.exe' -Name 'Contoso Helper Tool' } catch { $dup = $_.Exception.Message -like '*exists already*' }
 Test-Check 'the same application name is refused (use New version)' $dup
 $custom = @(Get-PackTuneCustomApps)
@@ -204,6 +204,44 @@ Test-Check 'tampered store: the update is refused before anything is captured' (
 $threw = $false; try { $null = Export-PackTuneCustomApp -AppId $notes1.AppId -Version '2.0.0.0' -Destination (Join-Path $work 'exp-bad') } catch { $threw = $true }
 Test-Check 'tampered store: the export is refused too' ($threw -and -not (Test-Path (Join-Path $work 'exp-bad\installer')))
 $script:Fs[$k] = $orig
+
+# --- no anchor in the notes: update and export refused (fail closed)
+$stored3 = Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw
+$notesNoAnchor = ((Get-Store | Where-Object id -eq $id3).notes) -replace ';manifest=[0-9a-f]+', ''
+Invoke-IntuneModule { Set-IntuneWin32App -ID $id3 -Notes $notesNoAnchor } | Out-Null
+$threw = $false; $msg = ''; try { $null = Update-PackTuneCustomOtherApp -AppId $id3 -Version '3.0.0.0' } catch { $threw = $true; $msg = $_.Exception.Message }
+Test-Check 'no anchor: the update is refused with the re-anchor hint, nothing captured' ($threw -and $msg -like '*records no manifest*' -and $msg -like '*Get-PackTuneCustomAnchorReport*' -and $script:Captures.Count -eq 0) $msg
+$threw = $false; try { $null = Export-PackTuneCustomApp -AppId $notes1.AppId -Version '2.0.0.0' -Destination (Join-Path $work 'exp-noanchor') } catch { $threw = $true }
+Test-Check 'no anchor: the export is refused' ($threw -and -not (Test-Path (Join-Path $work 'exp-noanchor\package.msix')))
+Set-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') $stored3
+$threw = $false; $msg = ''; try { $null = Export-PackTuneCustomApp -AppId $notes1.AppId -Version '9.9.9.9' -Destination (Join-Path $work 'exp-gone') } catch { $threw = $true; $msg = $_.Exception.Message }
+Test-Check 'export of a version without its Intune app is refused (nothing vouches for it)' ($threw -and $msg -like '*no Intune app*') $msg
+
+# --- re-anchor: a wanted change in the store is recorded only after the report, with the hash that was shown
+$k2 = "$($notes1.AppId)/2.0.0.0"
+$origPkg = $script:Fs["$k2/package.msix"]; $origMan = $script:Fs["$k2/manifest.json"]
+$newPkg = [Text.Encoding]::ASCII.GetBytes('MSIX PackTune.ContosoHelperTool 2.0.0.0 rebuilt by an administrator')
+$script:Fs["$k2/package.msix"] = $newPkg
+$man = [Text.Encoding]::UTF8.GetString($origMan) | ConvertFrom-Json
+foreach ($f in $man.files) { if ($f.name -eq 'package.msix') { $f.sha256 = -join ([Security.Cryptography.SHA256]::Create().ComputeHash($newPkg) | ForEach-Object { $_.ToString('X2') }); $f.size = $newPkg.Length } }
+$script:Fs["$k2/manifest.json"] = [Text.Encoding]::UTF8.GetBytes(($man | ConvertTo-Json -Depth 6))
+$threw = $false; try { $null = Update-PackTuneCustomOtherApp -AppId $id3 -Version '3.0.0.0' } catch { $threw = $_.Exception.Message -like '*does not match the one recorded in Intune*' }
+Test-Check 're-anchor: a consistently changed store is refused until it is re-anchored' $threw
+$report = Get-PackTuneCustomAnchorReport -Id $id3
+Test-Check 're-anchor: the report shows the change, the new manifest hash and every file' ($report.Changed -and $report.StoreManifest -ne $report.Recorded -and $report.StoreManifest.Length -eq 64 -and @($report.Files | Where-Object Name -eq 'package.msix').Sha256 -eq ($man.files | Where-Object name -eq 'package.msix').sha256) ($report | ConvertTo-Json -Compress -Depth 3)
+$threw = $false; try { Set-PackTuneCustomManifestAnchor -Id $id3 -StoreManifest ('1' * 64) -Confirm:$false | Out-Null } catch { $threw = $_.Exception.Message -like '*changed again*' }
+Test-Check 're-anchor: a hash other than the one in the report is refused, nothing written' ($threw -and ((ConvertFrom-PackTuneCustomNotes ((Get-Store | Where-Object id -eq $id3).notes)).Manifest -eq $report.Recorded))
+$null = Set-PackTuneCustomManifestAnchor -Id $id3 -StoreManifest $report.StoreManifest -WhatIf
+Test-Check 're-anchor: -WhatIf records nothing' ((ConvertFrom-PackTuneCustomNotes ((Get-Store | Where-Object id -eq $id3).notes)).Manifest -eq $report.Recorded)
+$null = Set-PackTuneCustomManifestAnchor -Id $id3 -StoreManifest $report.StoreManifest -Confirm:$false
+$after = (Get-Store | Where-Object id -eq $id3).notes
+$before3 = (@($stored3 | ConvertFrom-Json | ForEach-Object { $_ }) | Where-Object id -eq $id3).notes
+Test-Check 're-anchor: the shown hash is recorded, the rest of the notes stays' (((ConvertFrom-PackTuneCustomNotes $after).Manifest -eq $report.StoreManifest) -and (($after -replace 'manifest=[0-9a-f]+', '') -eq ($before3 -replace 'manifest=[0-9a-f]+', ''))) $after
+$exAnch = Export-PackTuneCustomApp -AppId $notes1.AppId -Version '2.0.0.0' -Destination (Join-Path $work 'exp-anchored')
+Test-Check 're-anchor: after it the export works with the changed store' ([IO.File]::ReadAllText((Join-Path $work 'exp-anchored\package.msix')) -like '*rebuilt by an administrator*')
+# back to the original content and anchor
+$script:Fs["$k2/package.msix"] = $origPkg; $script:Fs["$k2/manifest.json"] = $origMan
+Set-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') $stored3
 
 # --- export to edit and replace
 $dest = Join-Path $work 'export-v1'

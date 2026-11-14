@@ -239,8 +239,8 @@ exit 1
 function ConvertTo-PackTuneCustomNotes {
     param([Parameter(Mandatory = $true)]$Info, [Parameter(Mandatory = $true)][string]$AppId, [string]$Manifest)
     $Notes = "$($script:CustomMarker)msi;app=$AppId;ver=$($Info.Version);product=$($Info.ProductCode);upgrade=$($Info.UpgradeCode)"
-    # The start of the manifest hash of the package store: Intune is the trust anchor for what the store holds
-    if ($Manifest) { $Notes += ";manifest=$($Manifest.Substring(0, 16).ToLower())" }
+    # The full SHA256 of the manifest in the package store: Intune is the trust anchor for what the store holds
+    if ($Manifest) { $Notes += ";manifest=$(ConvertTo-PackTuneManifestAnchor $Manifest)" }
     return $Notes
 }
 
@@ -254,7 +254,8 @@ function ConvertFrom-PackTuneCustomNotes {
     if ($Notes -match '(?:^|;)ver=([0-9.]+)(?:;|$)') { $Result.Version = $Matches[1] }
     if ($Notes -match '(?:^|;)product=(\{[0-9A-Fa-f-]{36}\})(?:;|$)') { $Result.ProductCode = $Matches[1].ToUpper() }
     if ($Notes -match '(?:^|;)upgrade=(\{[0-9A-Fa-f-]{36}\})(?:;|$)') { $Result.UpgradeCode = $Matches[1].ToUpper() }
-    if ($Notes -match '(?:^|;)manifest=([0-9a-f]{16})(?:;|$)') { $Result.Manifest = $Matches[1] }
+    # Full SHA256 (64 hex); apps of the first release carry only its first 16 characters
+    if ($Notes -match '(?:^|;)manifest=([0-9a-f]{64}|[0-9a-f]{16})(?:;|$)') { $Result.Manifest = $Matches[1] }
     if ($Notes -match '(?:^|;)identity=([A-Za-z0-9._-]+)(?:;|$)') { $Result.Identity = $Matches[1] }
     if ($Notes -match '(?:^|;)thumb=([0-9A-Fa-f]{40})(?:;|$)') { $Result.Thumbprint = $Matches[1].ToUpper() }
     return [pscustomobject]$Result

@@ -10,7 +10,7 @@
     Access: Microsoft Graph with the delegated scope Sites.Selected. It grants nothing alone: an administrator grants the
     app registration access to that one site once (Grant-PackTuneStoreAccess, needs Sites.FullControl.All during that
     setup only). Whoever can write to the library can replace an installer that becomes an app for all devices, so
-    Intune is the trust anchor: the notes of every custom app carry the start of the manifest hash, and an export or an
+    Intune is the trust anchor: the notes of every custom app carry the full SHA256 of the manifest, and an export or an
     update checks every file against the manifest and the manifest against the notes.
 
     All requests go through Invoke-PackTuneStoreGraph (replaceable: the checks use a fake SharePoint).
@@ -246,7 +246,7 @@ function New-PackTuneZip {
 function Publish-PackTuneStoreVersion {
     <#
         Stores one version: the files (name -> local path; names from the fixed list), then manifest.json last. A version
-        without manifest is incomplete. Returns the manifest hash (full SHA256 of manifest.json): its start goes into the
+        without manifest is incomplete. Returns the manifest hash (full SHA256 of manifest.json): it goes into the
         notes of the Intune app.
     #>
     param(
@@ -287,25 +287,41 @@ function Get-PackTuneStoreApps {
     @(Get-PackTuneStoreChildren -DriveId $Store.DriveId | Where-Object { $_.folder } | ForEach-Object { [string]$_.name })
 }
 
+function ConvertTo-PackTuneManifestAnchor {
+    # The manifest hash as it goes into the notes of an Intune app: the full SHA256, 64 lower-case hex characters
+    param([Parameter(Mandatory = $true)][string]$Hash)
+    $Anchor = $Hash.Trim().ToLower()
+    if ($Anchor -notmatch '^[0-9a-f]{64}$') { throw "'$Hash' is not a SHA256 of a manifest" }
+    return $Anchor
+}
+
 function Save-PackTuneStoreVersion {
     <#
-        Downloads one version into -Destination and checks it: the manifest against -ExpectedManifest (the start of its hash
-        from the Intune notes; refused when it differs), every file against the manifest. Nothing is unpacked when
-        anything does not match. installer.zip is unpacked into <Destination>\installer. Returns what was saved.
+        Downloads one version into -Destination and checks it: the manifest against -ExpectedManifest (its SHA256 from the
+        Intune notes; refused when it differs or is missing: fail closed), every file against the manifest. Nothing is unpacked
+        when anything does not match. installer.zip is unpacked into <Destination>\installer. Returns what was saved.
+        Apps of the first release recorded only the first 16 characters of the hash: still accepted, with a warning to
+        re-anchor them (Set-PackTuneCustomManifestAnchor).
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)][string]$Version, [Parameter(Mandatory = $true)][string]$Destination,
-        [string]$ExpectedManifest, $Store = (Resolve-PackTuneStore)
+        [AllowEmptyString()][string]$ExpectedManifest, $Store = (Resolve-PackTuneStore)
     )
     if (-not $Store.DriveId) { throw "The package store has no library yet." }
+    $Anchor = ([string]$ExpectedManifest).Trim().ToLower()
+    if ($Anchor -notmatch '^([0-9a-f]{64}|[0-9a-f]{16})$') {
+        throw "The Intune app of $AppId $Version records no manifest of the package store (manifest= in its notes), so the stored files cannot be trusted: nothing was downloaded. An administrator can check what is in the store and record it again (Get-PackTuneCustomAnchorReport, then Set-PackTuneCustomManifestAnchor)."
+    }
     New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     $ManifestFile = Join-Path $Destination "manifest.json"
     Receive-PackTuneStoreFile -DriveId $Store.DriveId -Segments @($AppId, $Version, "manifest.json") -Destination $ManifestFile
     $Hash = (Get-FileHash -LiteralPath $ManifestFile -Algorithm SHA256).Hash
-    if ($ExpectedManifest -and -not $Hash.StartsWith($ExpectedManifest, [StringComparison]::OrdinalIgnoreCase)) {
+    $IsMatch = if ($Anchor.Length -eq 64) { $Hash -eq $Anchor } else { $Hash.StartsWith($Anchor, [StringComparison]::OrdinalIgnoreCase) }
+    if (-not $IsMatch) {
         Remove-Item -LiteralPath $ManifestFile -Force
-        throw "The manifest in the package store does not match the one recorded in Intune (store $($Hash.Substring(0, 16)), Intune $ExpectedManifest). The store was changed: nothing was downloaded."
+        throw "The manifest in the package store does not match the one recorded in Intune (store $($Hash.ToLower()), Intune $Anchor). The store was changed: nothing was downloaded. If the change is known and wanted, an administrator can record the new manifest after checking it (Get-PackTuneCustomAnchorReport, then Set-PackTuneCustomManifestAnchor)."
     }
+    if ($Anchor.Length -eq 16) { Write-Warning "$AppId $Version records only the start of the manifest hash (first release of custom applications). Record the full hash: Set-PackTuneCustomManifestAnchor." }
     $Manifest = Get-Content -LiteralPath $ManifestFile -Raw | ConvertFrom-Json
     if ($Manifest.format -ne "PackTune.Store" -or $Manifest.app -ne $AppId -or $Manifest.appVersion -ne $Version) { throw "The manifest does not belong to $AppId $Version" }
     $Saved = New-Object System.Collections.ArrayList
