@@ -250,7 +250,7 @@ function ConvertFrom-PackTuneCustomNotes {
     # Kind, app id, version, product code and upgrade code of a custom app from its notes; $null for anything else
     param([string]$Notes)
     if ($Notes -notlike "$($script:CustomMarker)*") { return $null }
-    $Result = [ordered]@{ Kind = $null; AppId = $null; Version = ""; ProductCode = ""; UpgradeCode = ""; Manifest = ""; Identity = ""; Thumbprint = ""; Repo = ""; Commit = ""; ApprovedBy = "" }
+    $Result = [ordered]@{ Kind = $null; AppId = $null; Version = ""; ProductCode = ""; UpgradeCode = ""; Manifest = ""; Identity = ""; Thumbprint = ""; Repo = ""; Commit = ""; ApprovedBy = ""; OrigThumbprint = "" }
     if ($Notes -match '(?:^|;)custom=(msi|msix)(?:;|$)') { $Result.Kind = $Matches[1] } else { return $null }
     if ($Notes -match '(?:^|;)app=([a-z0-9-]+)(?:;|$)') { $Result.AppId = $Matches[1] }
     if ($Notes -match '(?:^|;)ver=([0-9.]+)(?:;|$)') { $Result.Version = $Matches[1] }
@@ -261,6 +261,7 @@ function ConvertFrom-PackTuneCustomNotes {
     if ($Notes -match '(?:^|;)repo=([A-Za-z0-9-]+/[A-Za-z0-9._-]+)(?:;|$)') { $Result.Repo = $Matches[1] }
     if ($Notes -match '(?:^|;)commit=([0-9a-f]{7,40})(?:;|$)') { $Result.Commit = $Matches[1] }
     if ($Notes -match '(?:^|;)by=([A-Za-z0-9._-]{1,20})(?:;|$)') { $Result.ApprovedBy = $Matches[1] }
+    if ($Notes -match '(?:^|;)origthumb=([0-9A-Fa-f]{40})(?:;|$)') { $Result.OrigThumbprint = $Matches[1].ToUpper() }
     if ($Notes -match '(?:^|;)identity=([A-Za-z0-9._-]+)(?:;|$)') { $Result.Identity = $Matches[1] }
     if ($Notes -match '(?:^|;)thumb=([0-9A-Fa-f]{40})(?:;|$)') { $Result.Thumbprint = $Matches[1].ToUpper() }
     return [pscustomobject]$Result
@@ -282,7 +283,7 @@ function Get-PackTuneCustomApps {
         $Intents = if ($WithAssignments) { @(Get-PackTuneAppIntents -AppId $App.id | Select-Object -Unique) } else { @() }
         [pscustomobject]@{
             Id = [string]$App.id; DisplayName = [string]$App.displayName; Kind = $Notes.Kind; AppId = $Notes.AppId; Version = $Notes.Version
-            ProductCode = $Notes.ProductCode; UpgradeCode = $Notes.UpgradeCode; Manifest = $Notes.Manifest; Identity = $Notes.Identity; Thumbprint = $Notes.Thumbprint; Repo = $Notes.Repo; Commit = $Notes.Commit
+            ProductCode = $Notes.ProductCode; UpgradeCode = $Notes.UpgradeCode; Manifest = $Notes.Manifest; Identity = $Notes.Identity; Thumbprint = $Notes.Thumbprint; Repo = $Notes.Repo; Commit = $Notes.Commit; OrigThumbprint = $Notes.OrigThumbprint
             Publisher = [string]$App.publisher; Created = $App.createdDateTime
             Intents = $Intents; Source = "Custom"; IsChocolatey = $false
         }

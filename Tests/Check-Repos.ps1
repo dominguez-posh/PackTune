@@ -353,6 +353,150 @@ $outModule = @(Test-PackTuneRepositoryClone $tpl)
 $outScript = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$tpl\tools\Check-PackTuneRepository.ps1" -Path $tpl; $codeBad = $LASTEXITCODE
 Test-Check 'clone check: a changed file is found in the module and the template script fails the build' ($outModule.Count -ge 1 -and $outModule[0] -like '*recipe.json*' -and $codeBad -eq 1) ($outScript -join ';')
 
+# ---------------------------------------------------------------- review fixes: never trust a certificate from a repository
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+function New-TestCer([string]$Subject, [string[]]$Extensions, $Signer) {
+    $params = @{ Type = 'Custom'; Subject = $Subject; KeyUsage = 'DigitalSignature'; CertStoreLocation = 'Cert:\CurrentUser\My'; TextExtension = $Extensions; KeyExportPolicy = 'NonExportable'; NotAfter = (Get-Date).AddDays(30) }
+    if ($Signer) { $params.Signer = $Signer }
+    $c = New-SelfSignedCertificate @params
+    $file = Join-Path $work ($c.Thumbprint + '.cer'); [IO.File]::WriteAllBytes($file, $c.Export('Cert'))
+    [pscustomobject]@{ Cert = $c; File = $file }
+}
+$good = '2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}'
+$pub1 = 'CN=Contoso Vendor'
+$tc = New-TestCer $pub1 $good
+Test-Check 'trust: a self-signed leaf, CA=false, Code Signing only, subject = publisher is accepted' ((Assert-PackTuneTrustCertificate -CerPath $tc.File -Publisher $pub1) -eq $tc.Cert.Thumbprint)
+Test-Check 'trust: another subject than the publisher is refused' (Test-Throws { Assert-PackTuneTrustCertificate -CerPath $tc.File -Publisher 'CN=Someone Else' } '*not the publisher*')
+$ca = New-TestCer $pub1 ('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}CA=true')
+Test-Check 'trust: a CA certificate is refused' (Test-Throws { Assert-PackTuneTrustCertificate -CerPath $ca.File -Publisher $pub1 } '*CA=false*')
+$eku2 = New-TestCer $pub1 ('2.5.29.37={text}1.3.6.1.5.5.7.3.3,1.3.6.1.5.5.7.3.2', '2.5.29.19={text}')
+Test-Check 'trust: Code Signing plus another usage is refused' (Test-Throws { Assert-PackTuneTrustCertificate -CerPath $eku2.File -Publisher $pub1 } '*Code Signing only*')
+$noEku = New-TestCer $pub1 ('2.5.29.19={text}')
+Test-Check 'trust: no Enhanced Key Usage is refused' (Test-Throws { Assert-PackTuneTrustCertificate -CerPath $noEku.File -Publisher $pub1 } '*Code Signing only*')
+$rootCa = New-TestCer 'CN=Test Root' ('2.5.29.37={text}1.3.6.1.5.5.7.3.3', '2.5.29.19={text}CA=true')
+$issued = New-TestCer $pub1 $good $rootCa.Cert
+Test-Check 'trust: a certificate issued by another certificate (not self-signed) is refused' (Test-Throws { Assert-PackTuneTrustCertificate -CerPath $issued.File -Publisher $pub1 } '*not self-signed*')
+foreach ($x in $tc, $ca, $eku2, $noEku, $rootCa, $issued) { Remove-Item "Cert:\CurrentUser\My\$($x.Cert.Thumbprint)" -DeleteKey -ErrorAction SilentlyContinue }
+
+# a repository MSIX with its own certificate (that the owner may still hold the key of)
+function New-TestMsix([string]$Path, [string]$Name, [string]$Publisher, [string]$Version) {
+    if (Test-Path $Path) { Remove-Item $Path -Force }
+    New-Item -ItemType Directory -Path (Split-Path $Path) -Force | Out-Null
+    $zip = [IO.Compression.ZipFile]::Open($Path, 'Create')
+    try {
+        $e = $zip.CreateEntry('AppxManifest.xml'); $w = New-Object IO.StreamWriter($e.Open())
+        $w.Write("<Package xmlns=`"http://schemas.microsoft.com/appx/manifest/foundation/windows10`"><Identity Name=`"$Name`" Publisher=`"$Publisher`" Version=`"$Version`" ProcessorArchitecture=`"x64`"/><Properties><DisplayName>Vendor App</DisplayName></Properties></Package>"); $w.Dispose()
+        $e = $zip.CreateEntry('[Content_Types].xml'); $w = New-Object IO.StreamWriter($e.Open()); $w.Write('<Types><Default Extension="exe" ContentType="x"/><Override PartName="/AppxSignature.p7x" ContentType="application/vnd.ms-appx.signature"/></Types>'); $w.Dispose()
+        $e = $zip.CreateEntry('AppxSignature.p7x'); $w = New-Object IO.StreamWriter($e.Open()); $w.Write('signature of the repository owner'); $w.Dispose()
+        $e = $zip.CreateEntry('VFS/app.exe'); $w = New-Object IO.StreamWriter($e.Open()); $w.Write('binary'); $w.Dispose()
+    }
+    finally { $zip.Dispose() }
+}
+$evilCert = New-TestCer $pub1 $good
+$origSigner = $evilCert.Cert
+$script:SignCalls = New-Object System.Collections.ArrayList
+function Get-AuthenticodeSignature { param([string]$LiteralPath, [string]$FilePath) [pscustomobject]@{ SignerCertificate = $(if (([string]$LiteralPath) -like '*package.msix') { $script:origSigner } else { $null }); Status = 'Valid' } }
+function Invoke-PackTuneSigning {
+    param([string]$Path, [string]$CertificateThumbprint, [string]$TimestampUrl, [switch]$AllowNoTimestamp)
+    $c = Get-Item "Cert:\CurrentUser\My\$CertificateThumbprint" -ErrorAction SilentlyContinue
+    $z = [IO.Compression.ZipFile]::OpenRead($Path); try { $hasSig = [bool]$z.GetEntry('AppxSignature.p7x'); $ct = (New-Object IO.StreamReader($z.GetEntry('[Content_Types].xml').Open())).ReadToEnd() } finally { $z.Dispose() }
+    [void]$script:SignCalls.Add([pscustomobject]@{ CertExists = [bool]$c; HasKey = $c.HasPrivateKey; Subject = $c.Subject; SigStripped = (-not $hasSig); OverrideStripped = ($ct -notmatch 'AppxSignature'); NoTimestampAllowed = [bool]$AllowNoTimestamp; Thumbprint = $CertificateThumbprint })
+}
+function Assert-PackTuneSignedMsix { param($Path, $PackageName, $Publisher, $Version, $Thumbprint) $true }
+$msixPath = Join-Path $work 'vendor\package.msix'
+New-TestMsix $msixPath 'Vendor.App' $pub1 '1.0.0.0'
+$re = Convert-PackTuneRepoMsix -Msix $msixPath -WorkFolder (Join-Path $work 'resign1')
+$call = $script:SignCalls[0]
+Test-Check 'resign: signed with a NEW certificate whose subject equals the publisher, signature of the repository stripped first, timestamp mandatory' ($call.CertExists -and $call.HasKey -and $call.Subject -eq $pub1 -and $call.SigStripped -and $call.OverrideStripped -and -not $call.NoTimestampAllowed -and $re.Thumbprint -eq $call.Thumbprint -and $re.Thumbprint -ne $origSigner.Thumbprint)
+Test-Check 'resign: the key is deleted right after signing, only the public .cer is kept' (-not (Test-Path "Cert:\CurrentUser\My\$($re.Thumbprint)") -and (Test-Path $re.Cer) -and ((New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $re.Cer).Thumbprint -eq $re.Thumbprint))
+Test-Check 'resign: the original signer is recorded, the package family is unchanged, the repository file is untouched' ($re.OriginalThumbprint -eq $origSigner.Thumbprint -and (Get-PackTuneMsixIdentity -Path $re.Msix).FamilyName -eq (Get-PackTuneMsixIdentity -Path $msixPath).FamilyName -and (Get-PackTuneMsixInfo -Path $msixPath).IsSigned)
+Test-Check 'resign: the new certificate passes the trust checks' ((Assert-PackTuneTrustCertificate -CerPath $re.Cer -Publisher $pub1) -eq $re.Thumbprint)
+$thrownKey = $false
+function Invoke-PackTuneSigning { param([string]$Path, [string]$CertificateThumbprint) throw 'timestamp server not reachable' }
+$before = @(Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.FriendlyName -like 'PackTune (single use)*' }).Count
+$m = Get-Message { Convert-PackTuneRepoMsix -Msix $msixPath -WorkFolder (Join-Path $work 'resign2') }
+$after = @(Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.FriendlyName -like 'PackTune (single use)*' }).Count
+Test-Check 'resign: when signing fails (no timestamp) nothing is deployed and the key is deleted anyway' ($m -like '*timestamp*' -and $after -eq $before)
+function Invoke-PackTuneSigning {
+    param([string]$Path, [string]$CertificateThumbprint, [string]$TimestampUrl, [switch]$AllowNoTimestamp)
+    [void]$script:SignCalls.Add([pscustomobject]@{ Thumbprint = $CertificateThumbprint })
+}
+$odd = Join-Path $work 'vendor2\package.msix'; New-TestMsix $odd 'Vendor.App' 'CN=Vendor, O=Vendor Ltd' '1.0.0.0'
+Test-Check 'resign: a publisher that is not a simple CN subject is refused (cannot be matched exactly)' (Test-Throws { Convert-PackTuneRepoMsix -Msix $odd -WorkFolder (Join-Path $work 'resign3') } '*not a simple CN*')
+
+# end to end: an MSIX version in a repository, deployed through the fake Intune module
+$msixApp = 'vendor-app-12345678'
+$vdir = Join-Path $work 'msixver'; New-Item -ItemType Directory -Path (Join-Path $vdir 'installer') -Force | Out-Null
+'setup' | Set-Content (Join-Path $vdir 'installer\setup.exe'); New-PackTuneZip -Folder (Join-Path $vdir 'installer') -Path (Join-Path $vdir 'installer.zip') | Out-Null
+Copy-Item $msixPath (Join-Path $vdir 'package.msix'); Copy-Item $evilCert.File (Join-Path $vdir 'signing.cer')
+'{"format":"PackTune.Recipe","kind":"msix","app":"vendor-app-12345678","name":"Vendor App","version":"1.0.0.0","publisher":"Vendor"}' | Set-Content (Join-Path $vdir 'recipe.json')
+[IO.File]::WriteAllBytes((Join-Path $vdir 'package.intunewin'), [byte[]](1..50))
+$mentries = foreach ($n in 'installer.zip', 'package.msix', 'package.intunewin', 'recipe.json', 'signing.cer') { $i = Get-Item (Join-Path $vdir $n); [ordered]@{ name = $n; sha256 = (Get-FileHash $i.FullName -Algorithm SHA256).Hash; size = $i.Length } }
+[IO.File]::WriteAllText((Join-Path $vdir 'manifest.json'), ([ordered]@{ format = 'PackTune.Store'; version = 1; app = $msixApp; appVersion = '1.0.0.0'; kind = 'msix'; created = '2026-11-01T00:00:00Z'; files = @($mentries) } | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding $false))
+$mfiles = @{}; foreach ($n in 'installer.zip', 'package.msix', 'package.intunewin', 'recipe.json', 'signing.cer', 'manifest.json') { $mfiles["apps/$msixApp/1.0.0.0/$n"] = [IO.File]::ReadAllBytes((Join-Path $vdir $n)) }
+$mhash = (Get-FileHash (Join-Path $vdir 'manifest.json') -Algorithm SHA256).Hash.ToLower()
+$mindex = [ordered]@{ format = 1; name = 'Vendor'; apps = @([ordered]@{ id = $msixApp; name = 'Vendor App'; publisher = 'Vendor'; kind = 'msix'; versions = @([ordered]@{ version = '1.0.0.0'; path = "apps/$msixApp/1.0.0.0"; manifest = $mhash; released = '2026-11-01' }) }) }
+$mfiles['packtune.json'] = [Text.Encoding]::UTF8.GetBytes(($mindex | ConvertTo-Json -Depth 8))
+New-FakeRepo -FullName 'vendor/msix' -Id 61
+Add-FakeCommit -Repo $script:Gh.Repos['vendor/msix'] -Files $mfiles | Out-Null
+$null = Add-PackTuneRepository -Repository 'vendor/msix' -DisplayName 'Vendor'
+$null = Approve-PackTuneRepoVersion -Request (Get-PackTuneRepoApprovalRequest -Repository 'vendor/msix' -AppId $msixApp -Version '1.0.0.0')
+$script:SignCalls.Clear()
+function Invoke-PackTuneSigning {
+    param([string]$Path, [string]$CertificateThumbprint, [string]$TimestampUrl, [switch]$AllowNoTimestamp)
+    [void]$script:SignCalls.Add([pscustomobject]@{ Thumbprint = $CertificateThumbprint; Timestamp = (-not $AllowNoTimestamp) })
+}
+$mid = New-PackTuneRepoApp -Repository 'vendor/msix' -AppId $msixApp -Version '1.0.0.0' -Assignment None
+$ma = Get-Store | Where-Object id -eq $mid
+$mn = ConvertFrom-PackTuneCustomNotes ([string]$ma.notes)
+$wrapCer = Join-Path $work "PackTune\package\custom-$msixApp\source\signing.cer"
+$wrapThumb = (New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $wrapCer).Thumbprint
+Test-Check 'deploy msix: the Win32 wrapper carries the NEW certificate, never the one from the repository' ($mn.Kind -eq 'msix' -and $wrapThumb -eq $mn.Thumbprint -and $mn.Thumbprint -eq $script:SignCalls[0].Thumbprint -and $wrapThumb -ne $evilCert.Cert.Thumbprint -and (Get-FileHash $wrapCer).Hash -ne (Get-FileHash $evilCert.File).Hash) "$($ma.notes)"
+Test-Check 'deploy msix: the notes record that it was re-signed (original signer and new thumbprint), repo, commit and the anchor' ($mn.OrigThumbprint -eq $origSigner.Thumbprint -and $mn.Repo -eq 'vendor/msix' -and $mn.Manifest -eq $mhash -and $ma.notes.Length -lt $script:NotesMaxLength -and $script:SignCalls[0].Timestamp) "$($ma.notes)"
+Test-Check 'deploy msix: no signing key of the re-signing is left in the user store' (@(Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.FriendlyName -like 'PackTune (single use)*' -and $_.Subject -eq $pub1 }).Count -eq 0)
+$wrapMsix = Join-Path $work "PackTune\package\custom-$msixApp\source\package.msix"
+Test-Check 'deploy msix: the package in the wrapper is the re-signed copy (the repository signature is gone)' ((Test-Path $wrapMsix) -and -not (Get-PackTuneMsixInfo -Path $wrapMsix).IsSigned) 
+Remove-PackTuneCustomApp -Id $mid
+Remove-Item "Cert:\CurrentUser\My\$($evilCert.Cert.Thumbprint)" -DeleteKey -ErrorAction SilentlyContinue
+Remove-Item Function:\Get-AuthenticodeSignature, Function:\Invoke-PackTuneSigning, Function:\Assert-PackTuneSignedMsix
+# the device script validates the certificate again before it goes into TrustedPeople
+$sc = Get-PackTuneCustomMsixScripts -AppId 'vendor-app-12345678' -PackageName 'Vendor.App' -Version '1.0.0.0' -Thumbprint ('A' * 40)
+$errs = $null; [void][Management.Automation.Language.Parser]::ParseInput($sc.Install, [ref]$null, [ref]$errs)
+$posTrust = $sc.Install.IndexOf('Add-TrustedCert $Cer;'); $posCheck = $sc.Install.IndexOf('not safe to trust')
+Test-Check 'device script: self-signed, CA=false, Code Signing only, subject = publisher of the package are checked before the certificate is added' ($errs.Count -eq 0 -and $posCheck -gt 0 -and $posCheck -lt $posTrust -and $sc.Install -match 'BasicConstraints' -and $sc.Install -match '1\.3\.6\.1\.5\.5\.7\.3\.3' -and $sc.Install -match 'Cer\.Subject -ne \$Cer\.Issuer' -and $sc.Install -match 'Cer\.Subject -cne \$Publisher' -and $sc.Install -notmatch '[^\x00-\x7F]')
+Test-Check 'notes: the original signer thumbprint is read back' ((ConvertFrom-PackTuneCustomNotes 'PoweredByPackTune;custom=msix;app=a-1;ver=1.0.0.0;identity=X.Y;thumb=' + ('B' * 40) + ';origthumb=' + ('C' * 40)).OrigThumbprint -eq ('C' * 40) -or (ConvertFrom-PackTuneCustomNotes ('PoweredByPackTune;custom=msix;app=a-1;ver=1.0.0.0;identity=X.Y;thumb=' + ('B' * 40) + ';origthumb=' + ('C' * 40))).OrigThumbprint -eq ('C' * 40))
+
+# ---------------------------------------------------------------- review fixes: allowed signers (logins) per repository
+New-FakeRepo -FullName 'contoso/signers' -Id 71
+$sg = $script:Gh.Repos['contoso/signers']
+$sgFiles = @{}; foreach ($k in $v1.Files.Keys) { $sgFiles[$k] = $v1.Files[$k] }; $sgFiles['packtune.json'] = New-TestIndex @([pscustomobject]@{ Version = '1.0.0'; Hash = $v1.Manifest })
+Add-FakeCommit -Repo $sg -Files $sgFiles -Login 'mallory' -Committer 'mallory' | Out-Null
+$null = Add-PackTuneRepository -Repository 'contoso/signers' -Own -AllowedLogins 'alice', 'bob'
+$r1 = Get-PackTuneRepoApprovalRequest -Repository 'contoso/signers' -AppId $appId -Version '1.0.0'
+Test-Check 'signers: a commit by a login that is not allowed is blocked, naming the login and the allowed ones' ($r1.Blocked -like "*'mallory'*" -and $r1.Blocked -like '*alice, bob*' -and (@($r1.AllowedLogins) -join ',') -eq 'alice,bob' -and $r1.Commit.Login -eq 'mallory' -and (Test-Throws { Approve-PackTuneRepoVersion -Request $r1 } '*Cannot be approved*'))
+Add-FakeCommit -Repo $sg -Files $sgFiles -Login 'alice' -Committer 'mallory' | Out-Null
+Test-Check 'signers: an allowed author with a committer that is not allowed is blocked too' ((Get-PackTuneRepoApprovalRequest -Repository 'contoso/signers' -AppId $appId -Version '1.0.0').Blocked -like "*'mallory'*")
+Add-FakeCommit -Repo $sg -Files $sgFiles -Login 'Alice' -Committer 'bob' | Out-Null
+$r3 = Get-PackTuneRepoApprovalRequest -Repository 'contoso/signers' -AppId $appId -Version '1.0.0'
+Test-Check 'signers: author and committer both allowed (case-insensitive) can be approved' (-not $r3.Blocked -and (Approve-PackTuneRepoVersion -Request $r3).Version -eq '1.0.0')
+Set-PackTuneRepositoryPolicy -Repository 'contoso/signers' -RequireSignedCommits $false -AllowedLogins @()
+Test-Check 'signers: the policy can be changed; without logins anyone with access passes' ((@((Get-PackTuneRepository 'contoso/signers').AllowedLogins).Count -eq 0) -and -not (Get-PackTuneRepoApprovalRequest -Repository 'contoso/signers' -AppId $appId -Version '1.0.0').Blocked)
+Test-Check 'signers: a login that is not a GitHub login is refused' (Test-Throws { Set-PackTuneRepositoryPolicy -Repository 'contoso/signers' -AllowedLogins 'bad login;x' } '*not a GitHub login*')
+$guiText = Get-Content (Join-Path $repo 'Start-PackTune.ps1') -Raw
+Test-Check 'signers: the approval dialog shows the signature meaning, author and committer logins and the allowed signers' ($guiText -match 'committer.{1,5}s own key' -and $guiText -match 'Author login: \$\(\$c\.Login\), committer login' -and $guiText -match 'Allowed signers of this repository')
+
+# ---------------------------------------------------------------- review fixes: size checks before and while downloading
+$pk = "apps/$appId/1.0.0/package.intunewin"; $tr = (Get-FakeRepoFiles $pub); $origBlob = $tr[$pk]
+$bigBlob = New-GhSha; $script:Gh.Blobs[$bigBlob] = (New-Object byte[] 20000); $tr[$pk] = $bigBlob
+$sdest = Join-Path $work 'size1'
+$m = Get-Message { Save-PackTuneRepoVersion -Repository 'thirdparty/tools' -AppId $appId -Version '1.0.0' -Destination $sdest -ExpectedManifest $v1.Manifest }
+Test-Check 'size: a file larger than the manifest says is aborted during the download, nothing is left on disk or unpacked' ($m -like '*larger than expected*' -and -not (Test-Path (Join-Path $sdest 'package.intunewin')) -and -not (Test-Path (Join-Path $sdest 'installer')))
+$tr[$pk] = $origBlob
+$transport = (Get-Content (Join-Path $repo 'PackTune-Repos.ps1') -Raw)
+Test-Check 'size: the real transport checks Content-Length first and counts the bytes while copying' ($transport -match 'content-length"\] -and \[int64\]\$Headers\["content-length"\] -gt \$MaxBytes' -and $transport -match '\$Total -gt \$MaxBytes' -and $transport -match '-MaxBytes \(\[int64\]\$File\.size\)' -and $transport -match '-MaxBytes \$script:RepoManifestMaxBytes' -and $transport -match '-MaxBytes \$script:RepoIndexMaxBytes')
+$wf = Get-Content (Join-Path $repo 'docs\repository-template\.github\workflows\validate.yml') -Raw
+Test-Check 'template: actions/checkout is pinned to a commit SHA, no moving tag' ($wf -match 'uses: actions/checkout@[0-9a-f]{40}\b' -and $wf -notmatch 'checkout@v\d')
+
 # ---------------------------------------------------------------- code rules
 $src = Get-Content (Join-Path $repo 'PackTune-Repos.ps1') -Raw
 Test-Check 'rules: nothing from a repository is executed (no Invoke-Expression, no dot-sourcing or starting of downloaded files)' ($src -notmatch 'Invoke-Expression|\biex\b|Start-Process|\. \(Join-Path \$Temp|\. \$Saved')

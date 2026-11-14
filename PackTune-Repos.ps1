@@ -57,7 +57,7 @@ function Invoke-PackTuneGitHub {
     #>
     param(
         [string]$Method = "GET", [string]$Path, [string]$Absolute, [string]$Token, $Body, [byte[]]$Bytes, [string]$InFile, [string]$OutFile,
-        [string]$Accept = "application/vnd.github+json", [string]$IfNoneMatch, [string]$ContentType
+        [string]$Accept = "application/vnd.github+json", [string]$IfNoneMatch, [string]$ContentType, [int64]$MaxBytes
     )
     $Url = if ($Absolute) { $Absolute } else { "$($script:GitHubApi)$Path" }
     for ($Hop = 0; $Hop -lt 5; $Hop++) {
@@ -105,8 +105,18 @@ function Invoke-PackTuneGitHub {
             $Stream = $Response.GetResponseStream()
             try {
                 if ($OutFile -and $Status -in 200, 201) {
+                    # The size is checked before the download (Content-Length) and while copying: a file that is larger than the manifest says is aborted and removed
+                    if ($MaxBytes -gt 0 -and $Headers["content-length"] -and [int64]$Headers["content-length"] -gt $MaxBytes) { throw "The download is larger than expected ($MaxBytes bytes): aborted." }
                     $File = [IO.File]::Create($OutFile)
-                    try { $Stream.CopyTo($File, 81920) } finally { $File.Dispose() }
+                    try {
+                        $Buffer = New-Object byte[] 81920; $Total = [int64]0
+                        while (($Read = $Stream.Read($Buffer, 0, $Buffer.Length)) -gt 0) {
+                            $Total += $Read
+                            if ($MaxBytes -gt 0 -and $Total -gt $MaxBytes) { $File.Dispose(); Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue; throw "The download is larger than expected ($MaxBytes bytes): aborted." }
+                            $File.Write($Buffer, 0, $Read)
+                        }
+                    }
+                    finally { $File.Dispose() }
                     return [pscustomobject]@{ Status = $Status; Body = $null; Headers = $Headers }
                 }
                 $Reader = New-Object IO.StreamReader($Stream, [Text.Encoding]::UTF8)
@@ -129,11 +139,11 @@ function Invoke-PackTuneGitHubApi {
     #>
     param(
         [string]$Method = "GET", [string]$Path, [string]$Absolute, [string]$Token, $Body, [byte[]]$Bytes, [string]$InFile, [string]$OutFile,
-        [string]$Accept = "application/vnd.github+json", [string]$IfNoneMatch, [string]$ContentType
+        [string]$Accept = "application/vnd.github+json", [string]$IfNoneMatch, [string]$ContentType, [int64]$MaxBytes
     )
     if ($Token -and $Token -notin @($script:RepoSecretsInMemory)) { [void]$script:RepoSecretsInMemory.Add($Token) }
     $Arguments = @{ Method = $Method; Accept = $Accept }
-    foreach ($Key in "Path", "Absolute", "Token", "InFile", "OutFile", "IfNoneMatch", "ContentType") { if ((Get-Variable $Key).Value) { $Arguments[$Key] = (Get-Variable $Key).Value } }
+    foreach ($Key in "Path", "Absolute", "Token", "InFile", "OutFile", "IfNoneMatch", "ContentType", "MaxBytes") { if ((Get-Variable $Key).Value) { $Arguments[$Key] = (Get-Variable $Key).Value } }
     if ($null -ne $Body) { $Arguments.Body = $Body }
     if ($Bytes) { $Arguments.Bytes = $Bytes }
     for ($Try = 1; $Try -le 3; $Try++) {
@@ -259,7 +269,8 @@ function Add-PackTuneRepository {
         with Contents (read) on that repository only. The repository is pinned by owner/name and its numeric id. A public
         repository is a third-party source (read only, never a Move target) unless -Own is given.
     #>
-    param([Parameter(Mandatory = $true)][string]$Repository, [string]$Token, [string]$DisplayName, [switch]$Own, [switch]$RequireSignedCommits)
+    param([Parameter(Mandatory = $true)][string]$Repository, [string]$Token, [string]$DisplayName, [switch]$Own, [switch]$RequireSignedCommits, [string[]]$AllowedLogins)
+    foreach ($Login in @($AllowedLogins | Where-Object { $_ })) { if ($Login -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$') { throw "'$Login' is not a GitHub login." } }
     $Key = ConvertTo-PackTuneRepoKey $Repository
     $Owner, $Name = $Key.Split("/")
     if (@(Get-PackTuneRepositories | Where-Object { "$($_.Owner)/$($_.Repo)".ToLower() -eq $Key.ToLower() }).Count) { throw "$Key is connected already." }
@@ -270,12 +281,27 @@ function Add-PackTuneRepository {
     $Entry = [pscustomobject]@{
         Owner = [string]$Info.owner.login; Repo = [string]$Info.name; RepoId = [int64]$Info.id; Name = $Label
         Private = [bool]$Info.private; Fork = [bool]$Info.fork; DefaultBranch = [string]$Info.default_branch
-        ThirdParty = ((-not [bool]$Info.private) -and (-not $Own)); RequireSigned = [bool]$RequireSignedCommits
+        ThirdParty = ((-not [bool]$Info.private) -and (-not $Own)); RequireSigned = [bool]$RequireSignedCommits; AllowedLogins = @($AllowedLogins | Where-Object { $_ })
     }
     if ($Token) { Set-PackTuneRepoToken -Repository $Key -Token $Token }
     Save-PackTuneRepositories (@(Get-PackTuneRepositories) + $Entry)
     try { $null = Get-PackTuneRepoIndex -Repository $Key -Refresh } catch { Write-Warning "Connected, but the index could not be read yet: $($_.Exception.Message)" }
     return $Entry
+}
+
+function Set-PackTuneRepositoryPolicy {
+    # Per repository: verified commits required, and the GitHub logins that may author AND commit a version (empty = anyone with access)
+    param([Parameter(Mandatory = $true)][string]$Repository, [bool]$RequireSignedCommits, [string[]]$AllowedLogins)
+    $Found = Get-PackTuneRepository $Repository
+    foreach ($Login in @($AllowedLogins | Where-Object { $_ })) { if ($Login -notmatch '^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$') { throw "'$Login' is not a GitHub login." } }
+    $List = foreach ($Item in Get-PackTuneRepositories) {
+        if ([int64]$Item.RepoId -eq [int64]$Found.RepoId) {
+            $Item | Add-Member -NotePropertyName RequireSigned -NotePropertyValue ([bool]$RequireSignedCommits) -Force
+            $Item | Add-Member -NotePropertyName AllowedLogins -NotePropertyValue @($AllowedLogins | Where-Object { $_ }) -Force
+        }
+        $Item
+    }
+    Save-PackTuneRepositories $List
 }
 
 function Remove-PackTuneRepository {
@@ -384,12 +410,12 @@ function Test-PackTuneRepoIndex {
 
 function Get-PackTuneRepoContent {
     # One file of the repository by path (segments checked), to a local file. Verification is the caller's job.
-    param([Parameter(Mandatory = $true)][string]$Repository, [Parameter(Mandatory = $true)][string[]]$Segments, [Parameter(Mandatory = $true)][string]$Destination, [string]$IfNoneMatch, [string]$Token)
+    param([Parameter(Mandatory = $true)][string]$Repository, [Parameter(Mandatory = $true)][string[]]$Segments, [Parameter(Mandatory = $true)][string]$Destination, [string]$IfNoneMatch, [string]$Token, [int64]$MaxBytes)
     $Found = Get-PackTuneRepository $Repository
     foreach ($S in $Segments) { if ($S -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$' -or $S -match '\.\.') { throw "Path segment '$S' is not allowed." } }
     $Path = ($Segments | ForEach-Object { [uri]::EscapeDataString($_) }) -join "/"
     if (-not $Token) { $Token = Get-PackTuneRepoToken "$($Found.Owner)/$($Found.Repo)" }
-    Invoke-PackTuneGitHubApi -Path "/repos/$($Found.Owner)/$($Found.Repo)/contents/${Path}?ref=$([uri]::EscapeDataString($Found.DefaultBranch))" -Token $Token -Accept "application/vnd.github.raw" -OutFile $Destination -IfNoneMatch $IfNoneMatch
+    Invoke-PackTuneGitHubApi -Path "/repos/$($Found.Owner)/$($Found.Repo)/contents/${Path}?ref=$([uri]::EscapeDataString($Found.DefaultBranch))" -Token $Token -Accept "application/vnd.github.raw" -OutFile $Destination -IfNoneMatch $IfNoneMatch -MaxBytes $MaxBytes
 }
 
 function Get-PackTuneRepoIndex {
@@ -409,7 +435,7 @@ function Get-PackTuneRepoIndex {
     $Temp = Join-Path $Cache ("download-" + [guid]::NewGuid().ToString("N"))
     try {
         try {
-            $Response = Get-PackTuneRepoContent -Repository $Key -Segments @($script:RepoIndexName) -Destination $Temp -IfNoneMatch $Etag
+            $Response = Get-PackTuneRepoContent -Repository $Key -Segments @($script:RepoIndexName) -Destination $Temp -IfNoneMatch $Etag -MaxBytes $script:RepoIndexMaxBytes
             if ($Response.Status -eq 200) {
                 if ((Get-Item -LiteralPath $Temp).Length -gt $script:RepoIndexMaxBytes) { throw "The index is larger than $($script:RepoIndexMaxBytes / 1KB) KB: refused." }
                 Move-Item -LiteralPath $Temp -Destination $IndexFile -Force
@@ -472,7 +498,7 @@ function Get-PackTuneRepoCommitInfo {
     $Commit = @($Response.Body) | Select-Object -First 1
     if (-not $Commit) { throw "GitHub shows no commit for $Path." }
     [pscustomobject]@{
-        Sha = [string]$Commit.sha; Author = [string]$Commit.commit.author.name; Login = [string]$Commit.author.login; Date = [string]$Commit.commit.author.date
+        Sha = [string]$Commit.sha; Author = [string]$Commit.commit.author.name; Login = [string]$Commit.author.login; CommitterLogin = [string]$Commit.committer.login; Date = [string]$Commit.commit.author.date
         Message = ([string]$Commit.commit.message -split "`n")[0]; Verified = [bool]$Commit.commit.verification.verified; VerificationReason = [string]$Commit.commit.verification.reason
     }
 }
@@ -490,7 +516,7 @@ function Read-PackTuneRepoManifest {
     # Downloads manifest.json of one version, checks size, hash against the index entry and format; returns Hash, Manifest, File
     param([Parameter(Mandatory = $true)][string]$Repository, [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)][string]$Version, [Parameter(Mandatory = $true)][string]$Destination, [string]$IndexManifest)
     foreach ($S in $AppId, $Version) { if ($S -notmatch $script:StoreSegment) { throw "'$S' is not a valid app id or version." } }
-    $null = Get-PackTuneRepoContent -Repository $Repository -Segments @("apps", $AppId, $Version, "manifest.json") -Destination $Destination
+    $null = Get-PackTuneRepoContent -Repository $Repository -Segments @("apps", $AppId, $Version, "manifest.json") -Destination $Destination -MaxBytes $script:RepoManifestMaxBytes
     if ((Get-Item -LiteralPath $Destination).Length -gt $script:RepoManifestMaxBytes) { Remove-Item -LiteralPath $Destination -Force; throw "The manifest is larger than allowed: refused." }
     $Hash = (Get-FileHash -LiteralPath $Destination -Algorithm SHA256).Hash.ToLower()
     if ($IndexManifest -and $Hash -ne $IndexManifest.ToLower()) { Remove-Item -LiteralPath $Destination -Force; throw "The manifest of $AppId $Version does not match the hash in the index: the repository is damaged or was changed. Nothing was used." }
@@ -526,6 +552,10 @@ function Get-PackTuneRepoApprovalRequest {
         catch { $Blocked = $_.Exception.Message }
         $Commit = Get-PackTuneRepoCommitInfo -Repository $Key -Path "apps/$AppId/$Version"
         if (-not $Blocked -and $Repo.RequireSigned -and -not $Commit.Verified) { $Blocked = "This repository requires verified commits and the commit $($Commit.Sha.Substring(0, 7)) is not verified by GitHub ($($Commit.VerificationReason))." }
+        $Allowed = @($Repo.AllowedLogins | Where-Object { $_ })
+        if (-not $Blocked -and $Allowed.Count) {
+            foreach ($Who in $Commit.Login, $Commit.CommitterLogin) { if (-not $Who -or $Who.ToLower() -notin @($Allowed | ForEach-Object { $_.ToLower() })) { $Blocked = "The commit $($Commit.Sha.Substring(0, 7)) was made by '$Who', who is not one of the allowed signers of this repository ($($Allowed -join ', ')). It can not be approved."; break } }
+        }
         $Previous = @(Get-PackTuneRepoApprovals | Where-Object { $_.Repository.ToLower() -eq $Key.ToLower() -and $_.AppId -eq $AppId -and $_.Version -ne $Version } | Sort-Object { try { [version]$_.Version } catch { [version]"0.0" } } -Descending) | Select-Object -First 1
         $Old = @{}; if ($Previous) { foreach ($F in @($Previous.Files)) { $Old[[string]$F.name] = [string]$F.sha256 } }
         $Files = if ($Read) { @($Read.Manifest.files | ForEach-Object {
@@ -533,7 +563,7 @@ function Get-PackTuneRepoApprovalRequest {
                     [pscustomobject]@{ Name = [string]$_.name; Size = [int64]$_.size; Sha256 = ([string]$_.sha256).ToLower(); Status = $Status }
                 }) } else { @() }
         [pscustomobject]@{
-            Repository = $Key; Label = (Get-PackTuneRepoLabel $Repo); ThirdParty = [bool]$Repo.ThirdParty; Private = [bool]$Repo.Private; RequireSigned = [bool]$Repo.RequireSigned
+            Repository = $Key; Label = (Get-PackTuneRepoLabel $Repo); ThirdParty = [bool]$Repo.ThirdParty; Private = [bool]$Repo.Private; RequireSigned = [bool]$Repo.RequireSigned; AllowedLogins = $Allowed
             AppId = $AppId; Name = [string]$Entry.App.name; Version = $Version; Kind = [string]$Entry.App.kind
             Manifest = $(if ($Read) { $Read.Hash } else { ([string]$Entry.Version.manifest).ToLower() }); Commit = $Commit; Files = $Files
             PreviousVersion = $(if ($Previous) { [string]$Previous.Version } else { $null }); Blocked = $Blocked
@@ -565,14 +595,14 @@ function Approve-PackTuneRepoVersion {
 #region download and verification
 
 function Get-PackTuneRepoAsset {
-    param([Parameter(Mandatory = $true)][string]$Repository, [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)][string]$Version, [Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][string]$Destination)
+    param([Parameter(Mandatory = $true)][string]$Repository, [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)][string]$Version, [Parameter(Mandatory = $true)][string]$Name, [Parameter(Mandatory = $true)][string]$Destination, [int64]$MaxBytes)
     $Found = Get-PackTuneRepository $Repository
     $Key = "$($Found.Owner)/$($Found.Repo)"
     $Token = Get-PackTuneRepoToken $Key
     $Release = (Invoke-PackTuneGitHubApi -Path "/repos/$Key/releases/tags/$([uri]::EscapeDataString($AppId))/$([uri]::EscapeDataString($Version))" -Token $Token).Body
     $Asset = @($Release.assets | Where-Object { $_.name -eq $Name }) | Select-Object -First 1
     if (-not $Asset) { throw "The release of $AppId $Version has no asset $Name." }
-    $null = Invoke-PackTuneGitHubApi -Path "/repos/$Key/releases/assets/$([int64]$Asset.id)" -Token $Token -Accept "application/octet-stream" -OutFile $Destination
+    $null = Invoke-PackTuneGitHubApi -Path "/repos/$Key/releases/assets/$([int64]$Asset.id)" -Token $Token -Accept "application/octet-stream" -OutFile $Destination -MaxBytes $MaxBytes
 }
 
 function Save-PackTuneRepoVersion {
@@ -600,8 +630,8 @@ function Save-PackTuneRepoVersion {
     $Saved = New-Object System.Collections.ArrayList
     foreach ($File in @($Read.Manifest.files)) {
         $Target = Join-Path $Destination ([string]$File.name)
-        if ([string]$File.name -in $AssetNames) { Get-PackTuneRepoAsset -Repository $Key -AppId $AppId -Version $Version -Name ([string]$File.name) -Destination $Target }
-        else { $null = Get-PackTuneRepoContent -Repository $Key -Segments @("apps", $AppId, $Version, [string]$File.name) -Destination $Target }
+        if ([string]$File.name -in $AssetNames) { Get-PackTuneRepoAsset -Repository $Key -AppId $AppId -Version $Version -Name ([string]$File.name) -Destination $Target -MaxBytes ([int64]$File.size) }
+        else { $null = Get-PackTuneRepoContent -Repository $Key -Segments @("apps", $AppId, $Version, [string]$File.name) -Destination $Target -MaxBytes ([int64]$File.size) }
         if ((Get-Item -LiteralPath $Target).Length -ne [int64]$File.size) { throw "$($File.name) has another size than the manifest says: the repository was changed. Nothing was unpacked." }
         if ((Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash.ToLower() -ne ([string]$File.sha256).ToLower()) { throw "$($File.name) does not match the manifest (SHA256): the file in the repository was changed. Nothing was unpacked." }
         [void]$Saved.Add($Target)
@@ -616,6 +646,67 @@ function Save-PackTuneRepoVersion {
 
 #region deploy
 
+function Assert-PackTuneTrustCertificate {
+    <#
+        Everything PackTune puts into LocalMachine\TrustedPeople must be a self-signed leaf, BasicConstraints CA=false, Enhanced Key
+        Usage Code Signing only, valid now, with a subject equal to the publisher of the package (string equal). Returns the thumbprint.
+    #>
+    param([Parameter(Mandatory = $true)][string]$CerPath, [Parameter(Mandatory = $true)][string]$Publisher)
+    $C = New-Object Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList $CerPath
+    if ($C.Subject -cne $Publisher) { throw "The certificate subject '$($C.Subject)' is not the publisher of the package '$Publisher': not trusted." }
+    if ($C.Subject -ne $C.Issuer) { throw "The certificate is not self-signed (issuer '$($C.Issuer)'): not trusted." }
+    $Chain = New-Object Security.Cryptography.X509Certificates.X509Chain
+    $Chain.ChainPolicy.RevocationMode = "NoCheck"
+    $Chain.ChainPolicy.VerificationFlags = "AllowUnknownCertificateAuthority"
+    [void]$Chain.Build($C)
+    if ($Chain.ChainElements.Count -ne 1 -or @($Chain.ChainStatus | Where-Object { $_.Status -notin "UntrustedRoot", "NoError" -and "$($_.Status)" -ne "PartialChain" }).Count) { throw "The certificate is not a self-signed leaf (its own signature does not verify): not trusted." }
+    $Basic = @($C.Extensions | Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509BasicConstraintsExtension] })[0]
+    if (-not $Basic -or $Basic.CertificateAuthority) { throw "The certificate must say BasicConstraints CA=false: not trusted." }
+    $Eku = @($C.Extensions | Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] })[0]
+    $Oids = @(if ($Eku) { $Eku.EnhancedKeyUsages | ForEach-Object { $_.Value } })
+    if ($Oids.Count -ne 1 -or $Oids[0] -ne "1.3.6.1.5.5.7.3.3") { throw "The certificate must be for Code Signing only (EKU 1.3.6.1.5.5.7.3.3): not trusted." }
+    $Usage = @($C.Extensions | Where-Object { $_ -is [Security.Cryptography.X509Certificates.X509KeyUsageExtension] })[0]
+    if ($Usage -and ($Usage.KeyUsages -band [Security.Cryptography.X509Certificates.X509KeyUsageFlags]::KeyCertSign)) { throw "The certificate may sign certificates: not trusted." }
+    if ((Get-Date) -lt $C.NotBefore -or (Get-Date) -gt $C.NotAfter) { throw "The certificate is not valid now: not trusted." }
+    return $C.Thumbprint.ToUpper()
+}
+
+function Convert-PackTuneRepoMsix {
+    <#
+        Re-signs the MSIX of a repository version on this computer: a copy without its signature is signed with a new single-use,
+        non-exportable certificate whose subject equals the Publisher of the package (package family and updates stay), timestamp
+        mandatory, key deleted right after signing (also on errors). Returns the new package, the new public .cer, both thumbprints.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Msix, [Parameter(Mandatory = $true)][string]$WorkFolder)
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $Info = Get-PackTuneMsixInfo -Path $Msix
+    if ([string]$Info.Publisher -cnotmatch '^CN=[^,+="<>;\#]{1,64}$') { throw "The publisher '$($Info.Publisher)' of this package is not a simple CN=... subject: it cannot be re-signed here, so it is not deployed." }
+    New-Item -ItemType Directory -Path $WorkFolder -Force | Out-Null
+    $Original = ""
+    try { $Sig = Get-AuthenticodeSignature -LiteralPath $Msix; if ($Sig.SignerCertificate) { $Original = $Sig.SignerCertificate.Thumbprint.ToUpper() } } catch { }
+    $Copy = Join-Path $WorkFolder "resigned.msix"
+    Copy-Item -LiteralPath $Msix -Destination $Copy -Force
+    $Zip = [IO.Compression.ZipFile]::Open($Copy, "Update")
+    try {
+        $Sign = $Zip.GetEntry("AppxSignature.p7x"); if ($Sign) { $Sign.Delete() }
+        $Types = $Zip.GetEntry("[Content_Types].xml")
+        if ($Types) {
+            $Reader = New-Object IO.StreamReader($Types.Open()); try { $Xml = $Reader.ReadToEnd() } finally { $Reader.Dispose() }
+            $Clean = [regex]::Replace($Xml, '<Override\s+PartName="/AppxSignature\.p7x"[^>]*/>', "")
+            if ($Clean -ne $Xml) { $Types.Delete(); $New = $Zip.CreateEntry("[Content_Types].xml"); $Writer = New-Object IO.StreamWriter($New.Open(), (New-Object Text.UTF8Encoding $false)); try { $Writer.Write($Clean) } finally { $Writer.Dispose() } }
+        }
+    }
+    finally { $Zip.Dispose() }
+    $Cert = New-PackTuneSigningCertificate -Subject $Info.Publisher -OutputFolder $WorkFolder
+    try {
+        $null = Invoke-PackTuneSigning -Path $Copy -CertificateThumbprint $Cert.Thumbprint
+        $null = Assert-PackTuneSignedMsix -Path $Copy -PackageName ([string]$Info.Name) -Publisher ([string]$Info.Publisher) -Version ([string]$Info.Version) -Thumbprint $Cert.Thumbprint
+    }
+    finally { $null = Remove-PackTuneSigningCertificate -Thumbprint $Cert.Thumbprint }
+    $null = Assert-PackTuneTrustCertificate -CerPath $Cert.CerPath -Publisher ([string]$Info.Publisher)
+    [pscustomobject]@{ Msix = $Copy; Cer = $Cert.CerPath; Thumbprint = $Cert.Thumbprint.ToUpper(); OriginalThumbprint = $Original; Publisher = [string]$Info.Publisher }
+}
 function Test-PackTuneRepoRecipeArguments {
     # Extra msiexec properties from a recipe are data that ends up in a device script: only simple PROPERTY=value pairs
     param([string]$Text)
@@ -667,13 +758,16 @@ function New-PackTuneRepoApp {
             $App = Add-PackTuneCustomIntuneApp -Info $Info -AppId $AppId -Built $Built -DisplayName $Info.Name -Publisher $Info.Manufacturer -IconBase64 $Icon -Manifest $Manifest -ExtraNotes $ExtraNotes
         }
         else {
-            $MsixFile = Join-Path $Temp "package.msix"; $Cer = Join-Path $Temp "signing.cer"
-            if (-not (Test-Path -LiteralPath $MsixFile) -or -not (Test-Path -LiteralPath $Cer)) { throw "An MSIX version needs package.msix and signing.cer." }
-            $Identity = Get-PackTuneMsixIdentity -Path $MsixFile
-            $Thumbprint = (New-Object Security.Cryptography.X509Certificates.X509Certificate2 $Cer).Thumbprint.ToUpper()
-            $null = Assert-PackTuneSignedMsix -Path $MsixFile -PackageName ([string]$Identity.Name) -Publisher ([string]$Identity.Publisher) -Version ([string]$Identity.Version) -Thumbprint $Thumbprint
+            # Never trust a certificate from a repository: its owner may still hold the key. The package is re-signed here with a
+            # new single-use certificate (same publisher, so the package family stays and updates keep working); signing.cer of the
+            # repository is not used at all.
+            $MsixFile = Join-Path $Temp "package.msix"
+            if (-not (Test-Path -LiteralPath $MsixFile)) { throw "An MSIX version needs package.msix." }
+            $Re = Convert-PackTuneRepoMsix -Msix $MsixFile -WorkFolder (Join-Path $Temp "resign")
+            $Identity = Get-PackTuneMsixIdentity -Path $Re.Msix
             if (@($Existing | Where-Object { $_.AppId -eq $AppId -and $_.Version -eq [string]$Identity.Version }).Count) { throw "$AppId $($Identity.Version) is deployed already." }
-            $Build = [pscustomobject]@{ PackageName = [string]$Identity.Name; Version = [string]$Identity.Version; Thumbprint = $Thumbprint; Msix = $MsixFile; Cer = $Cer }
+            $Build = [pscustomobject]@{ PackageName = [string]$Identity.Name; Version = [string]$Identity.Version; Subject = $Re.Publisher; Thumbprint = $Re.Thumbprint; Msix = $Re.Msix; Cer = $Re.Cer }
+            if ($Re.OriginalThumbprint) { $ExtraNotes += ";origthumb=$($Re.OriginalThumbprint)" }
             $Package = New-PackTuneCustomMsixPackage -Build $Build -AppId $AppId
             $App = Add-PackTuneCustomMsixIntuneApp -Build $Build -AppId $AppId -Package $Package -DisplayName ([string]$Entry.App.name) -Publisher ([string]$Entry.App.publisher) -Manifest $Manifest -ExtraNotes $ExtraNotes
         }

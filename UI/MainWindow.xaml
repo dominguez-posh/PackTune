@@ -897,6 +897,8 @@
                                                 <CheckBox x:Name="ChkRepoOwn" Content="This is our own repository (not a third-party source)" Margin="0,0,16,0"/>
                                                 <CheckBox x:Name="ChkRepoSigned" Content="Require verified commits"/>
                                             </StackPanel>
+                                            <TextBlock Text="Allowed signers: GitHub logins that may author and commit a version (optional, comma separated; empty = anyone with access)" Style="{StaticResource FieldLabel}" Margin="0,10,0,4"/>
+                                            <TextBox x:Name="TxtRepoLogins" AutomationProperties.Name="Allowed GitHub logins"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                                 <Button x:Name="BtnRepoAdd" Content="Add repository" Style="{StaticResource SmallButton}" Margin="0,0,8,0"/>
                                                 <Button x:Name="BtnRepoRefresh" Content="Refresh" Style="{StaticResource SmallButton}" Margin="0,0,8,0"/>
