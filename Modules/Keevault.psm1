@@ -343,6 +343,29 @@ function Get-PackTuneSessionFolder {
     $folder
 }
 
+$script:SignInEnvironments = @{}
+function Get-PackTuneEnvironment {
+    <# ONE CoreWebView2Environment per profile folder, created once and used by every sign-in window and the keep-alive window
+       (all of them need the same options: none; the passkey shim is a script, not an environment option). Waits with the dispatcher
+       running; throws 'The embedded browser could not start: ...' when it cannot be created. #>
+    param([Parameter(Mandatory)][string]$UserDataFolder, [int]$TimeoutSeconds = 20)
+    if ($script:SignInEnvironments.ContainsKey($UserDataFolder)) { return $script:SignInEnvironments[$UserDataFolder] }
+    try {
+        New-Item -ItemType Directory -Path $UserDataFolder -Force | Out-Null
+        $task = [Microsoft.Web.WebView2.Core.CoreWebView2Environment]::CreateAsync($null, $UserDataFolder, $null)
+        $until = (Get-Date).AddSeconds($TimeoutSeconds)
+        while (-not $task.IsCompleted -and (Get-Date) -lt $until) {
+            [System.Windows.Threading.Dispatcher]::CurrentDispatcher.Invoke([action] {}, [System.Windows.Threading.DispatcherPriority]::Background)
+            Start-Sleep -Milliseconds 20
+        }
+        if (-not $task.IsCompleted) { throw 'timed out creating the browser environment' }
+        if ($task.IsFaulted) { throw $task.Exception.GetBaseException().Message }
+        $script:SignInEnvironments[$UserDataFolder] = $task.Result
+        $task.Result
+    }
+    catch { throw "The embedded browser could not start: $($_.Exception.Message)" }
+}
+
 function Start-PackTuneSessionHold {
     # A tiny hidden WebView2 on the session folder keeps the browser process (and with it the session cookies) alive
     # between the sign-in windows of one run; every sign-in window then finds the Microsoft session again.
@@ -352,15 +375,14 @@ function Start-PackTuneSessionHold {
         $w = New-Object System.Windows.Window
         $w.WindowStyle = 'None'; $w.ShowInTaskbar = $false; $w.ShowActivated = $false; $w.ResizeMode = 'NoResize'
         $w.Width = 1; $w.Height = 1; $w.Left = -32000; $w.Top = -32000
-        $props = New-Object Microsoft.Web.WebView2.Wpf.CoreWebView2CreationProperties
-        $props.UserDataFolder = $UserDataFolder
         $wv = New-Object Microsoft.Web.WebView2.Wpf.WebView2
-        $wv.CreationProperties = $props
         $w.Content = $wv
+        $holdEnv = Get-PackTuneEnvironment $UserDataFolder
+        $w.Add_Loaded({ try { [void]$wv.EnsureCoreWebView2Async($holdEnv) } catch { Write-SignInLog "The keep-alive browser window could not start: $($_.Exception.Message)" 'Warning' } }.GetNewClosure())
         $w.Show()
         $script:SessionHold = @{ Folder = $UserDataFolder; Window = $w; View = $wv }
     }
-    catch { $script:SessionHold = $null }
+    catch { $script:SessionHold = $null; Write-SignInLog "The keep-alive browser window could not start: $($_.Exception.Message)" 'Warning' }
 }
 
 function Close-PackTuneSessionHold {
@@ -476,11 +498,9 @@ function Invoke-PackTuneBrowserSignIn {
 
     $persistent = [bool]$UserDataFolder   # a shared profile keeps the Microsoft session between sign-ins of the same run (no second password)
     $userData = if ($persistent) { $UserDataFolder } else { Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N')) }
+    $environment = Get-PackTuneEnvironment $userData   # throws "could not start" (the caller falls back / tells) instead of leaving a blank window
     if ($persistent) { Start-PackTuneSessionHold $UserDataFolder }
     $wv = New-Object Microsoft.Web.WebView2.Wpf.WebView2
-    $props = New-Object Microsoft.Web.WebView2.Wpf.CoreWebView2CreationProperties
-    $props.UserDataFolder = $userData
-    $wv.CreationProperties = $props
     [void]$grid.Children.Add($wv)
     $win.Content = $grid
 
@@ -583,8 +603,15 @@ function Invoke-PackTuneBrowserSignIn {
     # Come to the front even if another app (Keevault) has the focus right now
     $win.Add_ContentRendered({ if ($win.ShowActivated) { $win.Topmost = $true; [void]$win.Activate(); $win.Topmost = $false } })
     if ($Configure) { & $Configure $win $wv }
+    $win.Add_Loaded({ try { [void]$wv.EnsureCoreWebView2Async($environment) } catch { $ctx.Error = "The embedded browser could not start: $($_.Exception.Message)"; $win.Close() } })
+    # A window that never initializes must not stay blank
+    $watch = New-Object System.Windows.Threading.DispatcherTimer
+    $watch.Interval = [TimeSpan]::FromSeconds(25)
+    $watch.Add_Tick({ $watch.Stop(); if (-not $wv.CoreWebView2) { $ctx.Error = 'The embedded browser could not start: it did not initialize in time.'; $win.Close() } })
+    $watch.Start()
     try { [void]$win.ShowDialog() }
     finally {
+        $watch.Stop()
         $wv.Dispose()
         if (-not $persistent) { Start-Sleep -Milliseconds 300 }
         if (-not $persistent) { Remove-Item $userData -Recurse -Force -ErrorAction SilentlyContinue }
@@ -691,4 +718,4 @@ function Connect-PackTuneWithKeevault {
 }
 
 Export-ModuleMember -Function Set-PackTuneSignInLog, Find-KeevaultMcp, Connect-KeevaultMcp, Invoke-KeevaultMcpRequest, Invoke-KeevaultMcpTool, Close-KeevaultMcp,
-    Get-PackTuneWebView2, Set-PackTuneSignInMethod, Get-PackTuneCookieSummary, Get-PackTuneSessionFolder, Start-PackTuneSessionHold, Close-PackTuneSessionHold, Clear-PackTuneSession, Get-PackTuneAuthorizeUrl, Request-PackTuneToken, Invoke-PackTuneBrowserSignIn, Connect-PackTuneWithKeevault
+    Get-PackTuneWebView2, Get-PackTuneEnvironment, Set-PackTuneSignInMethod, Get-PackTuneCookieSummary, Get-PackTuneSessionFolder, Start-PackTuneSessionHold, Close-PackTuneSessionHold, Clear-PackTuneSession, Get-PackTuneAuthorizeUrl, Request-PackTuneToken, Invoke-PackTuneBrowserSignIn, Connect-PackTuneWithKeevault

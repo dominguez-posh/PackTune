@@ -3880,7 +3880,7 @@ function Invoke-EmbeddedSignIn {
     param([Parameter(Mandatory)][string]$TenantID, [Parameter(Mandatory)][string]$ClientID, [string[]]$Scopes, [string]$Hint, [ValidateSet('default', 'consent')][string]$Prompt = 'default')
     Set-SignInHintFromToken
     $first = if ($script:FirstSignInHow) { $script:FirstSignInHow } else { 'this window (embedded Microsoft)' }
-    Write-UiLog "Sign-in request: client id $ClientID; prompt $Prompt; login_hint sent: $([bool]$script:SignInHint); domain_hint sent: False; user data folder: $script:SignInSession; first sign-in of this run: $first; scopes: $(@($Scopes) -join ' ')"
+    Write-UiLog "Sign-in request ($(if ($ClientID -eq '14d82eec-204b-4c2f-b7e8-296a70dab67e') { 'setup client: creating the app registration / store grant' } else { 'PackTune app registration' })): client id $ClientID; prompt $Prompt; login_hint sent: $([bool]$script:SignInHint); domain_hint sent: False; user data folder: $script:SignInSession; first sign-in of this run: $first; scopes: $(@($Scopes) -join ' ')"
     if ($script:FirstSignInHow -eq 'Keevault') {
         # The run was signed in through Keevault: every follow-up sign-in (consent, setup, package store grant) goes the same way,
         # so a re-authentication is confirmed in Keevault (passkey shim + auto-fill), never in the Windows passkey dialog
@@ -3952,7 +3952,11 @@ function Connect-Intune {
             $script:Shared.Auth = Get-PackTuneAuthState
             Complete-SignIn 'via Keevault'
         }
-        catch { if (Test-AdminConsentRefusal $_) { Show-AdminConsentRefusal; Complete-SetupStep $false 'the sign-in' } else { throw } }
+        catch {
+            if (Test-AdminConsentRefusal $_) { Show-AdminConsentRefusal; Complete-SetupStep $false 'the sign-in' }
+            elseif (Test-EmbeddedStartFailure $_) { Write-UiLog $_.Exception.Message 'Error'; Show-Toast 'The Keevault sign-in window could not start. Use Sign in in the web browser from the menu next to Sign in.' 'bad' 'Details' { Show-Page 'Activity' }; Complete-SetupStep $false 'the sign-in' }
+            else { throw }
+        }
         finally { $window.IsEnabled = $true; $window.Cursor = $null; [void]$window.Activate() }
         return
     }
