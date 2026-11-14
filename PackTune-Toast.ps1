@@ -19,6 +19,12 @@ $ToastFolder = Join-Path $SnoozeFolder "toasts"
 $ToastAumid = "PackTune.Updates"
 $ToastScheme = "packtune-update"
 
+$TrayMutexName = "Local\PackTuneTrayAgent"
+function Test-TrayAgentRunning {
+    # Is the tray agent of this session there (then notify.ps1 leaves the update prompt to its popup)
+    try { $Existing = [System.Threading.Mutex]::OpenExisting($TrayMutexName); $Existing.Dispose(); return $true } catch { return $false }
+}
+
 function Write-NotifyLog([string]$Text) {
     # What went wrong in the session of the user (notify.log next to the snooze files, kept small)
     try {

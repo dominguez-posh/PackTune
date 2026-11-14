@@ -72,7 +72,7 @@ $Changed = @{
 $Default = New-ChocoSchedule
 Test-Check "defaults: start trigger plus daily window 10:00-15:00 on all days" ($Default.TriggerStart -and $Default.TriggerWindow -and $Default.WindowFrom -eq "10:00" -and $Default.WindowTo -eq "15:00" -and $Default.WindowDays -eq "1234567")
 Test-Check "defaults: no idle, no sign-in trigger, no conditions" ($Default.IdleMinutes -eq 0 -and -not $Default.TriggerLogon -and -not ($Default.OnlyOnMains -or $Default.NoPresentation -or $Default.NoMetered -or $Default.AppNotRunning))
-Test-Check "defaults: check every 4 hours, install at the deadline, never restart, next chance on failure" ($Default.CheckIntervalHours -eq 4 -and $Default.DeadlineAppMode -eq "Install" -and $Default.RestartMode -eq "Never" -and $Default.RetryMode -eq "Next")
+Test-Check "defaults: check every hour, install at the deadline, never restart, next chance on failure" ($Default.CheckIntervalHours -eq 1 -and $Default.DeadlineAppMode -eq "Install" -and $Default.RestartMode -eq "Never" -and $Default.RetryMode -eq "Next")
 
 # --- Round trip through the notes ---
 foreach ($Case in @(@{ Marker = $script:AppMarker; Name = "Chocolatey" }, @{ Marker = $script:WingetMarker; Name = "winget" })) {

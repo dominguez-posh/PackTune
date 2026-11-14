@@ -78,8 +78,8 @@ $script:DefaultSettings = [ordered]@{
     # Defaults for new apps, changeable per app afterwards:
     #   Off      no automatic updates; a version released in this tool is installed right away by Intune
     #   Startup  update at every startup (random delay above)
-    #   Custom   the user is offered the update and can install it at once; after GraceHours it is installed anyway
-    UpdateMode            = "Startup"
+    #   Custom   (the default) the user is offered the update in the tray popup and can install it at once; after GraceHours (2 days) it is installed anyway
+    UpdateMode            = "Custom"
     GraceHours            = 48
     # Latest = devices follow the newest package version; Pinned = new apps stay on today's version until you release one
     VersionMode           = "Latest"
@@ -276,7 +276,7 @@ $script:ScheduleFields = @(
     @{ Name = "NoPresentation"; Key = "cx"; Type = "bool"; Default = $false }
     @{ Name = "NoMetered"; Key = "cm"; Type = "bool"; Default = $false }
     @{ Name = "AppNotRunning"; Key = "ca"; Type = "bool"; Default = $false }
-    @{ Name = "CheckIntervalHours"; Key = "ci"; Type = "int"; Default = 4; Allowed = 1, 4, 24 }
+    @{ Name = "CheckIntervalHours"; Key = "ci"; Type = "int"; Default = 1; Allowed = 1, 4, 24 }
     @{ Name = "DeadlineAppMode"; Key = "da"; Type = "enum"; Default = "Install"; Map = [ordered]@{ Install = "I"; AskClose = "A"; Close = "C"; Wait = "W" } }
     @{ Name = "CloseAfterMinutes"; Key = "dc"; Type = "int"; Default = 15; Min = 1; Max = 240 }
     @{ Name = "RestartMode"; Key = "rm"; Type = "enum"; Default = "Never"; Map = [ordered]@{ Never = "N"; Ask = "A"; OutsideWindow = "O" } }
@@ -1971,6 +1971,8 @@ if (Test-Path $SnoozeFile) {
     if ((Get-Date) -lt $Until -and $Deadline -gt (Get-Date).AddHours(1)) { exit 0 }
 }
 
+# The tray agent of this session shows the update in its popup: no toast, the toast is the fallback when it is not running
+if (Test-TrayAgentRunning) { exit 0 }
 $Versions = if ($State.Installed -and $State.Target) { " ($($State.Installed) -> $($State.Target))" } else { "" }
 # The last hour before the automatic update: the toast stays on screen until it is dealt with, and Focus assist does not hide it
 [void](Show-Notice -Package $State.Package -Name $Name -TaskPath $TaskPath -Title "Software update: $Name" -IconFile $IconFile -HandlerScript $HandlerScript -Deadline ($Deadline -le (Get-Date).AddHours(1)) `
@@ -2775,6 +2777,7 @@ function New-PackTuneAppFromCatalog {
 . (Join-Path $PSScriptRoot "PackTune-Sources.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Runtime.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Toast.ps1")
+. (Join-Path $PSScriptRoot "PackTune-Tray.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Release.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Custom.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Store.ps1")
