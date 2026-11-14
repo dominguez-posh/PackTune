@@ -817,6 +817,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if ($s.Phase -eq 4) {
+            # Remove first reads the relationships (task 'removeinfo'), only its answer starts the removal ('custom')
             if (-not (Test-Idle 'removeinfo') -or -not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'remove: one custom app is gone from Intune and from the list' ($fake.Count -eq 1 -and $script:CustomRows.Count -eq 1 -and $ui.PanelCustomDetails.Visibility -eq 'Collapsed') ($fake | ForEach-Object displayVersion)
