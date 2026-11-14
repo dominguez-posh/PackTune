@@ -430,8 +430,6 @@ function Update-SignInButton {
     $ui.BtnSignIn.Content = if ($connecting) { 'Cancel sign-in' } else { 'Sign in' }
     $ui.BtnSignIn.IsEnabled = $connecting -or -not $signedIn
     $ui.BtnSignInMenu.IsEnabled = -not $connecting -and -not $signedIn
-    $ui.BtnStartSignInBrowser.IsEnabled = -not $connecting -and -not $signedIn
-    $ui.BtnStartSignInKeevault.IsEnabled = -not $connecting -and -not $signedIn
     $ui.PanelSignedOut.Visibility = ConvertTo-Vis (-not $signedIn)
     $ui.BtnAccount.Visibility = ConvertTo-Vis $signedIn
 }
@@ -709,7 +707,7 @@ $script:HelpTexts = @{
     Start    = @(
         @('What it does', 'Deploys Chocolatey or winget packages as Win32 apps to Microsoft Intune. Every app gets an install script that runs as SYSTEM, a detection rule and an update routine. Every app depends on one dependency app in the tenant, PackTune Runtime, created once: it puts Chocolatey and winget on the devices and keeps both up to date.'),
         @('Get ready', 'All items should be green before the first deployment. A red item says why and has the button that fixes it. Set up everything runs the fixes one after another: modules, app registration (one sign-in with a Global Administrator, admin consent included), sign-in, PackTune Runtime. The status report, the sandbox test and moving older apps to PackTune Runtime are optional.'),
-        @('Sign in', 'Microsoft sign-in opens in your browser. The arrow next to Sign in offers the sign-in with an account from Keevault: you pick the account there, user name, password and one-time code are filled in, the passkey is confirmed in Keevault.'),
+        @('Sign in', 'Microsoft sign-in opens in your browser. The Sign in button at the top right is the only sign-in control; its arrow offers the web browser and the sign-in with an account from Keevault: you pick the account there, user name, password and one-time code are filled in, the passkey is confirmed in Keevault.'),
         @('Requirements', 'The IntuneWin32App module 1.5.0 or newer and an Entra ID app registration with redirect URI http://localhost. Chocolatey and winget are not needed on this computer.'))
     Apps     = @(
         @('One list', 'Chocolatey and winget packages in one list. Each card shows the version of every source and marks the source with the newer version as recommended. Type to filter, or search both repositories for apps that are not in the list.'),
@@ -747,6 +745,7 @@ Add-Click $ui.BtnHelpClose { Close-Dialog }
 # ---------------------------------------------------------------- start page: readiness
 $script:ReadinessActions = @{}
 $script:RuntimeId = $null          # PackTune Runtime app: $null = not read yet, '' = not in the tenant
+$script:SignInAfterRegistration = $false
 $script:RuntimeInfo = $null        # Get-PackTuneRuntimeState: State Missing | Migrate | Ready, apps on the old dependency apps, unused old apps
 $script:StatusScript = $null       # @{ State = 'Present' | 'Missing' | 'NotAvailable'; Id; Reason }
 
@@ -825,8 +824,8 @@ function Get-ReadinessItems {
                     Fix = $(if ($script:Settings.ClientID) { 'Settings' } else { 'Create' }); Action = $(if ($script:Settings.ClientID) { { Show-Page 'Settings' } } else { { Start-AppRegistration } }) } })
         $(if (Test-SignedIn) { @{ Key = 'signin'; Title = 'Signed in to Intune'; State = 'ok'; Text = $(if ($script:AccountText) { "Signed in as $((Get-AccountInfo).Account)" } else { 'Signed in' }) } }
           else { @{ Key = 'signin'; Title = 'Signed in to Intune'; State = 'bad'; Wait = $busyConnect
-                    Text = $(if ($busyConnect) { 'Waiting for the sign-in in your browser ...' } else { 'Not signed in' })
-                    Fix = 'Sign in'; Action = { Connect-Intune } } })
+                    Text = $(if ($busyConnect) { 'Waiting for the sign-in ...' } else { 'Not signed in. Use Sign in at the top right.' })
+                    Action = { Connect-Intune } } })
     )
     $depsText = 'PackTune Runtime puts Chocolatey and winget on the devices (for SYSTEM) and keeps both up to date. Created once per tenant; every app depends on it'
     $info = $script:RuntimeInfo
@@ -886,7 +885,10 @@ function Update-Readiness {
                                    else { "$($open.Count) of $(@($items | Where-Object { -not $_.Optional }).Count) not ready: $(($open | ForEach-Object { $_.Title }) -join ', ')." }
     $ui.BtnSetupAll.Visibility = ConvertTo-Vis ($open.Count -gt 0)
     $ui.TxtSetupNote.Visibility = ConvertTo-Vis ($open.Count -gt 0)
-    $ui.BtnSetupAll.IsEnabled = -not $script:SetupRunning
+    $ready = (Test-SignedIn) -and -not $script:SetupRunning
+    $ui.BtnSetupAll.IsEnabled = $ready
+    $hint = if (Test-SignedIn) { 'About 2 minutes. Needs a Global Administrator once for the consent.' } elseif (-not $script:Settings.ClientID) { 'Please sign in - the app registration is created during sign-in.' } else { 'Please sign in.' }
+    $ui.TxtSetupNote.Text = $hint; $ui.BtnSetupAll.ToolTip = $(if (Test-SignedIn) { $null } else { $hint })
 }
 
 # ---------------------------------------------------------------- set up everything
@@ -938,7 +940,7 @@ function Start-AppRegistration {
     }
     catch {
         if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Write-UiLog 'Sign-in cancelled.' }
-        Complete-SetupStep $false 'creating the app registration'
+        $script:SignInAfterRegistration = $false; Complete-SetupStep $false 'creating the app registration'
         return
     }
     $script:LastSignInPath = if ($setupToken) { 'embedded' } else { 'browser' }
@@ -964,8 +966,9 @@ New-PackTuneAppRegistration @Params
             Show-Toast 'App registration is ready, with admin consent.' 'ok'
             Update-ConnectionStatus
             Complete-SetupStep $true
+            if ($script:SignInAfterRegistration) { $script:SignInAfterRegistration = $false; if (-not (Test-SignedIn)) { try { Connect-Intune } catch { Show-Error $_.Exception.Message } } }
         }
-        else { Update-ConnectionStatus; Complete-SetupStep $false 'creating the app registration' }
+        else { $script:SignInAfterRegistration = $false; Update-ConnectionStatus; Complete-SetupStep $false 'creating the app registration' }
     })
     Update-SignInButton
     Update-Readiness
@@ -2767,6 +2770,12 @@ function Get-EmbeddedToken {
 
 function Connect-Intune {
     param([ValidateSet('Microsoft', 'Browser', 'Keevault')][string]$Method = 'Microsoft')
+    if (-not $script:Settings.ClientID -and $script:ModuleState.Ok -and $Method -ne 'Keevault') {
+        # No app registration yet: the sign-in starts with its setup (admin sign-in, consent), then signs in with it
+        $script:SignInAfterRegistration = $true
+        Start-AppRegistration
+        return
+    }
     Assert-SignInSettings
     $tenant = $script:Settings.TenantID
     $clientId = $script:Settings.ClientID
@@ -2965,8 +2974,6 @@ $ui.PanelSignedOut.Add_PreviewKeyDown({
     param($s, $e)
     if (($e.Key -eq 'System' -and $e.SystemKey -eq 'Down') -or $e.Key -eq 'F4') { $e.Handled = $true; try { Show-SignInMenu $ui.PanelSignedOut } catch { Show-Error $_.Exception.Message } }
 })
-Add-Click $ui.BtnStartSignInBrowser { Connect-Intune }
-Add-Click $ui.BtnStartSignInKeevault { Connect-Intune -Method Keevault }
 
 # ---------------------------------------------------------------- settings
 function Update-SettingsView {

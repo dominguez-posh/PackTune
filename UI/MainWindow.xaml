@@ -288,24 +288,7 @@
                                 </StackPanel>
                             </ScrollViewer>
                             <StackPanel Grid.Column="2">
-                                <Border Style="{StaticResource CardBox}" Padding="20,18">
-                                    <StackPanel>
-                                        <TextBlock Text="Sign in" Style="{StaticResource CardTitle}" Margin="0,0,0,12"/>
-                                        <Button x:Name="BtnStartSignInBrowser" HorizontalContentAlignment="Left" Padding="12,10" Margin="0,0,0,12">
-                                            <StackPanel Orientation="Horizontal">
-                                                <TextBlock Style="{StaticResource Glyph}" Text="&#xE774;" Margin="0,0,12,0" FontSize="18"/>
-                                                <StackPanel><TextBlock Text="Sign in with Microsoft" FontWeight="Medium"/><TextBlock Text="Password, Authenticator or passkey" Style="{StaticResource Hint}"/></StackPanel>
-                                            </StackPanel>
-                                        </Button>
-                                        <Button x:Name="BtnStartSignInKeevault" HorizontalContentAlignment="Left" Padding="12,10">
-                                            <StackPanel Orientation="Horizontal">
-                                                <TextBlock Style="{StaticResource Glyph}" Text="&#xE8D7;" Margin="0,0,12,0" FontSize="18"/>
-                                                <StackPanel><TextBlock Text="With an account from Keevault" FontWeight="Medium"/><TextBlock Text="Fills in the sign-in, passkey confirmed in Keevault" Style="{StaticResource Hint}"/></StackPanel>
-                                            </StackPanel>
-                                        </Button>
-                                    </StackPanel>
-                                </Border>
-                                <Border Style="{StaticResource CardBox}" Padding="20,18" Margin="0,16,0,0">
+                                <Border Style="{StaticResource CardBox}" Padding="20,18" Margin="0">
                                     <StackPanel>
                                         <TextBlock Text="How it works" Style="{StaticResource CardTitle}" Margin="0,0,0,14"/>
                                         <Grid Margin="0,0,0,14"><Grid.ColumnDefinitions><ColumnDefinition Width="30"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
@@ -691,7 +674,7 @@
                                             </UniformGrid>
                                             <TextBlock x:Name="TxtDefaultUpdateHelp" Style="{StaticResource Hint}" Margin="0,8,0,0"/>
                                             <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
-                                                <Button x:Name="BtnDefaultSchedule" Style="{StaticResource SmallButton}" Content="Schedule and conditions for new apps ..."/>
+                                                <Button x:Name="BtnDefaultSchedule" Style="{StaticResource SmallButton}" VerticalAlignment="Center" Content="Schedule and conditions for new apps ..."/>
                                                 <TextBlock x:Name="TxtDefaultSchedule" Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="12,0,0,0"/>
                                             </StackPanel>
                                         </StackPanel>

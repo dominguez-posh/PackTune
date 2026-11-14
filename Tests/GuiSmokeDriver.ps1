@@ -135,9 +135,15 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $appreg = $cards | Where-Object Key -eq 'appreg'
             Test-Smoke 'missing app registration is red with a reason' ($appreg.State -eq 'bad' -and $appreg.Text -like '*app registration*') $appreg.Text
             $buttons = @($ui.ReadinessPanel.Children | ForEach-Object { @($_.Child.Children | Where-Object { $_ -is [System.Windows.Controls.Button] }) | ForEach-Object { [string]$_.Content } })
-            Test-Smoke 'only items that are not ready have a button (Create, Sign in)' (($buttons -join ',') -eq 'Create,Sign in') ($buttons -join ',')
+            Test-Smoke 'only items that are not ready have a button (Create); sign-in only top right' (($buttons -join ',') -eq 'Create') ($buttons -join ',')
+            $signinItem = $cards | Where-Object Key -eq 'signin'
+            Test-Smoke 'Start page: no sign-in card, the sign-in item has no button, only a neutral hint' ($null -eq $ui.BtnStartSignInBrowser -and $null -eq $ui.BtnStartSignInKeevault -and -not $signinItem.Fix -and $signinItem.Text -like '*top right*' -and $ui.BtnSignIn.IsEnabled) $signinItem.Text
             Test-Smoke 'status report is optional and not counted' (($cards | Where-Object Key -eq 'status').Optional -and $ui.TxtReadinessSummary.Text -like '*3 of 4 not ready*' -or $ui.TxtReadinessSummary.Text -like '*of 4*') $ui.TxtReadinessSummary.Text
             Test-Smoke 'set up everything offered' ($ui.BtnSetupAll.Visibility -eq 'Visible' -and $ui.TxtReadinessSummary.Text -like '*not ready*') $ui.TxtReadinessSummary.Text
+            Test-Smoke 'signed out, no app registration: Set up everything is disabled with the hint that sign-in creates the registration' (-not $ui.BtnSetupAll.IsEnabled -and $ui.TxtSetupNote.Text -eq 'Please sign in - the app registration is created during sign-in.' -and $ui.BtnSetupAll.ToolTip -eq $ui.TxtSetupNote.Text) $ui.TxtSetupNote.Text
+            $keepClient = $script:Settings.ClientID; $script:Settings.ClientID = 'x'; Update-Readiness
+            Test-Smoke 'signed out, registration exists: disabled, plain "Please sign in."' (-not $ui.BtnSetupAll.IsEnabled -and $ui.TxtSetupNote.Text -eq 'Please sign in.')
+            $script:Settings.ClientID = $keepClient; Update-Readiness
             Save-SmokeShot '01-start'
             # Instead of a browser: request the sign-in URL; the stand-in authority redirects to the loopback port
             $script:SignInTest.UrlHandler = 'param($Url) $Shared.UrlHit = $true; $global:SmokeClient = New-Object System.Net.WebClient; [void]$global:SmokeClient.DownloadStringTaskAsync([uri]$Url)'
@@ -155,6 +161,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $names = @(Get-StoreApps | ForEach-Object { $_.displayName })
         Test-Smoke 'PackTune Runtime deployed by the set up, no separate Chocolatey app' ($script:RuntimeId -and ($names -contains 'PackTune Runtime') -and ($names -notcontains 'Chocolatey') -and ($names -notcontains 'winget runtime')) ($names -join ', ')
         Test-Smoke 'all required items green, set up button gone' (@(Get-ReadinessItems | Where-Object { $_.State -ne 'ok' -and -not $_.Optional }).Count -eq 0 -and $ui.BtnSetupAll.Visibility -eq 'Collapsed') $ui.TxtReadinessSummary.Text
+        Test-Smoke 'signed in: Set up everything note is the normal one (button hidden when all is ready)' ($ui.TxtSetupNote.Text -notlike 'Please sign in*')
         $true } }
     @{ Name = 'sign in'; Do = {
         Test-Smoke 'signed in through the browser flow (PKCE, loopback)' (Test-SignedIn)
@@ -965,6 +972,21 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'known tenant uses its own app registration' ($back.TenantID -eq 'contoso.onmicrosoft.com' -and $back.ClientID -eq '11111111-2222-3333-4444-555555555555') "$($back.TenantID) / $($back.ClientID)"
         Switch-Tenant $back.TenantID $back.ClientID
         Test-Smoke 'tenant switched back' ($script:Settings.TenantID -eq 'contoso.onmicrosoft.com' -and $script:Settings.ClientID -eq '11111111-2222-3333-4444-555555555555')
+        $true } }
+    @{ Name = 'buttons are not clipped (100%, 125%, 150%)'; Do = {
+        function Find-Clipped($e, $list) {
+            if ($e -is [System.Windows.Controls.Button] -and $e.IsVisible -and $e.ActualWidth -gt 0 -and ($e.ActualHeight + 0.5) -lt ($e.DesiredSize.Height - $e.Margin.Top - $e.Margin.Bottom)) { [void]$list.Add("$($e.Name)|$($e.Content)") }
+            for ($i = 0; $i -lt [System.Windows.Media.VisualTreeHelper]::GetChildrenCount($e); $i++) { Find-Clipped ([System.Windows.Media.VisualTreeHelper]::GetChild($e, $i)) $list }
+        }
+        $all = New-Object System.Collections.ArrayList
+        foreach ($scale in 1.0, 1.25, 1.5) {
+            $ui.RootGrid.LayoutTransform = New-Object System.Windows.Media.ScaleTransform $scale, $scale
+            foreach ($p in 'Start', 'Apps', 'Tenant', 'Activity', 'Settings') { Show-Page $p; $window.UpdateLayout(); $l = New-Object System.Collections.ArrayList; Find-Clipped $window $l; foreach ($x in $l) { [void]$all.Add("$p@$scale $x") } }
+            if ($scale -eq 1.5) { Show-Page 'Settings'; Save-SmokeShot '30-settings-150' }
+        }
+        $ui.RootGrid.LayoutTransform = [System.Windows.Media.Transform]::Identity
+        Show-Page 'Start'
+        Test-Smoke 'no button is taller than its box (ActualHeight >= DesiredSize.Height) on any page at 100/125/150%' ($all.Count -eq 0) ($all -join '; ')
         $true } }
     @{ Name = 'sign out'; Do = {
         Test-Smoke 'account menu offers sign out and the other tenants' ($true)
