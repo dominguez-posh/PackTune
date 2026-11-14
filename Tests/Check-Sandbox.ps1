@@ -220,7 +220,59 @@ $lab = Start-PackTuneWin32Lab -DisplayName 'Check App' -Scripts @{ 'Install.ps1'
 Test-Check 'lab: a failed report is a failed verdict; without -AutoRun the lab waits for the person' ($lab.Verdict -eq 'Failed' -and $script:JobSeen.Info.AutoRun -eq $false)
 $threw = $false; try { $null = Start-PackTuneWin32Lab -DisplayName 'x' -Scripts @{ 'Install.ps1' = '' } } catch { $threw = $_.Exception.Message -like '*Uninstall.ps1*' -or $_.Exception.Message -like '*Detect.ps1*' }
 Test-Check 'lab: the three scripts are required' $threw
+# previous version: its scripts and files are in the job, the job says so
+$prev = Join-Path $work 'prev-source'; New-Item -ItemType Directory -Path $prev -Force | Out-Null; 'old payload' | Set-Content (Join-Path $prev 'choco-app.ps1')
+$script:LabVerdict = 'Succeeded'
+$null = Start-PackTuneWin32Lab -DisplayName 'Check App' -Version '2.0' -SourcePath $labSource -Scripts @{ 'Install.ps1' = 'new'; 'Uninstall.ps1' = 'u'; 'Detect.ps1' = 'newdetect' } `
+    -PreviousScripts @{ 'Install.ps1' = 'old'; 'Uninstall.ps1' = 'u'; 'Detect.ps1' = 'olddetect' } -PreviousSourcePath $prev -PreviousVersion '1.0' -AutoRun
+$prevDir = Join-Path $script:JobSeen.Path 'input\source-previous'
+Test-Check 'lab with a previous version: the job says so, the previous scripts and files are their own folder' ($script:JobSeen.Info.HasPrevious -eq $true -and $script:JobSeen.Info.PreviousVersion -eq '1.0' -and (Get-Content (Join-Path $prevDir 'Detect.ps1')) -match 'olddetect' -and (Test-Path (Join-Path $prevDir 'choco-app.ps1')) -and (Get-Content (Join-Path $script:JobSeen.Path 'input\source\Detect.ps1')) -match 'newdetect')
+$threw = $false; try { $null = Start-PackTuneWin32Lab -DisplayName 'x' -Scripts @{ 'Install.ps1' = ''; 'Uninstall.ps1' = ''; 'Detect.ps1' = '' } -PreviousScripts @{ 'Install.ps1' = '' } } catch { $threw = $_.Exception.Message -like '*previous version needs*' }
+Test-Check 'lab: the previous version needs its three scripts too' $threw
 Set-PackTuneSandboxLauncher -Launcher $null
+
+# --- the sequence of the lab and its verdict (Sandbox\LabShared.ps1, the same functions the lab panel uses)
+. (Join-Path $repo 'Sandbox\LabShared.ps1')
+$plain = @(New-LabPlan -Version '1.0')[0]
+Test-Check 'plan without a previous version: detect, install, detect, uninstall, detect with the expected results' ((($plain | ForEach-Object { "$($_.Kind):$($_.Target)" }) -join ',') -eq 'Detect:new,Install:new,Detect:new,Uninstall:new,Detect:new' -and (($plain | ForEach-Object { $_.Expect }) -join ',') -eq 'not detected,success code,detected,success code,not detected')
+$upd = @(New-LabPlan -Version '2.0' -PreviousVersion '1.0' -HasPrevious $true)[0]
+Test-Check 'plan with a previous version: previous in and detected, then the update and its detection (new scripts), then uninstall' ((($upd | ForEach-Object { "$($_.Kind):$($_.Target)" }) -join ',') -eq 'Detect:previous,Install:previous,Detect:previous,Install:new,Detect:new,Uninstall:new,Detect:new' -and $upd[3].Title -like 'Update to 2.0*' -and $upd[1].Title -like '*previous version 1.0')
+function New-FakeResult([int]$Exit = 0, [string]$StdOut = '') { [pscustomobject]@{ ExitCode = $Exit; Output = $StdOut; StdOut = $StdOut; Seconds = 1.5; User = 'SYSTEM' } }
+# a runner that plays the lab: runs the steps in order and stops at the first one that is not as expected
+function Invoke-FakeRun($Plan, [scriptblock]$Answer) {
+    $ran = New-Object System.Collections.ArrayList
+    foreach ($step in $Plan) {
+        [void]$ran.Add($step.Index)
+        [void](Set-LabStepResult -Step $step -Result (& $Answer $step))
+        if ($step.State -eq 'Failed') { break }
+    }
+    $ran
+}
+$good = { param($s) switch ($s.Kind) { 'Detect' { if ($s.ExpectDetected) { New-FakeResult 0 'found' } else { New-FakeResult 1 '' } } default { New-FakeResult 0 } } }
+$p = @(New-LabPlan -Version '1.0')[0]; $ran = Invoke-FakeRun $p $good; $sum = Get-LabSummary $p
+Test-Check 'run: all steps as expected gives Passed with every step run' ($ran.Count -eq 5 -and $sum.Verdict -eq 'Passed' -and $sum.Message -like 'All 5 steps passed*' -and $p[0].Detail -like 'Expected: not detected. Actual: not detected*1.5 s*')
+$p = @(New-LabPlan -Version '1.0')[0]
+$already = { param($s) if ($s.Index -eq 1) { New-FakeResult 0 'found' } else { & $good $s } }
+$ran = Invoke-FakeRun $p $already; $sum = Get-LabSummary $p
+Test-Check 'run: detected before the install is a finding (Intune would skip the install) and stops the run' ($ran.Count -eq 1 -and $sum.Verdict -eq 'Failed' -and $sum.Message -like 'Failed at step 1 of 5*skip the install*' -and $p[0].Finding)
+$p = @(New-LabPlan -Version '1.0')[0]
+$badInstall = { param($s) if ($s.Kind -eq 'Install') { New-FakeResult 1603 } else { & $good $s } }
+$ran = Invoke-FakeRun $p $badInstall; $sum = Get-LabSummary $p
+Test-Check 'run: a failing install stops after that step, the summary names step and cause, the later steps stay not run' ($ran.Count -eq 2 -and $sum.Message -like 'Failed at step 2 of 5 (Install 1.0): Expected: success code. Actual: exit code 1603*' -and $p[4].State -eq 'NotRun')
+$p = @(New-LabPlan -Version '1.0')[0]
+$stillThere = { param($s) if ($s.Index -eq 5) { New-FakeResult 0 'found' } else { & $good $s } }
+$ran = Invoke-FakeRun $p $stillThere; $sum = Get-LabSummary $p
+Test-Check 'run: still detected after the uninstall fails the last step' ($sum.Verdict -eq 'Failed' -and $sum.Message -like 'Failed at step 5 of 5*Expected: not detected. Actual: detected*')
+$p = @(New-LabPlan -Version '2.0' -PreviousVersion '1.0' -HasPrevious $true)[0]
+$noUpdate = { param($s) if ($s.Index -eq 5) { New-FakeResult 1 '' } else { & $good $s } }
+$ran = Invoke-FakeRun $p $noUpdate; $sum = Get-LabSummary $p
+Test-Check 'run: the update path is judged too (not detected after the update fails step 5 of 7)' ($ran.Count -eq 5 -and $sum.Message -like 'Failed at step 5 of 7 (Detect after the update)*')
+$p = @(New-LabPlan -Version '1.0')[0]; [void](Set-LabStepResult -Step $p[0] -Result (New-FakeResult 1 ''))
+Test-Check 'summary: a run that stopped early without a failure is Failed, not Passed' ((Get-LabSummary $p).Verdict -eq 'Failed' -and (Get-LabSummary $p).Message -like 'Stopped before step 2*')
+$p = @(New-LabPlan -Version '1.0')[0]; [void](Set-LabStepResult -Step $p[1] -Result ([pscustomobject]@{ ExitCode = $null; Output = ''; StdOut = ''; Seconds = 3; User = ''; Cancelled = $true }))
+Test-Check 'a cancelled step is a failed step' ($p[1].State -eq 'Failed' -and $p[1].Detail -like '*cancelled*')
+$p = @(New-LabPlan -Version '1.0')[0]; [void](Set-LabStepResult -Step $p[1] -Result (New-FakeResult 3010))
+Test-Check 'a reboot code counts as success and is named' ($p[1].State -eq 'Passed' -and $p[1].Detail -like '*soft reboot*')
 
 # --- the scripts that run in the sandbox
 foreach ($file in Get-ChildItem (Join-Path $repo 'Sandbox') -Filter *.ps1) {

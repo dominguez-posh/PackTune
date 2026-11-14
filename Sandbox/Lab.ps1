@@ -17,6 +17,7 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $OutDir = Join-Path $JobDir 'out'
 $LabOut = Join-Path $OutDir 'lab'
 $Source = Join-Path $LocalDir 'input\source'
+$PreviousSource = Join-Path $LocalDir 'input\source-previous'
 $ShotDir = Join-Path $env:TEMP 'packtune\labshots'
 New-Item -ItemType Directory $ShotDir -Force | Out-Null
 $job = Get-Content (Join-Path $JobDir 'job.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -25,17 +26,8 @@ $script:Running = $null
 $script:Closing = $false
 $script:Queue = New-Object System.Collections.ArrayList
 
-function New-LabStep([string]$Kind, [string]$Title, [bool]$ExpectDetected = $true) {
-    [pscustomobject]@{ Index = 0; Kind = $Kind; Title = $Title; ExpectDetected = $ExpectDetected; State = 'NotRun'; ExitCode = $null; Detected = $null; Detail = ''; Output = ''; Seconds = $null; User = ''; Screenshot = '' }
-}
-$steps = @(
-    (New-LabStep 'Install' "Install $($job.Version)")
-    (New-LabStep 'Detect' 'Detect after install' $true)
-    (New-LabStep 'Uninstall' 'Uninstall')
-    (New-LabStep 'Detect' 'Detect after uninstall' $false)
-)
-for ($i = 0; $i -lt $steps.Count; $i++) { $steps[$i].Index = $i + 1 }
-
+$hasPrevious = [bool]$job.HasPrevious
+$steps = @(New-LabPlan -Version $job.Version -PreviousVersion $job.PreviousVersion -HasPrevious $hasPrevious)[0]
 # Intune runs the commands from the package folder; detection scripts run 64-bit in the system context
 $ps = '"%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File'
 $commands = @{ Install = "$ps "".\Install.ps1"""; Uninstall = "$ps "".\Uninstall.ps1"""; Detect = "$ps "".\Detect.ps1""" }
@@ -67,18 +59,18 @@ $info = New-LabLabel 'Run the steps one by one, or all at once. They run as SYST
 $form.Controls.Add($info)
 $rows = @{}
 foreach ($s in $steps) {
-    $y = 78 + ($s.Index - 1) * 50
+    $y = 74 + ($s.Index - 1) * 40
     $num = New-LabLabel "$($s.Index)" 16 $y 28 28 10 $C.Text
-    $title = New-LabLabel $s.Title 52 ($y + 3) 360 24 10.5
-    $chip = New-LabLabel 'not run' 420 ($y + 3) 190 24 9.5 $C.Text
+    $title = New-LabLabel $s.Title 52 ($y + 3) 330 24 10.5
+    $chip = New-LabLabel 'not run' 390 ($y + 3) 220 24 9.5 $C.Text
     $chip.BackColor = $C.Idle; $chip.TextAlign = 'MiddleCenter'
-    $run = New-LabButton 'Run' $C.Primary 630 ($y - 2) 120 34
+    $run = New-LabButton 'Run' $C.Primary 630 ($y - 2) 120 30
     $form.Controls.AddRange(@($num, $title, $chip, $run))
     $rows[$s.Index] = @{ Chip = $chip; Run = $run }
 }
 $output = New-Object System.Windows.Forms.TextBox
 $output.Multiline = $true; $output.ReadOnly = $true; $output.ScrollBars = 'Vertical'; $output.Font = New-Object System.Drawing.Font('Consolas', 9.5)
-$output.Location = New-Object System.Drawing.Point(16, 290); $output.Size = New-Object System.Drawing.Size(740, 230)
+$output.Location = New-Object System.Drawing.Point(16, 366); $output.Size = New-Object System.Drawing.Size(740, 160)
 $form.Controls.Add($output)
 $btnAll = New-LabButton 'Run all steps' $C.Primary 16 540 240 44
 $btnFail = New-LabButton 'Report failure' $C.Danger 270 540 240 44
@@ -97,7 +89,10 @@ function Set-StepView($s) {
     $r = $rows[$s.Index]
     $look = @{ NotRun = @('not run', $C.Idle); Running = @('running ...', $C.Run); Passed = @('passed', $C.Ok); Failed = @('failed', $C.Bad) }[$s.State]
     $text = $look[0]
-    if ($s.State -in 'Passed', 'Failed') { $text = if ($s.Kind -eq 'Detect') { if ($s.Detected) { 'detected' } else { 'not detected' } } else { "exit $($s.ExitCode)" } }
+    if ($s.State -in 'Passed', 'Failed') {
+        $text = if ($s.Kind -eq 'Detect') { if ($s.Detected) { 'detected' } else { 'not detected' } } else { "exit $($s.ExitCode)" }
+        if ($null -ne $s.Seconds) { $text += "  $($s.Seconds) s" }
+    }
     $r.Chip.Text = $text; $r.Chip.BackColor = $look[1]
     $r.Run.Text = switch ($s.State) { 'NotRun' { 'Run' } 'Running' { 'Cancel' } default { 'Run again' } }
     $r.Run.BackColor = if ($s.State -eq 'Running') { $C.Danger } else { $C.Primary }
@@ -108,23 +103,13 @@ function Show-StepOutput($s) { $output.Text = "Step $($s.Index): $($s.Title)`r`n
 function Update-Summary {
     $passed = @($steps | Where-Object State -eq 'Passed').Count
     $failed = @($steps | Where-Object State -eq 'Failed').Count
-    $info.Text = "$passed of $($steps.Count) steps passed" + $(if ($failed) { ", $failed failed." } else { '.' })
+    $info.Text = "$passed of $($steps.Count) steps passed" + $(if ($failed) { ". $((Get-LabSummary $steps).Message)" } else { '.' })
 }
 
 function Complete-LabStep($s, $r) {
-    $s.Seconds = $r.Seconds; $s.User = $r.User; $s.Output = $r.Output; $s.ExitCode = $r.ExitCode
-    if ($r.PSObject.Properties['Cancelled'] -and $r.Cancelled) { $s.State = 'Failed'; $s.Detail = "Cancelled after $($r.Seconds) s" }
-    elseif ($s.Kind -eq 'Detect') {
-        # Script rule like Intune: detected = exit code 0 and output on STDOUT
-        $detected = ($r.ExitCode -eq 0) -and [bool]$r.StdOut
-        $s.Detected = $detected
-        $s.State = if ($detected -eq $s.ExpectDetected) { 'Passed' } else { 'Failed' }
-        $s.Detail = "$(if ($detected) { 'Detected' } else { 'Not detected' }) (expected: $(if ($s.ExpectDetected) { 'detected' } else { 'not detected' })), exit code $($r.ExitCode)"
-    }
-    else {
-        $s.State = if (Test-LabSuccessCode $r.ExitCode) { 'Passed' } else { 'Failed' }
-        $s.Detail = "Exit code $($r.ExitCode) in $($r.Seconds) s as $($r.User)" + $(switch ($r.ExitCode) { 3010 { ' (soft reboot required)' } 1641 { ' (hard reboot initiated)' } default { '' } })
-    }
+    [void](Set-LabStepResult -Step $s -Result $r)
+    # A step that did not give the expected result ends the run
+    if ($s.State -eq 'Failed') { $script:Queue.Clear() }
     try {
         $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
         $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
@@ -150,7 +135,7 @@ function Start-LabStep([int]$Index) {
     $s.State = 'Running'; $s.Output = ''; $s.Detail = ''
     Set-StepView $s
     $info.Text = "Running step $($s.Index): $($s.Title) ..."
-    try { $script:Running = @{ Step = $s; Handle = (Start-LabCommand -CommandLine $commands[$s.Kind] -WorkingDirectory $Source -AsSystem) } }
+    try { $script:Running = @{ Step = $s; Handle = (Start-LabCommand -CommandLine $commands[$s.Kind] -WorkingDirectory $(if ($s.Target -eq 'previous') { $PreviousSource } else { $Source }) -AsSystem) } }
     catch {
         $script:Running = $null
         $s.State = 'Failed'; $s.Detail = 'The step could not be started'; $s.Output = $_.Exception.Message
@@ -186,12 +171,6 @@ function Close-Lab([string]$Verdict, [string]$Message) {
     shutdown.exe /s /t 0
 }
 
-function Get-AutoVerdict {
-    $failed = @($steps | Where-Object State -ne 'Passed')
-    if ($failed.Count -eq 0) { return @('Passed', 'All steps passed (install, detect, uninstall, detect).') }
-    @('Failed', ('Steps not passed: ' + (($failed | ForEach-Object { "$($_.Index) ($($_.Title): $($_.Detail))" }) -join '; ')))
-}
-
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.Add_Tick({
@@ -204,9 +183,10 @@ $timer.Add_Tick({
         Start-LabStep $next
         return
     }
-    if (-not $script:Running -and $job.AutoRun -and $script:Queue.Count -eq 0 -and -not $script:Closing -and @($steps | Where-Object State -eq 'NotRun').Count -eq 0) {
-        $v = Get-AutoVerdict
-        Close-Lab $v[0] $v[1]
+    $ended = @($steps | Where-Object State -eq 'NotRun').Count -eq 0 -or @($steps | Where-Object State -eq 'Failed').Count -gt 0
+    if (-not $script:Running -and $job.AutoRun -and $script:Queue.Count -eq 0 -and -not $script:Closing -and $ended) {
+        $v = Get-LabSummary $steps
+        Close-Lab $v.Verdict $v.Message
     }
 })
 
