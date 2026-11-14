@@ -48,7 +48,11 @@ function Remove-IntuneWin32App { param([string]$DisplayName, [string]$ID)
     Test-FakeAccessToken
     Invoke-FakeIntuneGraph -Method DELETE -Path "mobileApps/$ID"
 }
-function New-IntuneWin32AppPackage { param($SourceFolder, $SetupFile, $OutputFolder, [switch]$Force)
+function New-IntuneWin32AppPackage { [CmdletBinding()] param($SourceFolder, $SetupFile, $OutputFolder, [switch]$Force)
+    $Store0 = Split-Path $Store -Parent
+    ConvertTo-Json @{ Source = $SourceFolder; Output = $OutputFolder; SourceExists = (Test-Path -LiteralPath (Join-Path $SourceFolder $SetupFile)) } | Set-Content (Join-Path $Store0 "fake-package-last.json")
+    $DenyFile = Join-Path $Store0 "fake-package-deny.txt"
+    if (Test-Path $DenyFile) { $N = [int](Get-Content $DenyFile -Raw); if ($N -gt 0) { ($N - 1) | Set-Content $DenyFile; Write-Warning "Unexpected error occurred while packaging Win32 app. Return code from invocation: -2147024891"; return $null } }
     $Path = Join-Path $OutputFolder "install.intunewin"; Set-Content $Path "fake"; [pscustomobject]@{ Path = $Path }
 }
 function New-IntuneWin32AppDetectionRuleScript { param($ScriptFile) [ordered]@{ "@odata.type" = "script"; scriptContent = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ScriptFile)) } }

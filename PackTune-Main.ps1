@@ -2310,16 +2310,88 @@ function New-PackTuneWorkFolder {
     return $WorkPath
 }
 
+function Wait-PackTunePackaging([int]$Seconds) { Start-Sleep -Seconds $Seconds }
+
+function Wait-PackTuneSandboxRelease {
+    <#
+        A Windows Sandbox that has just finished holds its mapped folders until it is gone. PackTune closes the one it started after the
+        verdict; here it only waits (never stops anything, a sandbox of the user or one kept open is not touched) up to a minute. When one is
+        still open the job stops with "Close Windows Sandbox to continue" (Retry runs it again) instead of failing with access denied.
+    #>
+    param([int]$Seconds = 60)
+    if (-not (Get-Command Test-PackTuneSandboxRunning -ErrorAction SilentlyContinue) -or -not (Test-PackTuneSandboxRunning)) { return }
+    Write-Host "Waiting for Windows Sandbox to close ..."
+    $Waited = 0
+    while ($Waited -lt $Seconds -and (Test-PackTuneSandboxRunning)) { Wait-PackTunePackaging 2; $Waited += 2 }
+    if (Test-PackTuneSandboxRunning) { throw "Close Windows Sandbox to continue, then press Retry: it is still open and holds files that are needed for the package." }
+}
+function Reset-PackTuneFolderAccess {
+    # Our own packaging copy: normal inherited rights for the signed-in user, nothing read-only (best effort, never fatal)
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        & icacls.exe $Path /reset /T /C /Q 2>&1 | Out-Null
+        & icacls.exe $Path /grant "$($env:USERDOMAIN)\$($env:USERNAME):(OI)(CI)F" /T /C /Q 2>&1 | Out-Null
+        foreach ($File in @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue)) { if ($File.IsReadOnly) { $File.IsReadOnly = $false } }
+    }
+    catch { Write-Verbose "Folder rights could not be reset: $($_.Exception.Message)" }
+}
+
 function New-PackTunePackage {
+    <#
+        Creates the .intunewin file and fails loudly instead of continuing without one. IntuneWinAppUtil works on a separate copy of
+        the source in a short folder of its own (not the work folder: a Windows Sandbox that just closed, a virus scanner or odd rights
+        there cannot block it), after the sandbox released its folders. "Access denied" (0x80070005) is retried with a wait; when it stays,
+        the message says what happened in plain words. The package is copied back to <WorkPath> as before.
+    #>
     param(
         [Parameter(Mandatory = $true)][string]$WorkPath
     )
     $SourcePath = Join-Path $WorkPath "source"
-    $Package = Invoke-IntuneModule { New-IntuneWin32AppPackage -SourceFolder $SourcePath -SetupFile "install.ps1" -OutputFolder $WorkPath -Force }
-    if ($null -eq $Package -or -not (Test-Path $Package.Path)) {
-        throw "Packaging with IntuneWinAppUtil.exe failed. Make sure IntuneWin32App $($script:MinimumModuleVersion)+ is loaded; if it still fails, delete $env:TEMP\IntuneWinAppUtil.exe so a fresh copy is downloaded."
+    $PackRoot = Join-Path $script:WorkRoot "pack"
+    New-Item -ItemType Directory -Path $PackRoot -Force | Out-Null
+    # Leftovers of earlier runs (older than a day) go
+    foreach ($Old in @(Get-ChildItem -LiteralPath $PackRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) })) { Remove-Item -LiteralPath $Old.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    $Attempts = 3
+    $Denied = $false
+    $Detail = ""
+    for ($Try = 1; $Try -le $Attempts; $Try++) {
+        Wait-PackTuneSandboxRelease
+        $Pack = Join-Path $PackRoot ([guid]::NewGuid().ToString("N").Substring(0, 8))
+        $PackSource = Join-Path $Pack "source"
+        $PackOut = Join-Path $Pack "out"
+        $Texts = @()
+        $Package = $null
+        try {
+            New-Item -ItemType Directory -Path $PackOut -Force | Out-Null
+            Copy-Item -LiteralPath $SourcePath -Destination $PackSource -Recurse -Force
+            Reset-PackTuneFolderAccess -Path $Pack
+            # Warnings and errors of the module are caught with the result (they carry the Windows return code) and shown again
+            $All = @(Invoke-IntuneModule { New-IntuneWin32AppPackage -SourceFolder $PackSource -SetupFile "install.ps1" -OutputFolder $PackOut -Force -ErrorAction SilentlyContinue *>&1 })
+            foreach ($Item in $All) {
+                if ($Item -is [System.Management.Automation.WarningRecord] -or $Item -is [System.Management.Automation.ErrorRecord]) { $Texts += "$Item"; Write-Warning "$Item" }
+                elseif ($Item -and $Item.PSObject.Properties["Path"]) { $Package = $Item }
+            }
+        }
+        catch { $Texts += $_.Exception.Message }
+        try {
+            if ($Package -and $Package.Path -and (Test-Path -LiteralPath $Package.Path)) {
+                $Target = Join-Path $WorkPath (Split-Path -Leaf $Package.Path)
+                Copy-Item -LiteralPath $Package.Path -Destination $Target -Force
+                $Result = $Package | Select-Object *
+                $Result.Path = $Target
+                return $Result
+            }
+        }
+        finally { Remove-Item -LiteralPath $Pack -Recurse -Force -ErrorAction SilentlyContinue }
+        $Detail = (($Texts | ForEach-Object { "$_" }) -join " ").Trim()
+        $Denied = $Detail -match '-2147024891|0x80070005|E_ACCESSDENIED|access (to the path )?.*denied|zugriff'
+        if (-not $Denied) { break }
+        if ($Try -lt $Attempts) { Write-Warning "Windows denied access while packaging (attempt $Try of $Attempts), waiting and trying again."; Wait-PackTunePackaging (5 * $Try) }
     }
-    return $Package
+    if ($Denied) {
+        throw "Windows denied access to the package folder ($PackRoot): the files are probably still held by Windows Sandbox or locked by a virus scanner. Close Windows Sandbox, wait a minute and try again; if it repeats, exclude '$($script:WorkRoot)' from real-time scanning. (IntuneWinAppUtil: access denied, 0x80070005)"
+    }
+    throw "Packaging with IntuneWinAppUtil.exe failed$(if ($Detail) { ": $Detail" }). Make sure IntuneWin32App $($script:MinimumModuleVersion)+ is loaded; if it still fails, delete $env:TEMP\IntuneWinAppUtil.exe so a fresh copy is downloaded."
 }#Creates the .intunewin file and fails loudly instead of continuing without one
 
 function New-PackTuneChocolateyApp {

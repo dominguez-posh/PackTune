@@ -936,7 +936,7 @@
             </Grid>
         </Grid>
 
-        <StackPanel x:Name="ToastHost" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,24,24" Width="360"/>
+        <StackPanel x:Name="ToastHost" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,24,24" Width="420"/>
 
         <!-- Dialogs: scrim with one sheet at a time -->
         <Grid x:Name="DialogLayer" Visibility="Collapsed">
