@@ -46,9 +46,7 @@ function Set-IntuneWin32App {
 }
 function Remove-IntuneWin32App { param([string]$DisplayName, [string]$ID)
     Test-FakeAccessToken
-    $Blocker = @(Read-Store | Where-Object { @($_.supersedence).targetId -contains $ID })
-    if ($Blocker.Count -gt 0) { throw "App $ID is still superseded by $($Blocker[0].displayName) (fake)" }
-    Write-Store @(Read-Store | Where-Object { $_.id -ne $ID })
+    Invoke-FakeIntuneGraph -Method DELETE -Path "mobileApps/$ID"
 }
 function New-IntuneWin32AppPackage { param($SourceFolder, $SetupFile, $OutputFolder, [switch]$Force)
     $Path = Join-Path $OutputFolder "install.intunewin"; Set-Content $Path "fake"; [pscustomobject]@{ Path = $Path }
@@ -139,7 +137,58 @@ function Add-IntuneWin32App {
     Start-Sleep -Milliseconds 500
     $App
 }
-Export-ModuleMember -Function Get-IntuneWin32App, Remove-IntuneWin32App, New-IntuneWin32AppPackage, New-IntuneWin32AppDetectionRuleScript, New-IntuneWin32AppDetectionRuleFile,
+function Invoke-FakeIntuneGraph {
+    # The relationship API of Microsoft Graph (beta deviceAppManagement), the way the real service behaves:
+    #   GET    mobileApps/{id}/relationships        own relationships (targetType child) and those of other apps that point at this
+    #                                               one (targetType parent), dependencies and supersedence alike
+    #   POST   mobileApps/{id}/updateRelationships  REPLACES the whole set of the app (dependencies AND supersedence); what is not in
+    #                                               the body is gone
+    #   DELETE mobileApps/{id}                      400 while the app has relationships of its own ("it is the parent of another app")
+    #                                               or while another app points at it
+    param([string]$Method = "GET", [string]$Path, $Body)
+    Test-FakeAccessToken
+    $Apps = Read-Store
+    if ($Path -notmatch '^mobileApps/([^/]+)(/(relationships|updateRelationships))?$') { throw "fake Graph: unknown path $Path" }
+    $Id = $Matches[1]; $Tail = $Matches[3]
+    $App = $Apps | Where-Object id -eq $Id
+    if (-not $App) { throw "fake Graph: (404) Not Found: app $Id" }
+    $Own = { param($A) @(@(@($A.dependencies) | Where-Object { $_ } | ForEach-Object { @{ Kind = "dep"; TargetId = $_.targetId; Type = $_.dependencyType } }) + @(@($A.supersedence) | Where-Object { $_ } | ForEach-Object { @{ Kind = "sup"; TargetId = $_.targetId; Type = $_.supersedenceType } })) }
+    $Name = { param($I) ($Apps | Where-Object id -eq $I).displayName }
+    if ($Method -eq "GET" -and $Tail -eq "relationships") {
+        $Rows = New-Object System.Collections.ArrayList
+        # The service keeps no relationship to an app that is gone
+        foreach ($R in @(& $Own $App | Where-Object { $T = $_.TargetId; $Apps | Where-Object id -eq $T })) {
+            $Row = [ordered]@{ id = "$Id`_$($R.TargetId)"; sourceId = $Id; targetId = $R.TargetId; targetDisplayName = (& $Name $R.TargetId); targetType = "child" }
+            if ($R.Kind -eq "dep") { $Row["@odata.type"] = "#microsoft.graph.mobileAppDependency"; $Row.dependencyType = $R.Type } else { $Row["@odata.type"] = "#microsoft.graph.mobileAppSupersedence"; $Row.supersedenceType = $R.Type }
+            [void]$Rows.Add([pscustomobject]$Row)
+        }
+        foreach ($Other in @($Apps | Where-Object { $_.id -ne $Id })) {
+            foreach ($R in @(& $Own $Other | Where-Object { $_.TargetId -eq $Id })) {
+                $Row = [ordered]@{ id = "$($Other.id)`_$Id"; sourceId = $Other.id; targetId = $Other.id; targetDisplayName = $Other.displayName; targetType = "parent" }
+                if ($R.Kind -eq "dep") { $Row["@odata.type"] = "#microsoft.graph.mobileAppDependency"; $Row.dependencyType = $R.Type } else { $Row["@odata.type"] = "#microsoft.graph.mobileAppSupersedence"; $Row.supersedenceType = $R.Type }
+                [void]$Rows.Add([pscustomobject]$Row)
+            }
+        }
+        return [pscustomobject]@{ value = @($Rows) }
+    }
+    if ($Method -eq "POST" -and $Tail -eq "updateRelationships") {
+        $New = @($Body.relationships)
+        foreach ($R in $New) { if (-not ($Apps | Where-Object id -eq $R.targetId)) { throw "fake Graph: (400) Bad Request: target app $($R.targetId) does not exist" } }
+        $App.dependencies = @($New | Where-Object { [string]$_.'@odata.type' -like "*mobileAppDependency" } | ForEach-Object { [pscustomobject]@{ targetId = $_.targetId; dependencyType = $_.dependencyType } })
+        $App.supersedence = @($New | Where-Object { [string]$_.'@odata.type' -like "*mobileAppSupersedence" } | ForEach-Object { [pscustomobject]@{ targetId = $_.targetId; supersedenceType = $_.supersedenceType } })
+        Write-Store $Apps
+        return
+    }
+    if ($Method -eq "DELETE" -and -not $Tail) {
+        if (@(& $Own $App).Count -gt 0) { throw "fake Graph: (400) BadRequest: Cannot delete this app as it is the parent of another app: $(@(& $Own $App)[0].TargetId)" }
+        $Pointing = @($Apps | Where-Object { $_.id -ne $Id -and @(& $Own $_ | Where-Object { $_.TargetId -eq $Id }).Count -gt 0 })
+        if ($Pointing.Count) { throw "fake Graph: (400) BadRequest: Cannot delete this app as it is the child of another app: $($Pointing[0].id)" }
+        Write-Store @($Apps | Where-Object { $_.id -ne $Id })
+        return
+    }
+    throw "fake Graph: $Method $Path is not supported"
+}
+Export-ModuleMember -Function Invoke-FakeIntuneGraph, Get-IntuneWin32App, Remove-IntuneWin32App, New-IntuneWin32AppPackage, New-IntuneWin32AppDetectionRuleScript, New-IntuneWin32AppDetectionRuleFile,
     New-IntuneWin32AppRequirementRule, New-IntuneWin32AppDependency, Add-IntuneWin32AppDependency, Get-IntuneWin32AppDependency,
     New-IntuneWin32AppSupersedence, Add-IntuneWin32AppSupersedence, Get-IntuneWin32AppSupersedence, Remove-IntuneWin32AppSupersedence,
     Add-IntuneWin32AppAssignmentAllUsers, Add-IntuneWin32AppAssignmentAllDevices, Add-IntuneWin32AppAssignmentGroup, Get-IntuneWin32AppAssignment,

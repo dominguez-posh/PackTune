@@ -2724,12 +2724,11 @@ function Remove-PackTuneApp {
     if (-not $App) { throw "App $Id was not created by this tool or does not exist anymore, nothing was removed" }
     if ($App.IsChocolatey) {
         # The old Chocolatey dependency app: only when none of the tool's apps depends on it any more
-        $Users = @($Apps | Where-Object { -not $_.IsChocolatey -and @(Invoke-IntuneModule { Get-IntuneWin32AppDependency -ID $_.Id } | Where-Object { [string]$_.targetId -eq $Id }).Count -gt 0 })
+        $Users = @($Apps | Where-Object { -not $_.IsChocolatey -and @(Get-PackTuneAppRelationships -AppId $_.Id | Where-Object { $_.Direction -eq "Own" -and $_.Kind -eq "Dependency" -and $_.TargetId -eq $Id }).Count -gt 0 })
         if ($Users.Count -gt 0) { throw "Chocolatey is the dependency of $($Users.Count) app(s) created by this tool. Switch them to the PackTune Runtime first (Switch-PackTuneAppsToRuntime)." }
     }
-    Write-Host "Removing $($App.DisplayName) from Intune"
-    Invoke-IntuneModule { Remove-IntuneWin32App -ID $Id } | Out-Null
-    if (@(Invoke-IntuneModule { Get-IntuneWin32App } | Where-Object { $_.id -eq $Id }).Count -gt 0) { throw "Intune still lists $($App.DisplayName), it was not removed" }
+    Write-Host "Removing $($App.DisplayName) ($Id) from Intune"
+    Remove-PackTuneIntuneApp -Id $Id -Name $App.DisplayName
     Write-Host "$($App.DisplayName) was removed from Intune. Devices keep the installed software and its update task."
 }#Removes an app this tool created from the tenant
 

@@ -338,22 +338,115 @@ function install-chocolatey { Install-PackTuneRuntime }
 function Get-WingetRuntimeWin32ID { param([switch]$NoCreate) Get-PackTuneRuntimeWin32ID -NoCreate:$NoCreate }
 
 function Set-PackTuneRuntimeDependency {
-    # Gives one app the runtime as its AutoInstall dependency. The module replaces the whole dependency list on
-    # every add, so the list is rebuilt: what the app has, without the old dependency apps, plus the runtime.
+    # Gives one app the runtime as its AutoInstall dependency. The relationships are replaced as a whole through Graph (updateRelationships):
+    # what the app has (other dependencies, supersedence), without the old dependency apps, plus the runtime. Then read back.
+    # Returns Before (old dependencies found), Verified.
     param([Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)][string]$RuntimeId, [string[]]$OldIds = @())
-    $Existing = @(Invoke-IntuneModule { Get-IntuneWin32AppDependency -ID $AppId } | Where-Object { $_ })
-    $Keep = @($Existing | Where-Object { [string]$_.targetId -ne $RuntimeId -and [string]$_.targetId -notin $OldIds })
-    Invoke-IntuneModule {
-        $Copies = @(foreach ($Dependency in $Keep) {
-                New-IntuneWin32AppDependency -ID $Dependency.targetId -DependencyType $(if ([string]$Dependency.dependencyType -eq "detect") { "Detect" } else { "AutoInstall" })
-            })
-        $Copies += New-IntuneWin32AppDependency -ID $RuntimeId -DependencyType AutoInstall
-        Add-IntuneWin32AppDependency -ID $AppId -Dependency $Copies
-    } | Out-Null
+    $Own = @(Get-PackTuneAppRelationships -AppId $AppId | Where-Object { $_.Direction -eq "Own" })
+    $Old = @($Own | Where-Object { $_.Kind -eq "Dependency" -and $_.TargetId -in $OldIds })
+    $Keep = @($Own | Where-Object { -not ($_.Kind -eq "Dependency" -and ($_.TargetId -eq $RuntimeId -or $_.TargetId -in $OldIds)) })
+    $Runtime = [pscustomobject]@{ Kind = "Dependency"; Direction = "Own"; TargetId = $RuntimeId; TargetName = ""; DependencyType = "autoInstall"; SupersedenceType = "" }
+    Set-PackTuneAppRelationships -AppId $AppId -Own (@($Keep) + $Runtime)
+    $After = @(Get-PackTuneAppRelationships -AppId $AppId | Where-Object { $_.Direction -eq "Own" -and $_.Kind -eq "Dependency" })
+    $Problems = New-Object System.Collections.ArrayList
+    if (@($After | Where-Object { $_.TargetId -eq $RuntimeId }).Count -eq 0) { [void]$Problems.Add("the runtime is not a dependency after the change") }
+    foreach ($Still in @($After | Where-Object { $_.TargetId -in $OldIds })) { [void]$Problems.Add("still depends on the old dependency app $($Still.TargetName) ($($Still.TargetId))") }
+    $Lost = @($Keep | Where-Object { $K = $_; @(Get-PackTuneAppRelationships -AppId $AppId | Where-Object { $_.Direction -eq "Own" -and $_.Kind -eq $K.Kind -and $_.TargetId -eq $K.TargetId }).Count -eq 0 })
+    foreach ($L in $Lost) { [void]$Problems.Add("lost $($L.Kind) -> $($L.TargetId) by the change") }
+    [pscustomobject]@{ Old = $Old; Problems = @($Problems); Verified = ($Problems.Count -eq 0) }
 }
-
 #endregion
 
+#region app relationships (Microsoft Graph, beta)
+
+function Invoke-PackTuneIntuneGraph {
+    <#
+        One request to deviceAppManagement of Microsoft Graph (beta) with the token of the session, for what the IntuneWin32App
+        module cannot do reliably: reading all relationships of an app and replacing them in one call. Returns the parsed answer.
+        Tests: the fake module answers through Invoke-FakeIntuneGraph.
+    #>
+    param([string]$Method = "GET", [Parameter(Mandatory = $true)][string]$Path, $Body)
+    if (Get-Command Invoke-FakeIntuneGraph -ErrorAction SilentlyContinue) { return (Invoke-IntuneModule { Invoke-FakeIntuneGraph -Method $Method -Path $Path -Body $Body }) }
+    Assert-PackTuneConnection
+    Update-PackTuneToken
+    $Params = @{ Method = $Method; Uri = "https://graph.microsoft.com/beta/deviceAppManagement/$Path"; Headers = $Global:AuthenticationHeader; ErrorAction = "Stop" }
+    if ($null -ne $Body) { $Params.Body = ($Body | ConvertTo-Json -Depth 8); $Params.ContentType = "application/json" }
+    try { return (Invoke-RestMethod @Params) }
+    catch {
+        $Detail = if ($_.ErrorDetails -and $_.ErrorDetails.Message) { [string]$_.ErrorDetails.Message } else { $_.Exception.Message }
+        try { $Parsed = $Detail | ConvertFrom-Json; if ($Parsed.error.message) { $Detail = [string]$Parsed.error.message } } catch { }
+        throw "Graph $Method $Path failed: $Detail"
+    }
+}#One Graph request of the app relationships
+
+function Get-PackTuneAppRelationships {
+    <#
+        All relationships of an app: Direction "Own" (the app depends on / supersedes the target) or "Incoming" (the target depends on /
+        supersedes this app). Kind: Dependency, Supersedence. One row each, with the name of the other app.
+    #>
+    param([Parameter(Mandatory = $true)][string]$AppId)
+    $Answer = Invoke-PackTuneIntuneGraph -Path "mobileApps/$AppId/relationships"
+    foreach ($Entry in @($Answer.value | Where-Object { $_ })) {
+        $Type = [string]$Entry.'@odata.type'
+        $Kind = if ($Type -like "*mobileAppDependency") { "Dependency" } elseif ($Type -like "*mobileAppSupersedence") { "Supersedence" } else { continue }
+        [pscustomobject]@{
+            Kind = $Kind; Direction = $(if ([string]$Entry.targetType -eq "parent") { "Incoming" } else { "Own" })
+            TargetId = [string]$Entry.targetId; TargetName = [string]$Entry.targetDisplayName
+            DependencyType = [string]$Entry.dependencyType; SupersedenceType = [string]$Entry.supersedenceType
+        }
+    }
+}#Relationships of an app (own and incoming)
+
+function Set-PackTuneAppRelationships {
+    # Replaces ALL relationships of the app (dependencies and supersedence) with the rows given (Get-PackTuneAppRelationships rows, Direction Own)
+    param([Parameter(Mandatory = $true)][string]$AppId, $Own)
+    $List = @(foreach ($Row in @($Own | Where-Object { $_ })) {
+            if ($Row.Kind -eq "Dependency") { [ordered]@{ "@odata.type" = "#microsoft.graph.mobileAppDependency"; targetId = $Row.TargetId; dependencyType = $(if ([string]$Row.DependencyType -ieq "detect") { "detect" } else { "autoInstall" }) } }
+            elseif ($Row.Kind -eq "Supersedence") { [ordered]@{ "@odata.type" = "#microsoft.graph.mobileAppSupersedence"; targetId = $Row.TargetId; supersedenceType = $(if ([string]$Row.SupersedenceType -ieq "replace") { "replace" } else { "update" }) } }
+        })
+    [void](Invoke-PackTuneIntuneGraph -Method POST -Path "mobileApps/$AppId/updateRelationships" -Body @{ relationships = $List })
+}#Replaces the relationships of an app
+
+function Remove-PackTuneIntuneApp {
+    <#
+        Deletes one app from the tenant the way the service allows it: an app that other apps depend on is refused (they are named);
+        a superseding app that points at it gets that supersedence taken off; the relationships of the app itself are cleared first
+        (Intune refuses to delete a "parent of another app"); then the delete, and a read back that the app is gone. Every step is logged.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Id, [string]$Name)
+    if (-not $Name) { $Name = $Id }
+    $Relations = @(Get-PackTuneAppRelationships -AppId $Id)
+    $Dependents = @($Relations | Where-Object { $_.Direction -eq "Incoming" -and $_.Kind -eq "Dependency" })
+    if ($Dependents.Count) { throw "$Name ($Id) is kept: $($Dependents.Count) app(s) still depend on it: $((($Dependents | ForEach-Object { "$($_.TargetName) ($($_.TargetId))" }) -join ', ')). Switch or remove those first." }
+    foreach ($Superseding in @($Relations | Where-Object { $_.Direction -eq "Incoming" -and $_.Kind -eq "Supersedence" })) {
+        $Others = @(Get-PackTuneAppRelationships -AppId $Superseding.TargetId | Where-Object { $_.Direction -eq "Own" -and -not ($_.Kind -eq "Supersedence" -and $_.TargetId -eq $Id) })
+        Write-Host "$($Superseding.TargetName) ($($Superseding.TargetId)) supersedes $Name ($Id): taking that supersedence off"
+        Set-PackTuneAppRelationships -AppId $Superseding.TargetId -Own $Others
+    }
+    $Own = @($Relations | Where-Object { $_.Direction -eq "Own" })
+    if ($Own.Count) {
+        Write-Host "$Name ($Id) has $($Own.Count) relationship(s) of its own, clearing them first: $((($Own | ForEach-Object { "$($_.Kind) -> $($_.TargetName) ($($_.TargetId))" }) -join '; '))"
+        Set-PackTuneAppRelationships -AppId $Id -Own @()
+        $Left = @(Get-PackTuneAppRelationships -AppId $Id | Where-Object { $_.Direction -eq "Own" })
+        if ($Left.Count) { throw "The relationships of $Name ($Id) could not be cleared ($($Left.Count) left), the app was not deleted" }
+    }
+    [void](Invoke-PackTuneIntuneGraph -Method DELETE -Path "mobileApps/$Id")
+    if (@(Invoke-IntuneModule { Get-IntuneWin32App } | Where-Object { $_.id -eq $Id }).Count -gt 0) { throw "Intune still lists $Name ($Id), it was not removed" }
+    Write-Host "Deleted $Name ($Id)"
+}#Deletes an app, relationships first
+
+function Get-PackTuneAppRemovalInfo {
+    # For the confirmation before a removal: what the app depends on / supersedes, and who depends on it (the removal is refused then)
+    param([Parameter(Mandatory = $true)][string]$AppId)
+    $Relations = @(Get-PackTuneAppRelationships -AppId $AppId)
+    [pscustomobject]@{
+        Own = @($Relations | Where-Object { $_.Direction -eq "Own" })
+        Dependents = @($Relations | Where-Object { $_.Direction -eq "Incoming" -and $_.Kind -eq "Dependency" })
+        Superseding = @($Relations | Where-Object { $_.Direction -eq "Incoming" -and $_.Kind -eq "Supersedence" })
+    }
+}#What removing an app touches
+
+#endregion
 #region old dependency apps, migration, state
 
 function Get-PackTuneOldDependencyApps {
@@ -369,10 +462,10 @@ function Get-PackTuneOldDependencyApps {
 }#Old Chocolatey app and old winget runtime app
 
 function Get-PackTuneAppsWithRuntimeState {
-    # Per app of the tool: does it depend on the runtime, and on which old dependency apps
+    # Per app of the tool: does it depend on the runtime, and on which old dependency apps (read from the relationships in Graph)
     param([string]$RuntimeId, [string[]]$OldIds = @())
     foreach ($App in @(Get-PackTuneTenantApps | Where-Object { -not $_.IsChocolatey })) {
-        $Targets = @(Invoke-IntuneModule { Get-IntuneWin32AppDependency -ID $App.Id } | Where-Object { $_ } | ForEach-Object { [string]$_.targetId })
+        $Targets = @(Get-PackTuneAppRelationships -AppId $App.Id | Where-Object { $_.Direction -eq "Own" -and $_.Kind -eq "Dependency" } | ForEach-Object { $_.TargetId })
         [pscustomobject]@{
             Id = $App.Id; DisplayName = $App.DisplayName; Source = $App.Source
             HasRuntime = [bool]($RuntimeId -and $Targets -contains $RuntimeId)
@@ -380,7 +473,6 @@ function Get-PackTuneAppsWithRuntimeState {
         }
     }
 }
-
 function Get-PackTuneRuntimeState {
     <#
         What the interface shows under readiness: State is "Missing" (no PackTune Runtime in the tenant), "Migrate"
@@ -405,44 +497,79 @@ function Switch-PackTuneAppsToRuntime {
         Moves the apps of the tool (both sources) to the PackTune Runtime: it becomes their dependency, the old
         dependency apps (Chocolatey, winget runtime) are taken away. Creates the runtime when it is missing. Without
         -AppId all apps of the tool; one row per app that changed. The old apps stay (Get-PackTuneUnusedDependencyApps).
+        Every app is logged (old dependencies found, runtime added, old ones removed) and read back from the tenant; an app whose
+        change is not confirmed fails the run (an error at the end, with the cause per app), so a job never ends as done on a change
+        that did not happen.
     #>
     param([string[]]$AppId)
     Assert-PackTunePrerequisites
     Assert-PackTuneConnection
     Update-PackTuneToken
     $RuntimeId = Get-PackTuneRuntimeWin32ID
-    $OldIds = @(Get-PackTuneOldDependencyApps | ForEach-Object { $_.Id })
+    $OldApps = @(Get-PackTuneOldDependencyApps)
+    $OldIds = @($OldApps | ForEach-Object { $_.Id })
+    $Names = @{}; foreach ($Old in $OldApps) { $Names[[string]$Old.Id] = "$($Old.DisplayName) ($($Old.Id))" }
     $Apps = @(Get-PackTuneAppsWithRuntimeState -RuntimeId $RuntimeId -OldIds $OldIds)
     if ($AppId) { $Apps = @($Apps | Where-Object { $_.Id -in $AppId }) }
-    foreach ($App in $Apps) {
-        if ($App.HasRuntime -and $App.OldDependencies.Count -eq 0) { continue }
-        Set-PackTuneRuntimeDependency -AppId $App.Id -RuntimeId $RuntimeId -OldIds $OldIds
-        [pscustomobject]@{ Id = $App.Id; DisplayName = $App.DisplayName; Source = $App.Source; Added = (-not $App.HasRuntime); OldRemoved = $App.OldDependencies.Count }
+    $Todo = @($Apps | Where-Object { -not ($_.HasRuntime -and $_.OldDependencies.Count -eq 0) })
+    Write-Host "PackTune Runtime is $RuntimeId; $($Todo.Count) of $($Apps.Count) app(s) have to be switched"
+    $Failed = New-Object System.Collections.ArrayList
+    foreach ($App in $Todo) {
+        $Found = if ($App.OldDependencies.Count) { (($App.OldDependencies | ForEach-Object { if ($Names.ContainsKey($_)) { $Names[$_] } else { $_ } }) -join ", ") } else { "none" }
+        Write-Host "$($App.DisplayName) ($($App.Id)): old dependencies found: $Found; runtime $(if ($App.HasRuntime) { 'already there' } else { 'to add' })"
+        try {
+            $Result = Set-PackTuneRuntimeDependency -AppId $App.Id -RuntimeId $RuntimeId -OldIds $OldIds
+            if (-not $Result.Verified) { throw ($Result.Problems -join "; ") }
+            Write-Host "$($App.DisplayName): $(if (-not $App.HasRuntime) { 'PackTune Runtime added, ' })$($App.OldDependencies.Count) old dependency(ies) removed, confirmed in the tenant"
+            [pscustomobject]@{ Id = $App.Id; DisplayName = $App.DisplayName; Source = $App.Source; Added = (-not $App.HasRuntime); OldRemoved = $App.OldDependencies.Count }
+        }
+        catch {
+            [void]$Failed.Add("$($App.DisplayName) ($($App.Id)): $($_.Exception.Message)")
+            Write-Error "$($App.DisplayName) ($($App.Id)) was not switched: $($_.Exception.Message)" -ErrorAction Continue
+        }
     }
+    if ($Failed.Count) { throw "$($Failed.Count) of $($Todo.Count) app(s) could not be switched to PackTune Runtime:`n$($Failed -join "`n")" }
+    # The tenant has the last word: nothing of the processed apps may still depend on an old dependency app or miss the runtime
+    $Check = @(Get-PackTuneAppsWithRuntimeState -RuntimeId $RuntimeId -OldIds $OldIds | Where-Object { $_.Id -in @($Todo | ForEach-Object { $_.Id }) -and (-not $_.HasRuntime -or $_.OldDependencies.Count -gt 0) })
+    if ($Check.Count) { throw "The tenant still shows $($Check.Count) app(s) without the runtime or on an old dependency app: $((($Check | ForEach-Object { "$($_.DisplayName) ($($_.Id))" }) -join ', '))" }
+    Write-Host "Summary: $($Todo.Count) app(s) switched to PackTune Runtime and confirmed in the tenant."
 }#Switches the apps of the tool to the one runtime dependency
-
 function Get-PackTuneUnusedDependencyApps {
     # Old dependency apps that no app in the tenant depends on any more (so they can be removed). Nothing is deleted.
+    # Per old app the apps that still depend on it come along (UsedBy), read from its relationships in Graph.
     param($OldApps)
     if ($null -eq $OldApps) { $OldApps = @(Get-PackTuneOldDependencyApps) }
     $OldApps = @($OldApps | Where-Object { $_ })
     if ($OldApps.Count -eq 0) { return @() }
-    $Used = @{}
-    foreach ($App in @(Invoke-IntuneModule { Get-IntuneWin32App })) {
-        foreach ($Dependency in @(Invoke-IntuneModule { Get-IntuneWin32AppDependency -ID $App.id } | Where-Object { $_ })) { $Used[[string]$Dependency.targetId] = $true }
+    foreach ($Old in $OldApps) {
+        $UsedBy = @(Get-PackTuneAppRelationships -AppId $Old.Id | Where-Object { $_.Direction -eq "Incoming" -and $_.Kind -eq "Dependency" })
+        $Old | Add-Member -NotePropertyName UsedBy -NotePropertyValue $UsedBy -Force
     }
-    @($OldApps | Where-Object { -not $Used.ContainsKey([string]$_.Id) })
+    @($OldApps | Where-Object { @($_.UsedBy).Count -eq 0 })
 }#Old dependency apps nothing depends on
 
 function Remove-PackTuneUnusedDependencyApps {
-    # Removes the old dependency apps nothing depends on (on request, never automatic). -WhatIf only lists them.
+    # Removes the old dependency apps nothing depends on (on request, never automatic). -WhatIf only lists them. Every app is logged
+    # with name and id (deleted, or kept with the apps that still depend on it); a delete that does not hold fails the run.
     param([switch]$WhatIf)
-    foreach ($Old in @(Get-PackTuneUnusedDependencyApps)) {
-        if (-not $WhatIf) { Invoke-IntuneModule { Remove-IntuneWin32App -ID $Old.Id } | Out-Null }
-        [pscustomobject]@{ Id = $Old.Id; DisplayName = $Old.DisplayName; Kind = $Old.Kind; Removed = (-not $WhatIf) }
+    $All = @(Get-PackTuneOldDependencyApps)
+    $Unused = @(Get-PackTuneUnusedDependencyApps -OldApps $All)
+    foreach ($Old in @($All | Where-Object { $_.Id -notin @($Unused | ForEach-Object { $_.Id }) })) {
+        Write-Host "Kept $($Old.DisplayName) ($($Old.Id)): still used by $((@($Old.UsedBy) | ForEach-Object { "$($_.TargetName) ($($_.TargetId))" }) -join ', ')"
     }
+    if ($Unused.Count -eq 0) { Write-Host "No old dependency app is unused: nothing to remove." }
+    $Failed = New-Object System.Collections.ArrayList
+    foreach ($Old in $Unused) {
+        $Removed = $false
+        if ($WhatIf) { Write-Host "Would delete $($Old.DisplayName) ($($Old.Id)): nothing depends on it" }
+        else {
+            try { Remove-PackTuneIntuneApp -Id $Old.Id -Name $Old.DisplayName; $Removed = $true }
+            catch { [void]$Failed.Add("$($Old.DisplayName) ($($Old.Id)): $($_.Exception.Message)"); Write-Error "$($Old.DisplayName) ($($Old.Id)) was not deleted: $($_.Exception.Message)" -ErrorAction Continue }
+        }
+        [pscustomobject]@{ Id = $Old.Id; DisplayName = $Old.DisplayName; Kind = $Old.Kind; Removed = $Removed }
+    }
+    if ($Failed.Count) { throw "$($Failed.Count) old dependency app(s) could not be removed:`n$($Failed -join "`n")" }
 }#Removes unused old dependency apps
-
 # What the interface already calls: apps without the runtime dependency / adding it. Now for both sources; the old
 # dependency apps are switched over at the same time.
 function Get-PackTuneAppsWithoutRuntime {

@@ -234,8 +234,14 @@ $script:GraphDown = $null            # @{ Since; Cause; Raw } while the last rea
 $script:GraphReadKinds = @('tenant', 'deps', 'customlist', 'counts', 'supercheck')
 $script:GraphRetryDelay = 15
 $script:GraphRetryAt = $null
+function Test-GraphClientError([string]$Text) {
+    # The service answered and said no (permission, not found, bad request): Graph is reachable, so this is no outage. The .NET text
+    # "The remote server returned an error: (403) Forbidden" contains "remote server" and must not look like a network problem.
+    $Text -match '(?i)\(40[0345]\)|\b40[0345]\b|forbidden|verboten|bad request|ltige anforderung|not found|nicht gefunden|Authorization_RequestDenied|insufficient privileges'
+}
 function Test-GraphReadFailureText([string]$Text) {
-    $Text -match '(?i)remoteserver|remotename|remote name|remote server|could not be resolved|unable to connect|no such host|name or service not known|timed out|timeout|zeit(ue|Ã¼)berschreitung|network|netzwerk|connection (was )?(closed|refused|reset)|\b50[0234]\b|service unavailable|bad gateway|\b401\b|\b403\b|unauthorized|forbidden|verboten|InvalidAuthenticationToken'
+    if (Test-GraphClientError $Text) { return $false }
+    $Text -match '(?i)remoteserver|remotename|remote name|remote server|could not be resolved|unable to connect|no such host|name or service not known|timed out|timeout|zeit(ue|Ã¼)berschreitung|network|netzwerk|connection (was )?(closed|refused|reset)|\b50[0234]\b|service unavailable|bad gateway|\b401\b|unauthorized|InvalidAuthenticationToken'
 }
 function Update-GraphDownBanner {
     $d = $script:GraphDown
@@ -1155,7 +1161,7 @@ $State = if ($Avail.Available) { try { Get-InsightStatusScriptState -Context $Ct
     [void](Start-UiTask -Kind 'statuscheck' -Title 'Checking the status script' -Hidden -Arguments @{ Fake = $script:InsightFake } -Work $work -OnDone {
         param($Result, $Job)
         $r = @($Result | Where-Object { $_ -and $null -ne $_.Available }) | Select-Object -First 1
-        if ($r -and -not $r.Available -and ([string]$r.Reason -match '(?i)remote|network|netzwerk|timed out|timeout|resolved|\b50[0234]\b')) { Set-GraphDown ([string]$r.Reason); $script:StatusScript = $null; Update-Readiness; return }
+        if ($r -and -not $r.Available -and -not (Test-GraphClientError ([string]$r.Reason)) -and ([string]$r.Reason -match '(?i)remote|network|netzwerk|timed out|timeout|resolved|\b50[0234]\b')) { Set-GraphDown ([string]$r.Reason); $script:StatusScript = $null; Update-Readiness; return }
         if ($Job.Status -ne 'succeeded' -or -not $r) { $script:StatusScript = @{ State = 'NotAvailable'; Id = $null; Reason = 'It could not be checked.' } }
         else { $script:StatusScript = @{ State = $(if (-not $r.Available) { 'NotAvailable' } elseif ($r.Id) { 'Present' } else { 'Missing' }); Id = $r.Id; Reason = $r.Reason }; if (-not $r.Available) { Write-UiLog "Status report check: $($r.Reason)" 'Warning' } }
         Update-Readiness
@@ -1997,10 +2003,39 @@ Add-Click $ui.BtnCustomOpen {
     $app = Get-SelectedCustomApp
     if ($app) { Start-Process "https://intune.microsoft.com/#view/Microsoft_Intune_Apps/SettingsMenu/~/0/appId/$($app.Id)" }
 }
+function Confirm-AppRemoval {
+    # Reads the relationships of the app in the background, then asks (naming what is cleared first); apps that depend on it stop the removal.
+    # $Proceed gets called after the yes. In the smoke test the question is answered at once.
+    param([Parameter(Mandatory = $true)]$App, [Parameter(Mandatory = $true)][string]$Question, [Parameter(Mandatory = $true)][scriptblock]$Proceed)
+    if ($env:PACKTUNE_SMOKE) { if (Confirm-Action $Question 'Remove from Intune' 'Remove' 'Cancel') { & $Proceed }; return }
+    $script:RemovalPending = @{ Question = $Question; Proceed = $Proceed; Name = $App.DisplayName }
+    Update-UiToken
+    [void](Start-UiTask -Kind 'removeinfo' -Title "Checking what $($App.DisplayName) is connected to" -Display $App.DisplayName -Hidden -NeedsAuth -Pool $script:UserPool -Arguments @{ Id = $App.Id } -Work 'param($Id) Get-PackTuneAppRemovalInfo -AppId $Id' -OnDone {
+        param($Result, $Job)
+        $pending = $script:RemovalPending; $script:RemovalPending = $null
+        if (-not $pending) { return }
+        $info = @($Result | Where-Object { $_ -and $null -ne $_.Own }) | Select-Object -First 1
+        if ($Job.Status -eq 'failed' -or -not $info) { Show-Toast "Could not check what $($pending.Name) is connected to, see Activity." 'bad'; return }
+        $deps = @($info.Dependents)
+        if ($deps.Count) {
+            $names = ($deps | ForEach-Object { "$($_.TargetName) ($($_.TargetId))" }) -join ", "
+            Write-UiLog "[$($pending.Name)] not removed: $($deps.Count) app(s) depend on it: $names" 'Warning'
+            Show-Toast "$($pending.Name) is kept: $($deps.Count) app(s) depend on it ($(($deps | Select-Object -First 3 | ForEach-Object { $_.TargetName }) -join ', ')). Switch or remove those first."  'warn'
+            return
+        }
+        $extra = ""
+        $own = @($info.Own); $sup = @($info.Superseding)
+        if ($own.Count) { $extra += "`n`nIntune only deletes it after its own relationships are cleared. They are cleared first:`n" + (($own | Select-Object -First 8 | ForEach-Object { "- $($_.Kind) -> $($_.TargetName)" }) -join "`n") }
+        if ($sup.Count) { $extra += "`n`nThese apps supersede it, the supersedence is taken off them:`n" + (($sup | Select-Object -First 8 | ForEach-Object { "- $($_.TargetName)" }) -join "`n") }
+        if (Confirm-Action ($pending.Question + $extra) 'Remove from Intune' 'Remove' 'Cancel') { & $pending.Proceed }
+    })
+}
 Add-Click $ui.BtnCustomRemove {
     $app = Get-SelectedCustomApp
     if (-not $app) { return }
-    if (-not (Confirm-Action "Remove '$($app.DisplayName) $($app.Version)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software." 'Remove from Intune' 'Remove' 'Cancel')) { return }
+    Confirm-AppRemoval $app "Remove '$($app.DisplayName) $($app.Version)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software." { Start-CustomRemoval $app }
+}
+function Start-CustomRemoval($app) {
     $deleteStore = $false
     if ($script:Settings.StoreSiteUrl -and $app.AppId -and @($script:CustomApps | Where-Object { $_.AppId -eq $app.AppId }).Count -le 1) {
         $deleteStore = Confirm-Action "This is the last Intune app of '$($app.DisplayName)'.`n`nAlso delete its stored files (packages, original installer files, certificates) from the package store?`n`nDelete files: delete them (SharePoint keeps them in its recycle bin).`nKeep files: keep them, so the application can still be exported." 'Delete stored files' 'Delete files' 'Keep files'
@@ -3067,6 +3102,7 @@ function Start-RuntimeSwitch {
         param($Result, $Job)
         $n = @($Result | Where-Object { $_ -and $_.Id }).Count
         if ($Job.Status -eq 'succeeded') { Show-Toast "$n app(s) now depend on PackTune Runtime." 'ok' }
+        else { Write-UiLog "[Switch to PackTune Runtime] not all apps were switched, see the messages above." 'Error'; Show-Toast 'Not all apps could be switched to PackTune Runtime, see Activity.' 'bad' }
         $script:RuntimeInfo = $null; $script:WingetNoRuntime = @()
         Start-DependencyCheck
         Update-TenantRows
@@ -3085,6 +3121,7 @@ function Start-OldDependencyCleanup {
         param($Result, $Job)
         $n = @($Result | Where-Object { $_.Removed }).Count
         if ($Job.Status -eq 'succeeded') { Show-Toast "$n old dependency app(s) removed." 'ok' }
+        else { Show-Toast 'Not all old dependency apps could be removed, see Activity.' 'bad' }
         $script:RuntimeInfo = $null; $script:TenantApps = $null
         Start-TenantRefresh
     })
@@ -3236,7 +3273,9 @@ Add-Click $ui.BtnTenantRemove {
     if (-not $app) { return }
     $others = @($script:TenantApps | Where-Object { -not $_.IsChocolatey -and $_.Source -eq 'Chocolatey' }).Count
     if ($app.IsChocolatey -and $others -gt 0) { throw "Chocolatey is the dependency of the $others app(s) created by this tool. Remove those first." }
-    if (-not (Confirm-Action "Remove '$($app.DisplayName)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software and its update task; nothing is uninstalled." 'Remove from Intune' 'Remove' 'Cancel')) { return }
+    Confirm-AppRemoval $app "Remove '$($app.DisplayName)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software and its update task; nothing is uninstalled." { Start-TenantRemoval $app }
+}
+function Start-TenantRemoval($app) {
     Update-UiToken
     [void](Start-UiTask -Kind 'remove' -Title "Removing $($app.DisplayName) from Intune" -Display $app.DisplayName -Package $app.Package -NeedsAuth -Arguments @{ Id = $app.Id; Source = $app.Source } -Work 'param($Id, $Source) Remove-PackTuneApp -Id $Id' -OnDone {
         param($Result, $Job)
