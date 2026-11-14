@@ -560,6 +560,7 @@ $timer.Add_Tick({
         # App cards fill up while the feed lookups run
         if ($script:Refreshing -and $script:Tick % 4 -eq 0) { Update-RefreshButton }
         if ($script:Refreshing -and $script:Tick % 8 -eq 0 -and $script:CurrentPage -eq 'Apps') { Update-AppList -Reload }
+        if ($script:PendingApps.Count -and $script:PendingNextAt -and (Get-Date) -ge $script:PendingNextAt) { Invoke-PendingRetry }
         if ($script:MetaRefreshPending -and $script:Tick % 4 -eq 0) {
             $script:MetaRefreshPending = $false
             if ($script:CurrentPage -eq 'Apps') { Update-AppList }
@@ -802,7 +803,7 @@ function Show-Page([string]$Name) {
     switch ($Name) {
         'Start'    { $script:SandboxState = $null; Update-Readiness; if (-not $script:StoreState) { Start-StoreCheck } }
         'Apps'     { if (-not $script:AppListBuilt) { Set-AppsLoading $true }; $script:PrefetchPending = $true; Update-AppList -Reload }
-        'Custom'   { if ((Test-SignedIn) -and $null -eq $script:CustomApps) { Start-CustomRefresh } else { Update-CustomRows } }
+        'Custom'   { if (-not $script:StoreState) { Start-StoreCheck }; if ((Test-SignedIn) -and $null -eq $script:CustomApps) { Start-CustomRefresh } else { Update-CustomRows } }
         'Tenant'   { if ((Test-SignedIn) -and $null -eq $script:TenantApps -and -not (Test-TaskRunning 'tenant')) { Start-TenantRefresh } else { Update-TenantRows } }
         'Settings' { Update-SettingsView }
     }
@@ -1601,6 +1602,7 @@ function Get-IntentsText($Intents) {
     if (-not $i.Count) { return 'Not assigned' }
     (@($i | ForEach-Object { switch ($_) { 'required' { 'Required' } 'available' { 'Available' } default { $_ } } }) -join ', ')
 }
+function Test-StoreReady { [bool]($script:StoreState -and $script:StoreState.State -eq 'Ready') }
 function Update-CustomRows {
     $script:CustomRows.Clear()
     $apps = @($script:CustomApps | Where-Object { $_ })
@@ -1621,14 +1623,22 @@ function Update-CustomRows {
     else { "$count custom application(s) in your tenant.$(if ($script:GraphDown) { ' Last known list, not current.' }) An MSI is read, packaged and deployed automatically." }
     $ui.TxtCustomEmpty.Text = if (-not (Test-SignedIn)) { 'Sign in first.' } elseif ($null -eq $script:CustomApps) { '' } elseif (-not $apps.Count) { 'No custom applications yet. New application starts with an MSI.' } else { '' }
     $ui.BtnCustomRefresh.IsEnabled = (Test-SignedIn)
+    # Without a ready package store nothing new can be made: the page says so and offers the setup; existing applications stay (read only, removable)
+    $ready = Test-StoreReady
+    $ui.BoxCustomStore.Visibility = ConvertTo-Vis ((Test-SignedIn) -and -not $ready)
+    $ui.TxtCustomStoreBanner.Text = if ($script:StoreState -and $script:StoreState.Message -and $script:StoreState.State -ne 'Ready') { "Set up the package store first. $($script:StoreState.Message) Custom applications keep every version there, so New application, New version and Export need it. Existing applications are shown and can be removed." } else { 'Set up the package store first. Custom applications keep every version in the package store, so New application, New version and Export need it. Existing applications are shown and can be removed.' }
+    $ui.BtnCustomNew.IsEnabled = $ready
+    $ui.BtnCustomNew.ToolTip = if ($ready) { $null } else { 'Set up the package store first' }
+    if ($ui.LstCustom.SelectedItem) { $ui.BtnCustomNewVersion.IsEnabled = $ready; $ui.BtnCustomExport.IsEnabled = $ready -and [bool]$ui.LstCustom.SelectedItem.Data.Manifest }
 }
+Add-Click $ui.BtnCustomStoreSetup { Show-StoreDialog }
 function Start-CustomRefresh {
     if (-not (Test-SignedIn) -or (Test-TaskRunning 'customlist')) { Update-CustomRows; return }
     Update-UiToken
     [void](Start-UiTask -Kind 'customlist' -Title 'Reading the custom applications' -Display 'Custom applications' -Hidden -NeedsAuth -Pool $script:UserPool -Work 'Get-PackTuneCustomApps -WithAssignments' -OnDone {
         param($Result, $Job)
         # (an if-expression would turn an empty list into $null)
-        if ($Job.Status -eq 'succeeded') { $script:CustomApps = @($Result | Where-Object { $_ -and $_.Id }) } elseif (-not $script:GraphDown) { $script:CustomApps = $null }   # a failed read keeps the last list
+        if ($Job.Status -eq 'succeeded') { $script:CustomApps = @(Merge-PendingApps 'custom' @($Result | Where-Object { $_ -and $_.Id })) } elseif (-not $script:GraphDown) { $script:CustomApps = $null }   # a failed read keeps the last list
         if ($Job.Status -eq 'failed') { Write-UiLog 'The custom applications could not be read, see above.' 'Warning' }
         Update-CustomRows
     })
@@ -1647,10 +1657,12 @@ function Show-CustomDetails($App) {
     $ui.TxtCustomProduct.Text = if ($isMsix) { $App.Identity } else { $App.ProductCode }
     $ui.TxtCustomUpgrade.Text = if ($isMsix) { $App.Thumbprint } else { $App.UpgradeCode }
     $ui.TxtCustomAssigned.Text = Get-IntentsText $App.Intents
-    $ui.BtnCustomNewVersion.IsEnabled = $true
+    $ui.BtnCustomNewVersion.IsEnabled = (Test-StoreReady)
+    $ui.BtnCustomNewVersion.ToolTip = if (Test-StoreReady) { $null } else { 'Set up the package store first' }
     $ui.TxtCustomVersionHint.Text = if ($isMsix) { 'Rebuilds the package on top of the previous version (restored from the package store) with a new installer: a new app supersedes this one on the devices.' } else { 'Pick a newer MSI: a new app is created that supersedes this one on the devices.' }
     $ui.TxtCustomStore.Text = if ($App.Manifest) { "Kept in the package store (manifest $($App.Manifest.Substring(0, 16))...$(if ($App.Manifest.Length -lt 64) { ', short anchor of the first release: record the full one with Set-PackTuneCustomManifestAnchor' }))." } elseif ($isMsix) { 'No manifest in the notes: not kept in the package store.' } else { 'Not kept in the package store (none was set up when it was deployed).' }
-    $ui.BtnCustomExport.IsEnabled = [bool]$App.Manifest
+    $ui.BtnCustomExport.IsEnabled = [bool]$App.Manifest -and (Test-StoreReady)
+    $ui.BtnCustomExport.ToolTip = if (Test-StoreReady) { $null } else { 'Set up the package store first' }
 }
 $ui.LstCustom.Add_SelectionChanged({
     $row = $ui.LstCustom.SelectedItem
@@ -1902,10 +1914,14 @@ function Show-CustomDialog([string]$Mode, $App) {
     Set-CustomKind $(if ($Mode -eq 'Update') { 'Other' } else { 'Msi' })
     Show-Dialog 'DlgCustom'
 }
-Add-Click $ui.BtnCustomNew { Show-CustomDialog 'New' $null }
+Add-Click $ui.BtnCustomNew {
+    if (-not (Test-StoreReady)) { Show-Toast 'Set up the package store first (Start page, Package store).' 'warn'; return }
+    Show-CustomDialog 'New' $null
+}
 Add-Click $ui.BtnCustomNewVersion {
     $app = Get-SelectedCustomApp
     if (-not $app) { return }
+    if (-not (Test-StoreReady)) { Show-Toast 'Set up the package store first (Start page, Package store).' 'warn'; return }
     if ($app.Kind -eq 'msix') {
         $studio = Get-CustomCaptureState
         if ($studio.State -ne 'Ready') { throw $studio.Message }
@@ -1931,10 +1947,12 @@ Add-Click $ui.BtnCustomDeploy {
             Close-Dialog
             Update-UiToken
             $work = 'param($Id, $Version, $Folder, $Entry, $Args, $Network, $Icon) $p = @{ AppId = $Id; Version = $Version; AllowNetwork = [bool]$Network }; if ($Icon) { $p.IconBase64 = $Icon }; if ($Folder) { $p.InstallerFolder = $Folder }; if ($Entry) { $p.EntryPoint = $Entry }; if ($Args) { $p.Arguments = $Args }; Update-PackTuneCustomOtherApp @p'
+            $script:CustomContext["$($old.DisplayName) $version"] = @{ Name = $old.DisplayName; Kind = 'msix'; AppId = $old.AppId; Version = $version; Publisher = $old.Publisher; Intents = [string]$old.Intents }
             [void](Start-UiTask -Kind 'custom' -Title "Capturing version $version of $($old.DisplayName) in Windows Sandbox (a few minutes)" -Display "$($old.DisplayName) $version" -NeedsAuth -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
                 param($Result, $Job)
                 if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] published: devices with the old version get it through supersedence." 'Success'; Show-Toast "$($Job.Display) was published." 'ok' }
-                $script:CustomApps = $null; Start-CustomRefresh
+                if ($Job.Status -eq 'succeeded') { Add-CreatedCustomApp $Result $Job }
+                Start-CustomRefresh
             })
         }
         else {
@@ -1945,10 +1963,12 @@ Add-Click $ui.BtnCustomDeploy {
                 Icon = $(if ($script:CustomIconFile) { [Convert]::ToBase64String([IO.File]::ReadAllBytes($script:CustomIconFile)) } else { '' })
                 Fallback = $(if ($script:CustomIconAuto) { try { Get-ChocoIconBase64 -ChocoName 'custom-other' -IconFile $script:CustomIconAuto -NoIconPrompt -NoFeedLookup } catch { '' } } else { '' }) }
             $work = 'param($Folder, $Entry, $Args, $Name, $Version, $Publisher, $Assignment, $Network, $Icon, $Fallback) $p = @{ Folder = $Folder; EntryPoint = $Entry; Arguments = $Args; Name = $Name; Version = $Version; Publisher = $Publisher; Assignment = $Assignment; AllowNetwork = [bool]$Network }; if ($Icon) { $p.IconBase64 = $Icon }; if ($Fallback) { $p.FallbackIconBase64 = $Fallback }; New-PackTuneCustomOtherApp @p'
+            $script:CustomContext["$name $version"] = @{ Name = $name; Kind = 'msix'; AppId = ''; Version = $version; Publisher = $ui.TxtOtherPublisher.Text.Trim(); Intents = $assign.ToLower() }
             [void](Start-UiTask -Kind 'custom' -Title "Capturing $name in Windows Sandbox (a few minutes), then deploying" -Display "$name $version" -NeedsAuth -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
                 param($Result, $Job)
                 if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] captured, stored and created in Intune." 'Success'; Show-Toast "$($Job.Display) is in Intune." 'ok' }
-                $script:CustomApps = $null; Start-CustomRefresh
+                if ($Job.Status -eq 'succeeded') { Add-CreatedCustomApp $Result $Job }
+                Start-CustomRefresh
             })
         }
         Show-Page 'Activity'
@@ -1962,22 +1982,26 @@ Add-Click $ui.BtnCustomDeploy {
         $old = $script:CustomUpdateApp
         Close-Dialog
         Update-UiToken
+        $script:CustomContext["$name $($script:CustomInfo.Version)"] = @{ Name = $name; Kind = 'msi'; AppId = $old.AppId; Version = [string]$script:CustomInfo.Version; Publisher = [string]$script:CustomInfo.Manufacturer; Intents = [string]$old.Intents }
         [void](Start-UiTask -Kind 'custom' -Title "New version $($script:CustomInfo.Version) of $($old.DisplayName)" -Display "$name $($script:CustomInfo.Version)" -NeedsAuth -Arguments @{ Id = $old.Id; Msi = $msi; Props = $props; Icon = $script:CustomIconFile } `
             -Work 'param($Id, $Msi, $Props, $Icon) $p = @{ AppId = $Id; MsiPath = $Msi; Properties = $Props }; if ($Icon) { $p.IconFile = $Icon }; Publish-PackTuneCustomVersion @p' -OnDone {
             param($Result, $Job)
             if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] published: devices with the old version get it through supersedence." 'Success'; Show-Toast "$($Job.Display) was published." 'ok' }
-            $script:CustomApps = $null; Start-CustomRefresh
+            if ($Job.Status -eq 'succeeded') { Add-CreatedCustomApp $Result $Job }
+            Start-CustomRefresh
         })
     }
     else {
         $assign = $script:AssignValues[[Math]::Max(0, $ui.CmbCustomAssign.SelectedIndex)]
         Close-Dialog
         Update-UiToken
+        $script:CustomContext["$name $($script:CustomInfo.Version)"] = @{ Name = $name; Kind = 'msi'; AppId = ''; Version = [string]$script:CustomInfo.Version; Publisher = [string]$script:CustomInfo.Manufacturer; Intents = $assign.ToLower() }
         [void](Start-UiTask -Kind 'custom' -Title "Deploying $name ($($script:CustomInfo.Version)) from the MSI" -Display "$name $($script:CustomInfo.Version)" -NeedsAuth -Arguments @{ Msi = $msi; Assignment = $assign; Props = $props; Icon = $script:CustomIconFile } `
             -Work 'param($Msi, $Assignment, $Props, $Icon) $p = @{ MsiPath = $Msi; Assignment = $Assignment; Properties = $Props }; if ($Icon) { $p.IconFile = $Icon }; New-PackTuneCustomMsiApp @p' -OnDone {
             param($Result, $Job)
             if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] created in Intune." 'Success'; Show-Toast "$($Job.Display) is in Intune." 'ok' }
-            $script:CustomApps = $null; Start-CustomRefresh
+            if ($Job.Status -eq 'succeeded') { Add-CreatedCustomApp $Result $Job }
+            Start-CustomRefresh
         })
     }
     Show-Page 'Activity'
@@ -2043,6 +2067,7 @@ Add-Click $ui.BtnCustomRemove {
 }
 function Start-CustomRemoval($app) {
     if (-not (Test-AppId $app)) { return }
+    $script:RemovingIds[[string]$app.DisplayName] = [string]$app.Id
     $deleteStore = $false
     if ($script:Settings.StoreSiteUrl -and $app.AppId -and @($script:CustomApps | Where-Object { $_.AppId -eq $app.AppId }).Count -le 1) {
         $deleteStore = Confirm-Action "This is the last Intune app of '$($app.DisplayName)'.`n`nAlso delete its stored files (packages, original installer files, certificates) from the package store?`n`nDelete files: delete them (SharePoint keeps them in its recycle bin).`nKeep files: keep them, so the application can still be exported." 'Delete stored files' 'Delete files' 'Keep files'
@@ -2051,13 +2076,14 @@ function Start-CustomRemoval($app) {
     $work = if ($deleteStore) { 'param($Id) Remove-PackTuneCustomApp -Id $Id -DeleteStore' } else { 'param($Id) Remove-PackTuneCustomApp -Id $Id' }
     [void](Start-UiTask -Kind 'custom' -Title "Removing $($app.DisplayName) from Intune" -Display $app.DisplayName -NeedsAuth -Arguments @{ Id = $app.Id } -Work $work -OnDone {
         param($Result, $Job)
-        if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] removed from Intune." 'Success'; Show-Toast "$($Job.Display) was removed from Intune." 'ok' }
-        $script:CustomApps = $null; Show-CustomDetails $null; Start-CustomRefresh
+        if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] removed from Intune." 'Success'; Show-Toast "$($Job.Display) was removed from Intune." 'ok'; Remove-ListedApp ([string]$script:RemovingIds[[string]$Job.Display]) 'custom'; Show-CustomDetails $null }
+        Start-CustomRefresh
     })
 }
 Add-Click $ui.BtnCustomExport {
     $app = Get-SelectedCustomApp
     if (-not $app) { return }
+    if (-not (Test-StoreReady)) { Show-Toast 'Set up the package store first (Start page, Package store).' 'warn'; return }
     if (-not $script:Settings.StoreSiteUrl) { throw 'No package store is set up (Start page, Package store).' }
     $target = $script:ExportTarget
     if (-not $target) {
@@ -2093,7 +2119,7 @@ function Save-StoreSiteUrl([string]$Url, [string]$Name) {
 function Start-StoreCheck {
     if (-not (Test-SignedIn) -or (Test-TaskRunning 'storecheck')) { return }
     # Tests: no request to Microsoft Graph from the smoke run
-    if ($env:PACKTUNE_SMOKE) { $script:StoreState = [pscustomobject]@{ State = 'Missing'; Message = 'The PackTune site does not exist in this tenant yet (smoke test). An administrator sets it up once (Set up).'; SiteUrl = 'https://contoso.sharepoint.com/sites/PackTune' }; Update-Readiness; return }
+    if ($env:PACKTUNE_SMOKE) { $script:StoreState = if ($script:StoreSmokeState) { $script:StoreSmokeState } else { [pscustomobject]@{ State = 'Missing'; Message = 'The PackTune site does not exist in this tenant yet (smoke test). An administrator sets it up once (Set up).'; SiteUrl = 'https://contoso.sharepoint.com/sites/PackTune' } }; Update-Readiness; Update-CustomRows; return }
     Update-UiToken
     [void](Start-UiTask -Kind 'storecheck' -Title 'Checking the package store' -Display 'Package store' -Hidden -NeedsAuth -Pool $script:UserPool -Work 'Get-PackTuneStoreState | Select-Object State, Message, SiteUrl' -OnDone {
         param($Result, $Job)
@@ -2102,6 +2128,7 @@ function Start-StoreCheck {
         # Found and usable: remembered, so the rest of the tool knows a store exists (the address of the standard site, nothing was typed)
         if ($script:StoreState.State -eq 'Ready' -and -not $script:Settings.StoreSiteUrl -and $script:StoreState.SiteUrl) { Save-StoreSiteUrl ([string]$script:StoreState.SiteUrl) }
         Update-Readiness
+        Update-CustomRows
         if ($script:OpenDialog -eq 'DlgStore') { Update-StoreDialog }
     })
 }
@@ -2669,6 +2696,8 @@ else { New-PackTuneChocolateyApp -ChocoName $Id @Params }
     foreach ($item in $todo) {
         $icon = $script:CustomIcons[$item.Key]
         $label = Get-SourceLabel $item.Source
+        $pinned = if ($version -eq 'current') { try { [string]$script:Shared.Meta[(Get-MetaKey $item.Id $item.Source)].Version } catch { '' } } else { '' }
+        $script:DeployContext[(Get-MetaKey $item.Id $item.Source)] = @{ UpdateMode = $policy.UpdateMode; GraceHours = $policy.GraceHours; Version = $pinned; Intents = $assignment.ToLower() }
         [void](Start-UiTask -Kind 'deploy' -Title "Deploying $($item.Title) from $label ($assignment)" -Display $item.Title -Package $item.Id -NeedsAuth -Work $work -OnDone {
             param($Result, $Job)
             switch ($Job.Status) {
@@ -2680,10 +2709,10 @@ else { New-PackTuneChocolateyApp -ChocoName $Id @Params }
                     $appId = @($Result | Where-Object { $_ -is [string] }) | Select-Object -First 1
                     $Job.Row['Open'] = [string]$appId; Update-JobRow $Job
                     Show-Toast "$($Job.Display) was created in Intune." 'ok'
+                    if ($appId) { $c = $script:DeployContext[$key]; Add-CreatedTenantApp -Id ([string]$appId) -Name $Job.Display -Package $Job.Package -Source $Job.Source -Version $(if ($c) { [string]$c.Version } else { '' }) -UpdateMode $(if ($c) { [string]$c.UpdateMode } else { 'Startup' }) -GraceHours $(if ($c) { [int]$c.GraceHours } else { 48 }) -Intents $(if ($c) { [string]$c.Intents } else { '' }) }
                 }
                 'skipped' { Show-Toast "$($Job.Display) was skipped: it is already in the tenant." 'warn' }
             }
-            $script:TenantApps = $null
             if (-not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'deploy' }).Count) { Start-TenantRefresh }
             Update-AppList
         } -Arguments @{ Id = $item.Id; Source = $item.Source; Assignment = $assignment; Architecture = $script:Settings.Architecture; IconBase64 = $icon; UpdateMode = $policy.UpdateMode; GraceHours = $policy.GraceHours; Version = $version; Schedule = $schedule })
@@ -2926,6 +2955,76 @@ function Start-AppIconTask {
     })
 }
 
+# ---- apps created or removed a moment ago: Graph lists can lag behind (eventual consistency). A created app is inserted from the create
+# response and kept until the list contains it (at most two minutes, refreshed with a growing pause); a removed one is hidden for the same time.
+$script:PendingApps = @{}        # app id -> @{ Kind = 'tenant' | 'custom'; App; Added }
+$script:RemovedApps = @{}        # app id -> time of the confirmed delete
+$script:PendingNextAt = $null; $script:PendingStep = 0
+$script:PendingSteps = @(5, 10, 20, 30)
+$script:DeployContext = @{}; $script:ApplyContext = @{}; $script:CustomContext = @{}; $script:RemovingIds = @{}
+function Add-PendingApp([string]$Kind, $App) {
+    if (-not $App -or -not [string]$App.Id) { return }
+    $script:PendingApps[[string]$App.Id] = @{ Kind = $Kind; App = $App; Added = (Get-Date) }
+    $script:PendingStep = 0; $script:PendingNextAt = (Get-Date).AddSeconds($script:PendingSteps[0])
+}
+function Add-RemovedApp([string]$Id) { if ($Id) { $script:RemovedApps[$Id] = Get-Date; [void]$script:PendingApps.Remove($Id) } }
+function Merge-PendingApps([string]$Kind, $Listed) {
+    # The listed apps without the ones removed a moment ago, plus the created ones the list does not know yet (dropped from pending once listed or after two minutes)
+    $limit = (Get-Date).AddMinutes(-2)
+    foreach ($id in @($script:RemovedApps.Keys)) { if ($script:RemovedApps[$id] -lt $limit) { $script:RemovedApps.Remove($id) } }
+    $result = New-Object System.Collections.ArrayList; $ids = @{}
+    foreach ($a in @($Listed)) { if (-not $a) { continue }; if ($script:RemovedApps.ContainsKey([string]$a.Id)) { continue }; [void]$result.Add($a); $ids[[string]$a.Id] = $true }
+    foreach ($id in @($script:PendingApps.Keys)) {
+        $p = $script:PendingApps[$id]
+        if ($p.Kind -ne $Kind) { continue }
+        if ($ids.ContainsKey($id) -or $p.Added -lt $limit) { $script:PendingApps.Remove($id); continue }
+        [void]$result.Add($p.App)
+    }
+    $result.ToArray()
+}
+function Invoke-PendingRetry {
+    # Called from the timer: reads the list again while a created app is still missing from it
+    $limit = (Get-Date).AddMinutes(-2)
+    foreach ($id in @($script:PendingApps.Keys)) { if ($script:PendingApps[$id].Added -lt $limit) { $script:PendingApps.Remove($id) } }
+    if ($script:PendingApps.Count -eq 0) { $script:PendingNextAt = $null; return }
+    $kinds = @($script:PendingApps.Values | ForEach-Object { $_.Kind } | Select-Object -Unique)
+    if ('tenant' -in $kinds -and -not (Test-TaskRunning 'tenant')) { Start-TenantRefresh }
+    if ('custom' -in $kinds -and -not (Test-TaskRunning 'customlist')) { Start-CustomRefresh }
+    $script:PendingStep = [Math]::Min($script:PendingStep + 1, $script:PendingSteps.Count - 1)
+    $script:PendingNextAt = (Get-Date).AddSeconds($script:PendingSteps[$script:PendingStep])
+}
+function Add-CreatedTenantApp {
+    # An app of the tool was created: it is in the In tenant list and the catalog badge right now, from what the create returned
+    param([Parameter(Mandatory = $true)][string]$Id, [string]$Name, [string]$Package, [string]$Source = 'Chocolatey', [string]$Version = '', [string]$UpdateMode = 'Startup', [int]$GraceHours = 48, [string]$Intents = '', $Template)
+    $app = if ($Template) { $Template | Select-Object * } else { [pscustomobject]@{ IsChocolatey = $false; Schedule = $null; HasPolicy = $true } }
+    foreach ($p in @{ Id = $Id; DisplayName = $Name; Package = $Package; Source = $Source; Version = $Version; UpdateMode = $UpdateMode; GraceHours = $GraceHours; Intents = $Intents
+            Created = (Get-Date).ToString('o'); AppVersion = ''; LatestVersion = ''; UpdateAvailable = $false; JustCreated = $true }.GetEnumerator()) { $app | Add-Member -NotePropertyName $p.Key -NotePropertyValue $p.Value -Force }
+    Add-PendingApp 'tenant' $app
+    if ($null -ne $script:TenantApps) { $script:TenantApps = @(Merge-PendingApps 'tenant' @($script:TenantApps)) | Sort-Object { -not $_.IsChocolatey }, DisplayName }
+    if ($Package) { $key = Get-MetaKey $Package $Source; $script:TenantPackages[$key] = $true; $script:RecentDeploys[$key] = Get-Date }
+    Update-TenantRows -Force
+    Update-AppList
+}
+function Add-CreatedCustomApp($Result, $Job) {
+    $id = @($Result | Where-Object { $_ -is [string] -and $_ }) | Select-Object -Last 1
+    $c = $script:CustomContext[[string]$Job.Display]
+    if (-not $id -or -not $c) { return }
+    $app = [pscustomobject]@{ Id = [string]$id; DisplayName = $c.Name; Kind = $c.Kind; AppId = $c.AppId; Version = $c.Version; ProductCode = ''; UpgradeCode = ''; Manifest = ''; Identity = ''; Thumbprint = ''
+        Publisher = $c.Publisher; Created = (Get-Date).ToString('o'); Intents = $c.Intents; Source = 'Custom'; IsChocolatey = $false; JustCreated = $true }
+    Add-PendingApp 'custom' $app
+    if ($null -ne $script:CustomApps) { $script:CustomApps = @(Merge-PendingApps 'custom' @($script:CustomApps)) }
+    Update-CustomRows
+}
+function Remove-ListedApp([string]$Id, [string]$Kind) {
+    # A confirmed delete: the row goes now (and stays away while Graph may still list it)
+    if (-not $Id) { return }
+    Add-RemovedApp $Id
+    $gone = @($script:TenantApps | Where-Object { [string]$_.Id -eq $Id })
+    if ($null -ne $script:TenantApps) { $script:TenantApps = @($script:TenantApps | Where-Object { [string]$_.Id -ne $Id }) }
+    foreach ($g in $gone) { if ($g.Package) { $script:TenantPackages.Remove((Get-MetaKey $g.Package $g.Source)); $script:RecentDeploys.Remove((Get-MetaKey $g.Package $g.Source)) } }
+    if ($null -ne $script:CustomApps) { $script:CustomApps = @($script:CustomApps | Where-Object { [string]$_.Id -ne $Id }) }
+    Update-TenantRows -Force; Update-CustomRows; Update-AppList
+}
 function Start-TenantRefresh {
     if (-not (Test-SignedIn)) { throw 'Sign in to Intune first.' }
     if (Test-TaskRunning 'tenant') { return }
@@ -2947,9 +3046,10 @@ Get-PackTuneTenantApps | ForEach-Object {
             $ui.TxtTenantCount.Text = if ($script:GraphDown -and @($script:TenantApps).Count) { "$(@($script:TenantApps).Count) app(s) - last known list, not current" } elseif ($script:GraphDown) { "Can't read the tenant right now - see the banner" } else { 'Could not read the tenant, see Activity' }
             Update-Readiness; Complete-SetupStep $false 'reading the tenant'; return
         }
-        $script:TenantApps = @($Result | Where-Object { $_ -and $_.Id } | ForEach-Object {
+        $listed = @($Result | Where-Object { $_ -and $_.Id } | ForEach-Object {
             $_ | Add-Member -NotePropertyName LatestVersion -NotePropertyValue '' -Force -PassThru | Add-Member -NotePropertyName UpdateAvailable -NotePropertyValue $false -Force -PassThru
-        } | Sort-Object { -not $_.IsChocolatey }, DisplayName)
+        })
+        $script:TenantApps = @(Merge-PendingApps 'tenant' $listed) | Sort-Object { -not $_.IsChocolatey }, DisplayName
         # Catalog and search mark what is already there, including apps created in the last minutes that Graph does not list yet
         $script:TenantPackages = @{}
         foreach ($app in $script:TenantApps) { if ($app.Package -and -not $app.IsChocolatey) { $script:TenantPackages[(Get-MetaKey $app.Package $app.Source)] = $true } }
@@ -3035,6 +3135,7 @@ function Update-TenantRows {
         $isDep = $app.IsChocolatey -or $app.IsDependency
         $title = if ($app.IsOld) { "$($app.DisplayName) (old)" } elseif ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
         $sub = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($app.IsDependency) { 'Dependency of all apps: Chocolatey and winget for SYSTEM' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" }
+        if ($app.JustCreated) { $sub = "$sub $([char]0x00B7) just created, confirming in Intune ..." }
         $ok = if ($count -and -not $count.Error) { "$($count.Installed) installed" } elseif ($isDep) { '' } else { '-' }
         $bad = if ($count -and -not $count.Error) { @($(if ($count.Failed) { "$($count.Failed) failed" }), $(if ($count.Pending) { "$($count.Pending) pending" })) | Where-Object { $_ } | Select-Object -First 1 } else { '' }
         $updates = if ($isDep) { 'Updated daily' } elseif ($app.UpdateMode -eq 'Custom') { "Ask user, $(if ($app.GraceHours % 24 -eq 0) { "$($app.GraceHours / 24) days" } else { "$($app.GraceHours) h" })" } elseif ($app.UpdateMode -eq 'Off') { 'Off' } else { if ($app.Schedule.TriggerStart -and -not $app.Schedule.TriggerWindow) { 'At startup' } else { 'Automatic' } }
@@ -3286,14 +3387,17 @@ param($AppId, $Version, $UpdateMode, $GraceHours, $Schedule)
 if ($Schedule) { Update-PackTuneApp -AppId $AppId -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours -Schedule $Schedule }
 else { Publish-PackTuneRelease -AppId $AppId -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours }
 '@
+    $script:ApplyContext[[string]$App.DisplayName] = @{ App = $App; Version = $(if ($Version -eq 'latest') { '' } else { $Version }); Policy = $Policy }
     [void](Start-UiTask -Kind 'policy' -Title "Update settings of $($App.DisplayName): $(Format-UpdateText $Policy.UpdateMode $Policy.GraceHours), version $Version" -Display $App.DisplayName -Package $App.Package -NeedsAuth -Arguments $arguments -Work $work -OnDone {
         param($Result, $Job)
         if ($Job.Status -eq 'succeeded') {
             $via = @($Result | Where-Object { $_.Path }) | Select-Object -First 1
             Write-UiLog "[$($Job.Package)] changed in Intune$(if ($via -and $via.Path -eq 'Supersedence') { ' (new app superseding the old one)' }). Devices pick it up at their next Intune check." 'Success'
             Show-Toast "$($Job.Display) was changed in Intune." 'ok'
+            $ctx = $script:ApplyContext[[string]$Job.Display]
+            if ($via -and $via.Path -eq 'Supersedence' -and $via.AppId -and $ctx) { Add-CreatedTenantApp -Id ([string]$via.AppId) -Name $ctx.App.DisplayName -Package $ctx.App.Package -Source $ctx.App.Source -Version $ctx.Version -UpdateMode $ctx.Policy.UpdateMode -GraceHours $ctx.Policy.GraceHours -Intents ([string]$ctx.App.Intents) -Template $ctx.App }
         }
-        $script:TenantApps = $null; $script:TenantPolicyApp = ''
+        $script:TenantPolicyApp = ''
         Start-TenantRefresh
     })
     Update-TenantButtons
@@ -3335,6 +3439,7 @@ Add-Click $ui.BtnTenantRemove {
 }
 function Start-TenantRemoval($app) {
     if (-not (Test-AppId $app)) { return }
+    $script:RemovingIds[[string]$app.DisplayName] = [string]$app.Id
     Update-UiToken
     [void](Start-UiTask -Kind 'remove' -Title "Removing $($app.DisplayName) from Intune" -Display $app.DisplayName -Package $app.Package -NeedsAuth -Arguments @{ Id = $app.Id; Source = $app.Source } -Work 'param($Id, $Source) Remove-PackTuneApp -Id $Id' -OnDone {
         param($Result, $Job)
@@ -3342,8 +3447,8 @@ function Start-TenantRemoval($app) {
             Write-UiLog "[$($Job.Package)] removed from Intune." 'Success'
             Show-Toast "$($Job.Display) was removed from Intune." 'ok'
             if ($Job.Package) { $script:RecentDeploys.Remove((Get-MetaKey $Job.Package $Job.Source)) }
+            Remove-ListedApp ([string]$script:RemovingIds[[string]$Job.Display]) 'tenant'
         }
-        $script:TenantApps = $null
         Start-TenantRefresh
     })
     Update-TenantButtons

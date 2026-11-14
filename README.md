@@ -66,6 +66,8 @@ One list for both sources: the curated list in `catalog.json`, the 200 most down
 
 ### Custom applications
 
+Custom applications need the **package store** (the PackTune site, see below): without a ready store the page shows *Set up the package store first* with a **Set up** button, and **New application**, **New version** and **Export** are off (MSI and Other alike), so the state of an application is always kept somewhere. Existing applications are still listed and can be removed. A created or removed app shows up in the lists at once (inserted from the create response, kept until Graph lists it, at most two minutes; the In tenant badge of the catalog follows).
+
 ![Custom applications](docs/screenshots/custom.png)
 
 Your own software next to the catalog apps, as Win32 apps in Intune. **New application** asks what you have:

@@ -65,6 +65,9 @@ $script:InsightFake = Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) 'I
 
 $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'start page'; Do = {
+        # the package store is ready (a fake SharePoint with the library); the steps that need it not to be say so themselves
+        $script:StoreSmokeState = [pscustomobject]@{ State = 'Ready'; Message = 'The package store is ready (smoke test).'; SiteUrl = 'https://contoso.sharepoint.com/sites/PackTune' }
+        $script:StoreState = $script:StoreSmokeState
         $script:EmbeddedAvailableOverride = $false   # simulates a missing WebView2 runtime: the sign-in uses the browser, as the fake authority needs
         $script:SandboxOverride = @{ Present = $true }
         Update-SandboxState
@@ -241,6 +244,56 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         }
         if (-not (Test-Idle)) { return $false }
         Test-Smoke 'status script created and assigned' ($script:StatusScript.State -eq 'Present' -and (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-health.json')) -and (Get-JobLog) -match 'created|assigned') ($script:StatusScript | ConvertTo-Json -Compress)
+        $true } }
+    @{ Name = 'custom needs the store'; Do = {
+        $ready = $script:StoreState
+        Show-Page 'Custom'
+        Test-Smoke 'store ready: New application on, no banner' ($ui.BtnCustomNew.IsEnabled -and $ui.BoxCustomStore.Visibility -eq 'Collapsed')
+        $script:StoreState = [pscustomobject]@{ State = 'Missing'; Message = 'The PackTune site does not exist in this tenant yet.' }
+        Update-CustomRows
+        Test-Smoke 'no store: banner "Set up the package store first" with Set up, New application off' ($ui.BoxCustomStore.Visibility -eq 'Visible' -and $ui.TxtCustomStoreBanner.Text -like 'Set up the package store first*' -and $ui.BtnCustomStoreSetup -and -not $ui.BtnCustomNew.IsEnabled)
+        $n = $script:Toasts.Count; & $script:ClickActions[$ui.BtnCustomNew]
+        Test-Smoke 'no store: New application only says to set it up, no dialog' ($ui.DialogLayer.Visibility -eq 'Collapsed' -and $script:Toasts.Count -gt $n -and $script:Toasts[-1].Text -like 'Set up the package store first*')
+        $saved = $script:CustomApps
+        $script:CustomApps = @([pscustomobject]@{ Id = 'c-1'; DisplayName = 'Old Tool'; Kind = 'msi'; AppId = 'old-tool-1'; Version = '1.0'; ProductCode = '{X}'; UpgradeCode = ''; Manifest = ('ab' * 32); Identity = ''; Thumbprint = ''; Publisher = 'P'; Created = (Get-Date).ToString('o'); Intents = 'available'; Source = 'Custom'; IsChocolatey = $false })
+        Update-CustomRows; $ui.LstCustom.SelectedItem = $script:CustomRows[0]
+        Test-Smoke 'no store: existing apps are listed, New version and Export are off, Remove stays on' (@($script:CustomRows).Count -eq 1 -and -not $ui.BtnCustomNewVersion.IsEnabled -and -not $ui.BtnCustomExport.IsEnabled -and $ui.BtnCustomRemove.IsEnabled)
+        $script:StoreState = $ready; Update-CustomRows; $ui.LstCustom.SelectedItem = $script:CustomRows[0]
+        Test-Smoke 'store ready again: everything is back on' ($ui.BtnCustomNew.IsEnabled -and $ui.BtnCustomNewVersion.IsEnabled -and $ui.BtnCustomExport.IsEnabled -and $ui.BoxCustomStore.Visibility -eq 'Collapsed')
+        $script:CustomApps = $saved; $ui.LstCustom.SelectedItem = $null; Update-CustomRows
+        $true } }
+    @{ Name = 'instant rows'; Do = {
+        # a created app is in In tenant at once; a lagging list keeps it until Graph lists it; a removed one is gone at once
+        Show-Page 'Tenant'
+        $origApps = $script:TenantApps; $origPackages = $script:TenantPackages.Clone(); $origRecent = $script:RecentDeploys.Clone()
+        if ($null -eq $script:TenantApps) { $script:TenantApps = @() }
+        $listedBefore = @($script:TenantApps)
+        Add-CreatedTenantApp -Id 'new-id-1' -Name 'Fresh App' -Package 'fresh.app' -Source 'Chocolatey' -UpdateMode 'Startup' -GraceHours 48 -Intents 'available'
+        $row = @($script:TenantRowList | Where-Object { $_.Data.Id -eq 'new-id-1' })[0]
+        Test-Smoke 'deploy: the row is in In tenant at once, marked just created' ($row -and $row['Title'] -eq 'Fresh App' -and $row['Sub'] -like '*just created*')
+        $ui.LstTenant.SelectedItem = $row
+        Test-Smoke 'the new row can be selected, its panel shows the id of the app' ($ui.LstTenant.SelectedItem -and (Get-SelectedTenantApp).Id -eq 'new-id-1')
+        Test-Smoke 'the catalog badge: the package counts as in the tenant' ($script:TenantPackages.ContainsKey((Get-MetaKey 'fresh.app' 'Chocolatey')))
+        $laggingList = @(Merge-PendingApps 'tenant' @($listedBefore))
+        Test-Smoke 'a list that lags behind keeps the row' (@($laggingList | Where-Object { $_.Id -eq 'new-id-1' }).Count -eq 1 -and $script:PendingApps.ContainsKey('new-id-1'))
+        $fresh = @($listedBefore) + [pscustomobject]@{ Id = 'new-id-1'; DisplayName = 'Fresh App'; Package = 'fresh.app'; Source = 'Chocolatey'; IsChocolatey = $false }
+        $caughtUp = @(Merge-PendingApps 'tenant' $fresh)
+        Test-Smoke 'once Graph lists the id the row is the listed one (no duplicate) and the wait is over' (@($caughtUp | Where-Object { $_.Id -eq 'new-id-1' }).Count -eq 1 -and -not $script:PendingApps.ContainsKey('new-id-1') -and -not (@($caughtUp | Where-Object { $_.JustCreated }).Count))
+        Add-PendingApp 'tenant' ([pscustomobject]@{ Id = 'never-listed'; DisplayName = 'Ghost'; Package = ''; Source = 'Chocolatey'; IsChocolatey = $false })
+        $script:PendingApps['never-listed'].Added = (Get-Date).AddMinutes(-3)
+        Test-Smoke 'a created app that Graph never lists is dropped after two minutes' (@(Merge-PendingApps 'tenant' @()).Count -eq 0 -and -not $script:PendingApps.ContainsKey('never-listed'))
+        Remove-ListedApp 'new-id-1' 'tenant'
+        Test-Smoke 'removal: the row is gone right after the confirmed delete' (-not @($script:TenantRowList | Where-Object { $_.Data.Id -eq 'new-id-1' }).Count -and -not $script:TenantPackages.ContainsKey((Get-MetaKey 'fresh.app' 'Chocolatey')))
+        Test-Smoke 'a list that still shows the deleted app does not bring it back' (@(Merge-PendingApps 'tenant' $fresh | Where-Object { $_.Id -eq 'new-id-1' }).Count -eq 0)
+        $script:RemovedApps.Clear()
+        # custom applications: same
+        $c = [pscustomobject]@{ Id = 'custom-new'; DisplayName = 'Custom Fresh'; Kind = 'msi'; AppId = 'custom-fresh'; Version = '1.0'; ProductCode = ''; UpgradeCode = ''; Manifest = ''; Identity = ''; Thumbprint = ''; Publisher = 'P'; Created = (Get-Date).ToString('o'); Intents = 'available'; Source = 'Custom'; IsChocolatey = $false; JustCreated = $true }
+        $script:CustomApps = @(); Add-PendingApp 'custom' $c; $script:CustomApps = @(Merge-PendingApps 'custom' @()); Update-CustomRows
+        Test-Smoke 'custom: the created application is on the page at once' (@($script:CustomRows | Where-Object { $_['Title'] -eq 'Custom Fresh' }).Count -eq 1)
+        Remove-ListedApp 'custom-new' 'custom'
+        Test-Smoke 'custom: removed at once after the confirmed delete' (@($script:CustomRows | Where-Object { $_['Title'] -eq 'Custom Fresh' }).Count -eq 0)
+        $script:RemovedApps.Clear(); $script:PendingApps.Clear(); $script:CustomApps = $null
+        $script:TenantApps = $origApps; $script:TenantPackages = $origPackages; $script:RecentDeploys = $origRecent; Update-TenantRows -Force
         $true } }
     @{ Name = 'graph outage text'; Do = {
         Test-Smoke 'a 403 "Remediations not available" is no Graph outage (the .NET text mentions the remote server)' (-not (Test-GraphReadFailureText 'The remote server returned an error: (403) Forbidden.') -and -not (Test-GraphReadFailureText 'Der Remoteserver hat einen Fehler zur?ckgegeben: (403) Unzul?ssig') -and -not (Test-GraphReadFailureText 'Authorization_RequestDenied: Insufficient privileges') -and -not (Test-GraphReadFailureText 'The remote server returned an error: (400) Bad Request'))
@@ -802,6 +855,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             & $script:ClickActions[$ui.BtnCustomCancel]
             # package store dialog
             $script:ExportTarget = $null
+            $script:StoreSmokeState = $null; $script:StoreState = $null
             Show-StoreDialog
             Test-Smoke 'package store dialog opens with the library name, the standard site explained, the site address under Advanced and empty' ($ui.DlgStore.Visibility -eq 'Visible' -and $ui.TxtStoreLibrary.Text -eq 'PackTune Packages' -and -not $ui.TxtStoreSite.Text -and $ui.ExpStoreAdvanced -and $ui.BtnStoreSetup.IsEnabled) ''
             Start-StoreCheck; Update-StoreDialog
@@ -819,6 +873,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Show-Page 'Start'
             $items = @(Get-ReadinessItems | Where-Object { $_.Key -in 'sandbox', 'store' })
             Test-Smoke 'readiness: Windows Sandbox with the capture tools ready, package store not ready yet (both optional)' ($items.Count -eq 2 -and ($items | Where-Object Key -eq 'sandbox').State -eq 'ok' -and ($items | Where-Object Key -eq 'store').State -eq 'warn' -and @($items | Where-Object { -not $_.Optional }).Count -eq 0) (($items | ForEach-Object { "$($_.Key)=$($_.State)" }) -join ',')
+            $script:StoreSmokeState = [pscustomobject]@{ State = 'Ready'; Message = 'The package store is ready (smoke test).'; SiteUrl = 'https://contoso.sharepoint.com/sites/PackTune' }; $script:StoreState = $script:StoreSmokeState
             # remove the test app and the saved site
             $s2 = Get-PackTuneSettings; $s2.StoreSiteUrl = ''; [void](Save-PackTuneSettings -Settings $s2); $script:Settings = Get-PackTuneSettings; $script:StoreState = $null
             $storePath = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
