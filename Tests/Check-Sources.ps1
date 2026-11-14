@@ -309,6 +309,88 @@ $gone = @(Remove-PackTuneSupersededApps -InstallCount { param($Id) 0 })
 Test-Check 'no device has it: old app removed, new app stays, relation cleared' ($gone[0].Removed -and @(Get-Store | Where-Object id -eq $availId).Count -eq 0 -and @(Get-Store | Where-Object id -eq $result.AppId).Count -eq 1 -and @((Get-Store | Where-Object id -eq $result.AppId).supersedence).Count -eq 0 -and @((Get-Store | Where-Object id -eq $result.AppId).dependencies).Count -ge 1)
 Test-Check 'nothing left to clean up' (@(Remove-PackTuneSupersededApps -InstallCount { param($Id) 0 }).Count -eq 0)
 
+
+# --- popular apps: top Chocolatey packages by downloads, merged with the catalog
+function New-FeedPackage($Id, $Title, $Downloads, $Tags = '', $Authors = '', $Site = 'https://example.org', $Description = 'A program', $Version = '1.0') {
+    [pscustomobject]@{ Name = $Id; Title = $Title; Version = $Version; Downloads = [string]$Downloads; Tags = $Tags; Authors = $Authors; SoftwareSite = $Site; Description = $Description; Summary = 's'; IconUrl = $null; SoftwareLicense = $null; LicenseNote = $null }
+}
+$feed = @(
+    (New-FeedPackage 'chocolatey' 'Chocolatey' 900 'nuget')
+    (New-FeedPackage 'chocolatey-core.extension' 'Chocolatey Core' 880)
+    (New-FeedPackage 'googlechrome' 'Google Chrome' 870 'browser' 'Google')
+    (New-FeedPackage 'GoogleChrome.install' 'Google Chrome (Install)' 860)
+    (New-FeedPackage '7zip.install' '7-Zip (Install)' 850 'zip archive')
+    (New-FeedPackage 'notepad3' 'Notepad3' 840 'editor notepad' 'Rizonesoft' 'https://www.rizonesoft.com' 'Editor' '6.0')
+    (New-FeedPackage 'notepad3.install' 'Notepad3 (Install)' 830 'editor')
+    (New-FeedPackage 'akelpad' 'AkelPad' 820 'editor text' 'Alexey' 'https://example.org' 'Editor' '4.9')
+    (New-FeedPackage 'only.installer.install' 'Only Installer (Install)' 810 'media player')
+    (New-FeedPackage 'bad id!' 'Bad Id' 800)
+    (New-FeedPackage '..\evil' 'Evil' 790)
+    (New-FeedPackage 'oldtool' 'Old Tool' 780 'deprecated tools')
+    (New-FeedPackage 'twin' 'Twin' 770 'chat messenger' 'Twin Corp')
+    (New-FeedPackage 'mystery' 'Mystery Thing' 760 'zzz' 'Nobody')
+    (New-FeedPackage 'lastone' 'Last One' 750 'vpn')
+)
+$kept = @(Select-PackTunePopular -Packages $feed -Top 200)
+$ids = $kept.Name -join ','
+Test-Check 'popular: order of the downloads kept' ($ids -eq 'notepad3,akelpad,only.installer.install,twin,mystery,lastone') $ids
+Test-Check 'popular: invalid ids are dropped (space, path characters)' ($kept.Name -notcontains 'bad id!' -and $kept.Name -notcontains '..\evil')
+Test-Check 'popular: infrastructure and deprecated packages are dropped' ($kept.Name -notcontains 'chocolatey' -and $kept.Name -notcontains 'chocolatey-core.extension' -and $kept.Name -notcontains 'oldtool')
+Test-Check 'popular: x.install is dropped when x is there, kept when it is alone' ($kept.Name -notcontains 'notepad3.install' -and $kept.Name -contains 'only.installer.install')
+Test-Check 'popular: what the catalog has is not listed twice (googlechrome, GoogleChrome.install, 7zip.install)' ($kept.Name -notcontains 'googlechrome' -and $kept.Name -notcontains 'GoogleChrome.install' -and $kept.Name -notcontains '7zip.install')
+Test-Check 'popular: at most -Top' (@(Select-PackTunePopular -Packages $feed -Top 3).Count -eq 3)
+Test-Check 'popular: category from the tags, "Other" as fallback' ((Get-PackTunePopularCategory 'zip archive') -eq 'Utilities' -and (Get-PackTunePopularCategory 'chat messenger') -eq 'Communication' -and (Get-PackTunePopularCategory 'vpn') -eq 'Remote & Network' -and (Get-PackTunePopularCategory 'zzz') -eq 'Other' -and (Get-PackTunePopularCategory '') -eq 'Other')
+# winget: only when it clearly is the same product
+$winget = @{
+    'Notepad3' = @([pscustomobject]@{ Name = 'Rizonesoft.Notepad3'; Title = 'Notepad3'; Version = '6.1' })
+    'AkelPad'  = @([pscustomobject]@{ Name = 'AkelPad.AkelPad'; Title = 'AkelPad'; Version = '4.9.9' })
+    'Twin'     = @([pscustomobject]@{ Name = 'Twin.Corp.Twin'; Title = 'Twin'; Version = '2' }, [pscustomobject]@{ Name = 'Twin.Corp.TwinPro'; Title = 'Twin'; Version = '3' })
+    'Mystery Thing' = @([pscustomobject]@{ Name = 'Someone.Mystery'; Title = 'Mystery Thing Pro'; Version = '1' })
+    'Last One' = @([pscustomobject]@{ Name = 'bad id'; Title = 'Last One'; Version = '1' })
+}
+$finder = { param($Term) $winget[$Term] }
+$byName = @{}; foreach ($p in $feed) { $byName[$p.Name] = $p }
+$m1 = Resolve-PackTuneWingetMatch -Package $byName['notepad3'] -Finder $finder
+Test-Check 'winget match: same name and publisher in authors or project URL' ($m1 -and $m1.Name -eq 'Rizonesoft.Notepad3')
+Test-Check 'winget match: same name but the publisher does not show in the package -> none' ($null -eq (Resolve-PackTuneWingetMatch -Package $byName['akelpad'] -Finder $finder))
+Test-Check 'winget match: two candidates -> none' ($null -eq (Resolve-PackTuneWingetMatch -Package $byName['twin'] -Finder $finder))
+Test-Check 'winget match: different name -> none' ($null -eq (Resolve-PackTuneWingetMatch -Package $byName['mystery'] -Finder $finder))
+Test-Check 'winget match: invalid winget id -> none' ($null -eq (Resolve-PackTuneWingetMatch -Package $byName['lastone'] -Finder $finder))
+$popCache = Join-Path $work 'popular.json'
+$meta = @{}
+$script:FeedCalls = 0
+$rows = @(Get-PackTunePopularApps -FeedPackages $feed -WingetFinder $finder -CachePath $popCache -Cache $meta)
+$nr = $rows | Where-Object ChocoId -eq 'notepad3'; $ak = $rows | Where-Object ChocoId -eq 'akelpad'
+Test-Check 'popular rows: popular flag, downloads, category' ($rows.Count -eq 6 -and @($rows | Where-Object { -not $_.Popular }).Count -eq 0 -and $nr.Category -eq 'Developer' -and $nr.Downloads -eq 840 -and ($rows | Where-Object ChocoId -eq 'mystery').Category -eq 'Other')
+Test-Check 'popular rows: verified winget id gives both sources and the Recommended logic, the rest is Chocolatey only' ((($nr.Sources) -join ',') -eq 'Chocolatey,Winget' -and $nr.WingetId -eq 'Rizonesoft.Notepad3' -and $nr.Recommended -eq 'Winget' -and $nr.RecommendedMarked -and ($ak.Sources -join ',') -eq 'Chocolatey' -and $null -eq $ak.WingetId)
+Test-Check 'popular rows: the filter helper works on them (Both / Chocolatey only)' (@(Select-PackTuneSourceApps -Apps $rows -Filter Both).Count -eq 1 -and @(Select-PackTuneSourceApps -Apps $rows -Filter Chocolatey).Count -eq 5)
+Test-Check 'popular rows: package infos seeded into the cache, no lookup per package' ($meta['notepad3'].Found -and $meta['notepad3'].Version -eq '6.0' -and $meta.Count -eq 6)
+Test-Check 'popular rows: no duplicate of a catalog app' (@($rows | Where-Object { $_.ChocoId -in 'googlechrome', '7zip.install' }).Count -eq 0)
+function Get-PackTunePopularFeed { $script:FeedCalls++; throw 'the feed must not be asked while the cache is fresh' }
+$cached = @(Get-PackTunePopularApps -CachePath $popCache -WingetFinder $finder)
+Test-Check 'popular: the cache (24 hours) is used without asking the feed, matches included' ($cached.Count -eq 6 -and $script:FeedCalls -eq 0 -and ($cached | Where-Object ChocoId -eq 'notepad3').WingetId -eq 'Rizonesoft.Notepad3')
+$old = Get-Content $popCache -Raw | ConvertFrom-Json; $old.Fetched = (Get-Date).AddHours(-30).ToString('o'); $old | ConvertTo-Json -Depth 4 | Set-Content $popCache
+$stale = $false; try { $null = Get-PackTunePopularApps -CachePath $popCache -WingetFinder $finder } catch { $stale = $_.Exception.Message -like '*must not be asked*' }
+Test-Check 'popular: an older cache is read again from the feed' $stale
+$forced = $false; try { $null = Get-PackTunePopularApps -CachePath $popCache -Force } catch { $forced = $_.Exception.Message -like '*must not be asked*' }
+Test-Check 'popular: -Force ignores a fresh cache (Refresh versions)' $forced
+Remove-Item Function:\Get-PackTunePopularFeed
+# the feed retries with a wait when it limits the requests
+$script:Attempts = 0; $script:Waited = 0
+function Start-Sleep { param($Seconds, $Milliseconds) $script:Waited += $Seconds }
+$feedXml = '<feed xmlns="http://www.w3.org/2005/Atom" xmlns:d="http://schemas.microsoft.com/ado/2007/08/dataservices" xmlns:m="http://schemas.microsoft.com/ado/2007/08/dataservices/metadata"><entry><title type="text">demo</title><m:properties><d:Version>1.0</d:Version><d:Tags>a b</d:Tags></m:properties></entry></feed>'
+function Invoke-WebRequest { param($Uri, [switch]$UseBasicParsing, $TimeoutSec, $ErrorAction) $script:Attempts++; if ($script:Attempts -lt 3) { throw [System.InvalidOperationException]::new('The operation has timed out') }; [pscustomobject]@{ Content = $feedXml } }
+$got = @(Invoke-ChocoFeed -Query "Search()?searchTerm=''")
+Test-Check 'feed: a timeout is retried with a growing wait (5 s, then 10 s) and then answers' ($script:Attempts -eq 3 -and $script:Waited -eq 15 -and $got.Count -eq 1 -and $got[0].Name -eq 'demo' -and $got[0].Tags -eq 'a b') "attempts=$script:Attempts waited=$script:Waited"
+$script:Attempts = 0
+function Invoke-WebRequest { param($Uri, [switch]$UseBasicParsing, $TimeoutSec, $ErrorAction) $script:Attempts++; throw [System.InvalidOperationException]::new('The operation has timed out') }
+$gaveUp = $false; try { $null = Invoke-ChocoFeed -Query 'x' } catch { $gaveUp = $true }
+Test-Check 'feed: after four attempts it gives up with the error' ($gaveUp -and $script:Attempts -eq 4)
+$script:Attempts = 0
+function Invoke-WebRequest { param($Uri, [switch]$UseBasicParsing, $TimeoutSec, $ErrorAction) $script:Attempts++; throw [System.InvalidOperationException]::new('The remote name could not be resolved') }
+$null = try { Invoke-ChocoFeed -Query 'x' } catch { }
+Test-Check 'feed: an error that is no rate limit is not retried' ($script:Attempts -eq 1)
+Remove-Item Function:\Invoke-WebRequest, Function:\Start-Sleep
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed -gt 0) { "$script:Failed check(s) failed."; exit 1 }
 'All checks passed.'

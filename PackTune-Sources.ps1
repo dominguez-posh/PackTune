@@ -276,3 +276,170 @@ function New-PackTuneSourceApplication {
 
 #endregion
 
+
+#region popular Chocolatey packages
+
+# Infrastructure and library packages that nobody deploys as an app (they are pulled in as dependencies)
+$script:PopularSkipIds = '^(chocolatey|chocolatey[-.].+|.+\.extension|.+\.template|.+\.commandline|kb\d+|flashplayer.*|adobeshockwaveplayer|silverlight|visualstudio-installer)$'
+# Tag words to category, first match wins; the categories are those of catalog.json, everything else is "Other"
+$script:PopularCategories = @(
+    @('Browsers', '\b(browser|web-browser|firefox|chromium)\b'),
+    @('Office & PDF', '\b(pdf|office|document|documents|spreadsheet|ebook|reader)\b'),
+    @('Remote & Network', '\b(ssh|sftp|ftp|vpn|remote|rdp|network|networking|telnet|putty|wifi|dns|proxy)\b'),
+    @('Runtimes', '\b(runtime|jre|jdk|java|dotnet|\.net|framework|vcredist|redistributable|python|nodejs|node)\b'),
+    @('Developer', '\b(developer|development|programming|ide|editor|git|sdk|compiler|code|devops|docker|database|sql|api|debug)\b'),
+    @('Media & Creative', '\b(audio|video|music|media|player|image|photo|graphics|design|3d|recorder|streaming|screenshot|codec|converter)\b'),
+    @('Communication', '\b(chat|messenger|communication|email|mail|conferencing|meeting|voip|irc)\b'),
+    @('Utilities', '\b(utility|utilities|archive|zip|compression|cleaner|launcher|clipboard|file|search|manager)\b'),
+    @('Admin tools', '\b(admin|sysadmin|system|monitoring|backup|disk|partition|sysinternals|diagnostic|benchmark|hardware|tool|tools)\b')
+)
+
+function Get-PackTunePopularCategory {
+    # Category from the package tags (space separated); "Other" when no word matches
+    param([string]$Tags)
+    $Text = ([string]$Tags).ToLower()
+    foreach ($Rule in $script:PopularCategories) { if ($Text -match $Rule[1]) { return $Rule[0] } }
+    return "Other"
+}#Category of a package from its tags
+
+function ConvertTo-PackTuneComparable {
+    param([string]$Text)
+    $Text = ([string]$Text) -replace '\s*\((Install|Portable)\)\s*$', ''
+    return ($Text.ToLower() -replace '[^a-z0-9]', '')
+}
+
+function Select-PackTunePopular {
+    <#
+        From packages in order of downloads (most first): the ones worth listing as apps. Dropped are ids that are not
+        valid package ids, infrastructure and library packages, deprecated packages, x.install / x.portable when x is in
+        the list too, and everything the curated catalog already has. At most -Top, order kept.
+    #>
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()][object[]]$Packages, [object[]]$Catalog, [int]$Top = 200)
+    if ($null -eq $Catalog) { $Catalog = @(Get-PackTuneCatalog) }
+    $Known = @{}
+    foreach ($Entry in @($Catalog)) { if ($Entry.Id) { $Known[([string]$Entry.Id).ToLower()] = $true } }
+    $Ids = @{}; foreach ($P in @($Packages)) { if ($P.Name) { $Ids[([string]$P.Name).ToLower()] = $true } }
+    $Kept = New-Object System.Collections.ArrayList
+    foreach ($P in @($Packages)) {
+        $Id = [string]$P.Name
+        if ($Id -notmatch $script:WingetIdPattern) { continue }
+        $Lower = $Id.ToLower()
+        if ($Lower -match $script:PopularSkipIds) { continue }
+        if ("$($P.Title) $($P.Tags)" -match '(?i)\bdeprecated\b|\((remove only|final version - eol)\)|\beol\b|end of life' -or [string]$P.Description -match '(?i)^\s*\[?deprecated') { continue }
+        $Base = $Lower -replace '\.(install|portable)$', ''
+        if ($Base -ne $Lower -and $Ids.ContainsKey($Base)) { continue }
+        if ($Known.ContainsKey($Lower) -or $Known.ContainsKey($Base) -or $Known.ContainsKey("$Base.install") -or $Known.ContainsKey("$Base.portable")) { continue }
+        if ($Kept.Count -ge $Top) { break }
+        [void]$Kept.Add($P)
+    }
+    return @($Kept)
+}#Filters the packages by downloads for the popular list
+
+function Get-PackTunePopularFeed {
+    # One set of paged requests to the community feed, the query behind "choco search --order-by-popularity"
+    # (Search() ordered by DownloadCount), 40 per page (the most the feed gives), a pause between pages; stops when -Top packages survive the filter
+    param([int]$Top = 200, [int]$MaxPages = 16)
+    $All = New-Object System.Collections.ArrayList
+    for ($Page = 0; $Page -lt $MaxPages; $Page++) {
+        $Query = "Search()?searchTerm=''&targetFramework=''&includePrerelease=false&`$filter=IsLatestVersion&`$orderby=DownloadCount%20desc,Id&`$skip=$($Page * 40)&`$top=40"
+        $Batch = @(Invoke-ChocoFeed -Query $Query)
+        foreach ($P in $Batch) { [void]$All.Add($P) }
+        if ($Batch.Count -lt 40 -or @(Select-PackTunePopular -Packages @($All) -Top $Top).Count -ge $Top) { break }
+        Start-Sleep -Seconds 1
+    }
+    return @($All)
+}#Packages of the community feed by download count
+
+function Resolve-PackTuneWingetMatch {
+    <#
+        The winget id of a Chocolatey package, only when it clearly is the same product: exactly one search hit whose
+        name equals the package title (ignoring case, spaces and punctuation) and whose publisher (first part of the
+        winget id) appears in the authors or the project URL of the package. Anything else: $null, never a guess.
+    #>
+    param([Parameter(Mandatory = $true)]$Package, [scriptblock]$Finder = { param($Term) Search-WingetPackage -SearchPattern $Term -Top 8 })
+    $Title = ConvertTo-PackTuneComparable $(if ($Package.Title) { $Package.Title } else { $Package.Name })
+    if ($Title.Length -lt 3) { return $null }
+    $Context = ConvertTo-PackTuneComparable "$($Package.Authors) $($Package.SoftwareSite)"
+    $Hits = @(& $Finder $(if ($Package.Title) { ([string]$Package.Title -replace '\s*\((Install|Portable)\)\s*$', '').Trim() } else { $Package.Name }))
+    $Match = @($Hits | Where-Object {
+            $Id = [string]$_.Name
+            if ($Id -notmatch $script:WingetIdPattern) { return $false }
+            $Publisher = ConvertTo-PackTuneComparable (($Id -split '\.')[0])
+            $Publisher.Length -ge 3 -and $Context.Contains($Publisher) -and (ConvertTo-PackTuneComparable $_.Title) -eq $Title
+        })
+    if ($Match.Count -eq 1) { return $Match[0] }
+    return $null
+}#The winget package of a Chocolatey package when it is clearly the same
+
+function Get-PackTunePopularApps {
+    <#
+        The popular list as rows of the app list (like Get-PackTuneSourceApps, with Popular = $true and Downloads):
+        the top Chocolatey packages by downloads that the catalog does not have, with a winget id only when
+        Resolve-PackTuneWingetMatch verifies it. Cached in -CachePath for -MaxAgeHours (the answer, including the
+        matches, so the winget lookups run once a day); -Force ignores the cache. -Cache (the package info cache of the
+        interface) gets the package infos of the list, so no lookup per package follows.
+    #>
+    param(
+        [int]$Top = 200,
+        [string]$CachePath,
+        [int]$MaxAgeHours = 24,
+        [switch]$Force,
+        [hashtable]$Cache,
+        # Packages instead of the feed, and a winget search instead of the module (tests)
+        [object[]]$FeedPackages,
+        [scriptblock]$WingetFinder,
+        [switch]$NoWinget
+    )
+    $Records = $null
+    if ($CachePath -and -not $Force -and -not $FeedPackages -and (Test-Path -LiteralPath $CachePath)) {
+        try {
+            $Saved = Get-Content -LiteralPath $CachePath -Raw | ConvertFrom-Json
+            if (([datetime]$Saved.Fetched) -gt (Get-Date).AddHours(-$MaxAgeHours)) { $Records = @($Saved.Apps) }
+        }
+        catch { Write-Verbose "The popular list cache is unreadable: $($_.Exception.Message)" }
+    }
+    if ($null -eq $Records) {
+        $Raw = if ($FeedPackages) { @($FeedPackages) } else { @(Get-PackTunePopularFeed -Top $Top) }
+        $Selected = @(Select-PackTunePopular -Packages $Raw -Top $Top)
+        $CanMatch = -not $NoWinget
+        if ($CanMatch -and -not $WingetFinder) { try { Assert-WingetClient } catch { $CanMatch = $false; Write-Warning "winget is not available, the popular apps are listed for Chocolatey only" } }
+        $Records = foreach ($P in $Selected) {
+            $Hit = $null
+            if ($CanMatch) {
+                try { $Hit = if ($WingetFinder) { Resolve-PackTuneWingetMatch -Package $P -Finder $WingetFinder } else { Resolve-PackTuneWingetMatch -Package $P } }
+                catch { Write-Verbose "winget match of $($P.Name) failed: $($_.Exception.Message)" }
+            }
+            [pscustomobject]@{
+                ChocoId = [string]$P.Name; Name = $(if ($P.Title) { ([string]$P.Title -replace '\s*\((Install|Portable)\)\s*$', '').Trim() } else { [string]$P.Name })
+                Version = [string]$P.Version; Downloads = [string]$P.Downloads; Category = (Get-PackTunePopularCategory $P.Tags)
+                WingetId = $(if ($Hit) { [string]$Hit.Name } else { $null }); WingetVersion = $(if ($Hit) { [string]$Hit.Version } else { $null })
+                Title = [string]$P.Title; Summary = [string]$P.Summary; Description = [string]$P.Description; Authors = [string]$P.Authors
+                IconUrl = [string]$P.IconUrl; ProjectUrl = [string]$P.SoftwareSite; LicenseUrl = [string]$P.SoftwareLicense; LicenseNote = [string]$P.LicenseNote
+            }
+        }
+        $Records = @($Records)
+        if ($CachePath) {
+            try {
+                New-Item -ItemType Directory -Path (Split-Path -Path $CachePath -Parent) -Force | Out-Null
+                [pscustomobject]@{ Fetched = (Get-Date).ToString("o"); Apps = $Records } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $CachePath -Encoding UTF8
+            }
+            catch { Write-Verbose "The popular list could not be cached: $($_.Exception.Message)" }
+        }
+    }
+    foreach ($R in $Records) {
+        if ($Cache) {
+            $Key = Get-SourceCacheKey "Chocolatey" $R.ChocoId
+            $Cache[$Key] = [pscustomobject]@{
+                Fetched = (Get-Date).ToString("o"); Found = $true; Name = $R.ChocoId; Title = $R.Title; Version = $R.Version; Summary = $R.Summary
+                Description = $R.Description; Authors = $R.Authors; IconUrl = $R.IconUrl; ProjectUrl = $R.ProjectUrl; LicenseUrl = $R.LicenseUrl
+                Downloads = $R.Downloads; LicenseNote = $R.LicenseNote; License = $null; Partial = $false
+            }
+        }
+        $Row = New-PackTuneSourceRow -Name $R.Name -Category $R.Category -ChocoId $R.ChocoId -WingetId $R.WingetId -ChocoVersion $R.Version -WingetVersion $R.WingetVersion
+        $Row | Add-Member -NotePropertyName Popular -NotePropertyValue $true -Force
+        $Row | Add-Member -NotePropertyName Downloads -NotePropertyValue ([double]($R.Downloads -replace '[^\d]', '0')) -Force
+        $Row
+    }
+}#The popular apps as rows of the app list
+
+#endregion

@@ -606,6 +606,7 @@ function Complete-MetaPrefetch {
     Update-DetailIcon
     Start-AppIconTask
     Save-MetaCache
+    Update-RefreshButton
     $failed = @($script:Shared.Meta.Values | Where-Object { -not $_.Found -and -not $_.NotFound })
     if ($failed.Count -gt 0 -and -not $script:MetaWarned) {
         $script:MetaWarned = $true
@@ -1046,6 +1047,9 @@ $script:Selected = [ordered]@{}      # app key -> source row (Get-PackTuneSource
 $script:SourceChoice = @{}           # app key -> 'Chocolatey' | 'Winget' chosen in the deploy dialog
 $script:CustomIcons = @{}            # app key -> PNG/JPEG base64
 $script:SourceRows = @()             # the curated catalog
+$script:PopularRows = @()            # the top Chocolatey packages by downloads that the catalog does not have
+$script:PopularLoaded = $false
+$script:PopularCachePath = Join-Path $script:WorkRoot 'popular.json'
 $script:SearchRows = @()             # hits of the last repository search
 $script:SearchTerm = ''
 $script:SourceFilter = 'All'
@@ -1119,7 +1123,7 @@ function Set-CardRow($Card, $Src) {
 function Update-AppList {
     $rows = New-Object System.Collections.ArrayList
     $seen = @{}
-    foreach ($r in @($script:SourceRows) + @($script:SearchRows)) { $k = Get-AppKey $r; if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; [void]$rows.Add($r) } }
+    foreach ($r in @($script:SourceRows) + @($script:PopularRows) + @($script:SearchRows)) { $k = Get-AppKey $r; if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; [void]$rows.Add($r) } }
     $rows = @(Select-PackTuneSourceApps -Apps @($rows) -Filter $script:SourceFilter)
     $text = $ui.TxtFilter.Text.Trim()
     $searching = $script:SearchTerm -and $script:SearchTerm -eq $text
@@ -1129,7 +1133,9 @@ function Update-AppList {
         $_.Name -like "*$text*" -or $_.ChocoId -like "*$text*" -or $_.WingetId -like "*$text*"
     })
     Update-Chips $rows
-    if ($script:Category -ne 'All') { $rows = @($rows | Where-Object { $_.Category -eq $script:Category }) }
+    if ($script:Category -eq 'Popular') { $rows = @($rows | Where-Object { $_.Popular }) }
+    elseif ($script:Category -ne 'All') { $rows = @($rows | Where-Object { $_.Category -eq $script:Category }) }
+    if ($script:SortMode -eq 'Downloads') { $rows = @($rows | Sort-Object -Property @{ Expression = { Get-AppDownloads $_ }; Descending = $true }, @{ Expression = { $_.Name } }) }
     $cards = foreach ($r in $rows) {
         $k = Get-AppKey $r
         if (-not $script:CardRows.ContainsKey($k)) { $script:CardRows[$k] = New-Object PackTune.Row }
@@ -1143,9 +1149,9 @@ function Update-AppList {
         foreach ($c in $cards) { $script:CardCollection.Add($c) }
     }
     $loading = @($script:Shared.Meta.Count -lt 2 -and (Test-TaskRunning 'meta')).Count
-    $ui.TxtAppsCount.Text = "$($cards.Count) shown" + $(if (Test-TaskRunning 'meta') { ', versions still loading' } elseif ($searching) { ", $(@($script:SearchRows).Count) from the repositories" } else { '' })
+    $ui.TxtAppsCount.Text = "$($cards.Count) shown" + $(if (Test-TaskRunning 'popular') { ', popular apps loading' } elseif (Test-TaskRunning 'meta') { ', versions still loading' } elseif ($searching) { ", $(@($script:SearchRows).Count) from the repositories" } else { '' })
     $curated = $script:SourceRows.Count
-    $ui.TxtAppsSubtitle.Text = "$curated curated apps from winget and Chocolatey in one list. Type to filter, or search both repositories."
+    $ui.TxtAppsSubtitle.Text = "$curated curated apps$(if (@($script:PopularRows).Count) { " and the $(@($script:PopularRows).Count) most popular Chocolatey packages" }) from winget and Chocolatey in one list. Type to filter, or search both repositories."
     if ($script:DetailRow) { Show-AppDetails $script:DetailRow -Keep }
 }
 $script:SearchKeys = @{}
@@ -1154,6 +1160,7 @@ $script:Chips = @{}
 function Update-Chips($Rows) {
     # Category chips with the number of apps each one has in the current view; built once, counted on every change
     $cats = @($script:Catalog | ForEach-Object { $_.Category } | Where-Object { $_ } | Sort-Object -Unique)
+    $cats = @('Popular') + $cats + @('Other')
     if ($script:Chips.Count -eq 0) {
         foreach ($cat in @('All') + $cats) {
             $chip = New-Object System.Windows.Controls.RadioButton
@@ -1165,18 +1172,67 @@ function Update-Chips($Rows) {
         }
     }
     foreach ($cat in $script:Chips.Keys) {
-        $count = if ($cat -eq 'All') { @($Rows).Count } else { @($Rows | Where-Object { $_.Category -eq $cat }).Count }
+        $count = if ($cat -eq 'All') { @($Rows).Count } elseif ($cat -eq 'Popular') { @($Rows | Where-Object { $_.Popular }).Count } else { @($Rows | Where-Object { $_.Category -eq $cat }).Count }
         $script:Chips[$cat].Content = "$cat  $count"
     }
 }
 
 function Start-CatalogPrefetch {
+    param([switch]$Force)
     $items = foreach ($e in $script:Catalog) {
         if ($e.Id) { @{ Source = 'Chocolatey'; Id = $e.Id } }
         if ($e.WingetId) { @{ Source = 'Winget'; Id = $e.WingetId } }
     }
-    Start-MetaPrefetch -Items @($items)
+    Start-MetaPrefetch -Items @($items) -Force:$Force
 }
+$script:PopularWork = @'
+param($Force, $Path, $Fixture)
+$Params = @{ CachePath = $Path; Cache = $Shared.Meta; Force = [bool]$Force }
+# Test hook: a file with feed packages instead of the community feed
+if ($Fixture -and (Test-Path -LiteralPath $Fixture)) { $Params.FeedPackages = @(Get-Content -LiteralPath $Fixture -Raw | ConvertFrom-Json) }
+Get-PackTunePopularApps @Params
+'@
+function Update-RefreshButton {
+    $busy = (Test-TaskRunning 'popular') -or (Test-TaskRunning 'meta')
+    $ui.BtnRefreshApps.IsEnabled = -not $busy
+    $ui.BtnRefreshApps.Content = if ($busy -and $script:Refreshing) { 'Refreshing ...' } else { 'Refresh versions' }
+    if (-not $busy) { $script:Refreshing = $false }
+}
+function Start-PopularLoad {
+    # The top Chocolatey packages by downloads (24 hour cache; -Force reads the feed now), merged into the app list
+    param([switch]$Force)
+    if (Test-TaskRunning 'popular') { return }
+    Update-RefreshButton
+    [void](Start-UiTask -Kind 'popular' -Title 'Reading the popular apps' -Display 'Popular apps' -Pool $script:UserPool -Hidden -Arguments @{ Force = [bool]$Force; Path = $script:PopularCachePath; Fixture = $env:PACKTUNE_POPULAR_FIXTURE } -Work $script:PopularWork -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'failed') { Write-UiLog 'The popular apps could not be read, the curated list stays (see Activity).' 'Warning' }
+        else {
+            $script:PopularRows = @($Result | Where-Object { $_ -and $_.ChocoId -and $_.Popular })
+            $script:PopularLoaded = $true
+            Write-UiLog "Popular apps: $(@($script:PopularRows).Count) packages, $(@($script:PopularRows | Where-Object { $_.WingetId }).Count) with a verified winget package."
+        }
+        $script:MetaDirty = $true
+        Update-AppList
+        Update-RefreshButton
+        Start-AppIconTask
+        Save-MetaCache
+        Start-IconRender
+    })
+    Update-AppList
+}
+$script:Refreshing = $false
+function Start-AppsRefresh {
+    # Refresh versions: the package infos of the curated apps and the popular list, read again now (no cache). The
+    # feed retries with a wait when it limits the requests.
+    if ((Test-TaskRunning 'popular') -or (Test-TaskRunning 'meta')) { return }
+    $script:Refreshing = $true
+    $script:MetaWarned = $false
+    Write-UiLog 'Refreshing the package infos and the popular apps, ignoring the cache ...'
+    Start-PopularLoad -Force
+    Start-CatalogPrefetch -Force
+    Update-RefreshButton
+}
+Add-Click $ui.BtnRefreshApps { try { Start-AppsRefresh } catch { Show-Error $_.Exception.Message } }
 function Update-CatalogRowsAndList { Update-CatalogRows; Update-AppList }
 
 function Find-VisualChild($Parent, [type]$Type) {
@@ -1203,6 +1259,19 @@ $ui.TxtFilter.Add_TextChanged({
     try { Update-AppList } catch { Show-Error $_.Exception.Message }
 })
 $ui.TxtFilter.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { try { Start-AppSearch } catch { Show-Error $_.Exception.Message } } })
+$script:SortMode = 'Default'
+foreach ($pair in @(@('SortDefault', 'Default'), @('SortDownloads', 'Downloads'))) {
+    $ui[$pair[0]].Tag = $pair[1]
+    $ui[$pair[0]].Add_Checked({ param($s) $script:SortMode = [string]$s.Tag; try { Update-AppList } catch { Show-Error $_.Exception.Message } })
+}
+function Get-AppDownloads($Row) {
+    # Relevance: the Chocolatey download count (from the popular list or the package infos); unknown counts last
+    if ($null -ne $Row.Downloads) { return [double]$Row.Downloads }
+    $meta = Get-AppMeta $Row 'Chocolatey'
+    $n = 0.0
+    if ($meta -and $meta.Found -and [double]::TryParse([string]$meta.Downloads, [ref]$n)) { return $n }
+    return -1.0
+}
 foreach ($pair in @(@('FltAll', 'All'), @('FltWinget', 'Winget'), @('FltChoco', 'Chocolatey'), @('FltBoth', 'Both'))) {
     $ui[$pair[0]].Tag = $pair[1]
     $ui[$pair[0]].Add_Checked({ param($s) $script:SourceFilter = [string]$s.Tag; try { Update-AppList } catch { Show-Error $_.Exception.Message } })
@@ -3087,6 +3156,7 @@ Show-Page 'Start'
 Update-TenantRows
 $timer.Start()
 Start-CatalogPrefetch
+Start-PopularLoad
 if (-not (Test-TaskRunning 'meta')) { Start-IconRender }   # all infos came from the cache
 # Test hook: PACKTUNE_SMOKE names a script that drives the window off-screen and renders every page.
 if ($env:PACKTUNE_SMOKE) { . $env:PACKTUNE_SMOKE }

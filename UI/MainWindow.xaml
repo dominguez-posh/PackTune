@@ -345,12 +345,19 @@
                                         </Grid>
                                     </Border>
                                     <Button x:Name="BtnSearchRepos" Margin="0,0,12,8" Content="Search repositories" Tag="&#xE721;"/>
+                                    <Button x:Name="BtnRefreshApps" Margin="0,0,12,8" Content="Refresh versions" Tag="&#xE72C;" ToolTip="Reload the versions and the popular apps now, ignoring the 24 hour cache"/>
                                     <Border Style="{StaticResource Segmented}" Margin="0,0,12,8" AutomationProperties.Name="Available via">
                                         <StackPanel Orientation="Horizontal">
                                             <RadioButton x:Name="FltAll" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="All sources" IsChecked="True"/>
                                             <RadioButton x:Name="FltWinget" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="winget"/>
                                             <RadioButton x:Name="FltChoco" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="Chocolatey"/>
                                             <RadioButton x:Name="FltBoth" GroupName="Flt" Style="{StaticResource SegmentItem}" Content="Both"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Style="{StaticResource Segmented}" Margin="0,0,12,8" AutomationProperties.Name="Sort">
+                                        <StackPanel Orientation="Horizontal">
+                                            <RadioButton x:Name="SortDefault" GroupName="Sort" Style="{StaticResource SegmentItem}" Content="Curated first" IsChecked="True"/>
+                                            <RadioButton x:Name="SortDownloads" GroupName="Sort" Style="{StaticResource SegmentItem}" Content="Most downloaded"/>
                                         </StackPanel>
                                     </Border>
                                     <TextBlock x:Name="TxtAppsCount" Style="{StaticResource Hint}" VerticalAlignment="Center" Margin="0,0,0,8"/>
