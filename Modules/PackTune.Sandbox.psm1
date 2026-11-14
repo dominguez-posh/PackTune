@@ -25,6 +25,9 @@ $script:Options = @{
     PollSeconds       = 3
     BootSeconds       = 90
 }
+# The SDK signing tools: this NuGet package version and its SHA256 only (checked 2026-11-14: all 44 PE files of bin\*\x64
+# carry a valid Microsoft signature). A newer version is a deliberate change here.
+$script:SdkBuildTools = @{ Version = '10.0.28000.2957'; Sha256 = 'B7163FC6F636172726D0985963E4F7F11C41AFE1C7FDFE78F8051877360ED696' }
 # Used when the Learn page cannot be read or its layout changed
 $script:FallbackSource = [pscustomobject]@{
     Version    = '1.2024.405.0'
@@ -256,7 +259,9 @@ function Get-PackTuneToolchain {
         Path = $Dir; Version = $Manifest.Version; SdkToolsVersion = $Manifest.SdkToolsVersion; Downloaded = [datetime]$Manifest.Downloaded
         Bundle = Join-Path $Dir 'MSIXPackagingTool.msixbundle'; License = Join-Path $Dir 'MSIXPackagingTool.License.xml'
         Driver = Join-Path $Dir 'Msix-PackagingTool-Driver-Package.cab'; SignTool = $SignTool; MakeAppx = Join-Path $Dir 'SdkTools\makeappx.exe'
-        IsComplete = $Ok -and (Test-Path $SignTool); Files = $Manifest.Files
+        # Toolchains from before the pin (SDK tools not in the SHA256 list, other version) count as incomplete: downloaded again
+        IsComplete = $Ok -and (Test-Path $SignTool) -and [string]$Manifest.SdkToolsVersion -eq $script:SdkBuildTools.Version -and @($Manifest.Files | Where-Object { [string]$_.Name -eq 'SdkTools\signtool.exe' }).Count -eq 1 -and @($Manifest.Files | Where-Object { [string]$_.Name -eq 'SdkTools\makeappx.exe' }).Count -eq 1
+        Files = $Manifest.Files
     }
 }
 
@@ -278,29 +283,53 @@ function Assert-MicrosoftSignature {
     }
 }
 
-function Update-SdkTools {
-    # signtool and makeappx (x64) from the Microsoft.Windows.SDK.BuildTools NuGet package; returns its version
-    param([Parameter(Mandatory = $true)][string]$Destination)
-    $Index = Invoke-RestMethod 'https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/index.json' -TimeoutSec 20
-    $Version = @($Index.versions | Where-Object { $_ -notmatch '-' })[-1]
-    Write-SandboxLog "Downloading the Windows SDK build tools $Version (signtool, makeappx) ..."
-    $Package = Join-Path ([IO.Path]::GetTempPath()) "sdkbuildtools-$Version.zip"
-    Save-SandboxDownload -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/$Version/microsoft.windows.sdk.buildtools.$Version.nupkg" -Destination $Package
+function Expand-PackTuneZip {
+    # Unpacks a zip; refuses entries that would end up outside the destination (zip slip) before anything is written
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Destination)
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    if (Test-Path $Destination) { Remove-Item $Destination -Recurse -Force }
-    New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-    $Zip = [IO.Compression.ZipFile]::OpenRead($Package)
+    $Root = [IO.Path]::GetFullPath($Destination).TrimEnd("\") + "\"
+    $Zip = [IO.Compression.ZipFile]::OpenRead($Path)
     try {
-        $Entries = @($Zip.Entries | Where-Object { $_.FullName -match '^bin/[\d\.]+/x64/' -and $_.Name })
-        if (-not $Entries) { throw 'The SDK build tools package contains no x64 tools.' }
-        foreach ($Entry in $Entries) {
-            $Target = Join-Path $Destination (($Entry.FullName -replace '^bin/[\d\.]+/x64/', '') -replace '/', '\')
-            $TargetDir = Split-Path $Target -Parent
-            if (-not (Test-Path $TargetDir)) { New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null }
+        foreach ($Entry in $Zip.Entries) {
+            $Target = [IO.Path]::GetFullPath((Join-Path $Destination $Entry.FullName))
+            if (-not $Target.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) { throw "The archive contains a path outside the target folder ('$($Entry.FullName)'), nothing was unpacked." }
+        }
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+        foreach ($Entry in $Zip.Entries) {
+            $Target = [IO.Path]::GetFullPath((Join-Path $Destination $Entry.FullName))
+            if ($Entry.FullName.EndsWith("/")) { New-Item -ItemType Directory -Path $Target -Force | Out-Null; continue }
+            New-Item -ItemType Directory -Path (Split-Path $Target -Parent) -Force | Out-Null
             [IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Target, $true)
         }
     }
-    finally { $Zip.Dispose(); Remove-Item $Package -Force -ErrorAction SilentlyContinue }
+    finally { $Zip.Dispose() }
+}
+
+function Update-SdkTools {
+    <#
+        signtool and makeappx (x64) from the Microsoft.Windows.SDK.BuildTools NuGet package; returns its version. The version
+        and the SHA256 of the package are pinned ($script:SdkBuildTools; a newer one is a deliberate change of this file), the
+        package is unpacked zip-slip safe, and every PE file (exe, dll, mui) must carry a valid Microsoft signature.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Destination)
+    $Version = $script:SdkBuildTools.Version
+    Write-SandboxLog "Downloading the Windows SDK build tools $Version (signtool, makeappx) ..."
+    $Work = Join-Path ([IO.Path]::GetTempPath()) ("packtune-sdkbuildtools-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    New-Item -ItemType Directory -Path $Work -Force | Out-Null
+    try {
+        $Package = Join-Path $Work "package.zip"
+        Save-SandboxDownload -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.buildtools/$Version/microsoft.windows.sdk.buildtools.$Version.nupkg" -Destination $Package
+        $Hash = Get-FileSha256 $Package
+        if ($Hash -ne $script:SdkBuildTools.Sha256) { throw "The SDK build tools package $Version does not have the pinned SHA256 (got $Hash). Nothing was installed." }
+        Expand-PackTuneZip -Path $Package -Destination (Join-Path $Work "x")
+        $X64 = @(Get-ChildItem -LiteralPath (Join-Path $Work "x\bin") -Directory -ErrorAction SilentlyContinue | ForEach-Object { Join-Path $_.FullName "x64" } | Where-Object { Test-Path -LiteralPath $_ }) | Select-Object -First 1
+        if (-not $X64) { throw 'The SDK build tools package contains no x64 tools.' }
+        foreach ($File in @(Get-ChildItem -LiteralPath $X64 -Recurse -File | Where-Object { $_.Extension -in '.exe', '.dll', '.mui' })) { Assert-MicrosoftSignature -Path $File.FullName }
+        if (Test-Path $Destination) { Remove-Item $Destination -Recurse -Force }
+        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
+        Copy-Item -Path (Join-Path $X64 '*') -Destination $Destination -Recurse -Force
+    }
+    finally { Remove-Item -LiteralPath $Work -Recurse -Force -ErrorAction SilentlyContinue }
     $Version
 }
 
@@ -332,10 +361,11 @@ function Update-PackTuneToolchain {
     }
     Write-SandboxLog "Downloading the capture tools ($($Files.Count + 1) of $($Files.Count + 1)): Windows SDK signing tools ..."
     $SdkVersion = Update-SdkTools -Destination (Join-Path $Dir 'SdkTools')
-    Assert-MicrosoftSignature -Path (Join-Path $Dir 'SdkTools\signtool.exe')
+    # Every file of the SDK tools (signtool, makeappx and the DLLs they load) is in the SHA256 list, checked on every use
+    $SdkFiles = @(Get-ChildItem -LiteralPath (Join-Path $Dir 'SdkTools') -Recurse -File | ForEach-Object { @{ Name = $_.FullName.Substring($Dir.TrimEnd('\').Length + 1); Url = 'nuget:microsoft.windows.sdk.buildtools/' + $SdkVersion } })
     $Manifest = [ordered]@{
         Version = $Source.Version; SdkToolsVersion = $SdkVersion; Downloaded = (Get-Date).ToString('o')
-        Files = @($Files | ForEach-Object { [ordered]@{ Name = $_.Name; Url = $_.Url; Sha256 = (Get-FileSha256 (Join-Path $Dir $_.Name)) } })
+        Files = @(@($Files) + $SdkFiles | ForEach-Object { [ordered]@{ Name = $_.Name; Url = $_.Url; Sha256 = (Get-FileSha256 (Join-Path $Dir $_.Name)) } })
     }
     $Manifest | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $Dir 'toolchain.json') -Encoding UTF8
     Write-SandboxLog "The capture tools are ready: MSIX Packaging Tool $($Source.Version), SDK tools $SdkVersion." 'Success'
@@ -714,4 +744,4 @@ Export-ModuleMember -Function Set-PackTuneSandboxLog, Set-PackTuneSandboxOption,
     ConvertTo-PackTuneMsixVersion, ConvertTo-PackTuneMsixPackageName, Get-PackTuneNextMsixVersion,
     Get-PackTuneToolchain, Get-PackTuneToolchainState, Update-PackTuneToolchain,
     Get-PackTuneMsixInfo, Get-PackTuneMsixIdentity, New-PackTuneSigningCertificate, Remove-PackTuneSigningCertificate, Invoke-PackTuneSigning,
-    Invoke-PackTuneMsixCapture, Start-PackTuneWin32Lab
+    Invoke-PackTuneMsixCapture, Start-PackTuneWin32Lab, Expand-PackTuneZip

@@ -237,27 +237,7 @@ function New-PackTuneZip {
     return $Path
 }
 
-function Expand-PackTuneZip {
-    # Unpacks a zip; refuses entries that would end up outside the destination (zip slip) before anything is written
-    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$Destination)
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $Root = [IO.Path]::GetFullPath($Destination).TrimEnd("\") + "\"
-    $Zip = [IO.Compression.ZipFile]::OpenRead($Path)
-    try {
-        foreach ($Entry in $Zip.Entries) {
-            $Target = [IO.Path]::GetFullPath((Join-Path $Destination $Entry.FullName))
-            if (-not $Target.StartsWith($Root, [StringComparison]::OrdinalIgnoreCase)) { throw "The archive contains a path outside the target folder ('$($Entry.FullName)'), nothing was unpacked." }
-        }
-        New-Item -ItemType Directory -Path $Destination -Force | Out-Null
-        foreach ($Entry in $Zip.Entries) {
-            $Target = [IO.Path]::GetFullPath((Join-Path $Destination $Entry.FullName))
-            if ($Entry.FullName.EndsWith("/")) { New-Item -ItemType Directory -Path $Target -Force | Out-Null; continue }
-            New-Item -ItemType Directory -Path (Split-Path $Target -Parent) -Force | Out-Null
-            [IO.Compression.ZipFileExtensions]::ExtractToFile($Entry, $Target, $true)
-        }
-    }
-    finally { $Zip.Dispose() }
-}
+# Expand-PackTuneZip (zip-slip safe unpacking) lives in Modules\PackTune.Sandbox.psm1: the toolchain download uses it too
 
 #endregion
 

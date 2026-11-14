@@ -66,13 +66,25 @@ public static class FakeSignTool {
     }
 }
 '@
-$files = foreach ($n in 'MSIXPackagingTool.msixbundle', 'MSIXPackagingTool.License.xml', 'Msix-PackagingTool-Driver-Package.cab') {
-    $sha = [Security.Cryptography.SHA256]::Create(); $h = -join ($sha.ComputeHash([IO.File]::ReadAllBytes((Join-Path $ws.Toolchain $n))) | ForEach-Object { $_.ToString('X2') })
-    [ordered]@{ Name = $n; Url = 'https://example.invalid/' + $n; Sha256 = $h }
+'fake makeappx' | Set-Content (Join-Path $sdk 'makeappx.exe'); 'fake dll' | Set-Content (Join-Path $sdk 'appxsip.dll')
+$pinned = & (Get-Module PackTune.Sandbox) { $script:SdkBuildTools }
+$hashOf = { param($p) $sha = [Security.Cryptography.SHA256]::Create(); -join ($sha.ComputeHash([IO.File]::ReadAllBytes($p)) | ForEach-Object { $_.ToString('X2') }) }
+$files = foreach ($n in 'MSIXPackagingTool.msixbundle', 'MSIXPackagingTool.License.xml', 'Msix-PackagingTool-Driver-Package.cab', 'SdkTools\signtool.exe', 'SdkTools\makeappx.exe', 'SdkTools\appxsip.dll') {
+    [ordered]@{ Name = $n; Url = 'https://example.invalid/' + $n; Sha256 = (& $hashOf (Join-Path $ws.Toolchain $n)) }
 }
-[ordered]@{ Version = '1.2024.405.0'; SdkToolsVersion = '10.0.99999'; Downloaded = (Get-Date).ToString('o'); Files = @($files) } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $ws.Toolchain 'toolchain.json')
+# A toolchain from before the pin: the SDK tools are not in the SHA256 list -> incomplete, downloaded again
+[ordered]@{ Version = '1.2024.405.0'; SdkToolsVersion = '10.0.99999'; Downloaded = (Get-Date).ToString('o'); Files = @($files | Select-Object -First 3) } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $ws.Toolchain 'toolchain.json')
+Test-Check 'toolchain: one without the SDK tools in its SHA256 list (older download) counts as incomplete' (-not (Get-PackTuneToolchain -VerifyHash).IsComplete)
+[ordered]@{ Version = '1.2024.405.0'; SdkToolsVersion = $pinned.Version; Downloaded = (Get-Date).ToString('o'); Files = @($files) } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $ws.Toolchain 'toolchain.json')
 $tc = Get-PackTuneToolchain -VerifyHash
 Test-Check 'toolchain: complete when every file is there and its SHA256 matches' ($tc -and $tc.IsComplete -and (Get-PackTuneToolchainState).State -eq 'Ready' -and $tc.Version -eq '1.2024.405.0')
+'tampered dll' | Set-Content (Join-Path $sdk 'appxsip.dll')
+Test-Check 'toolchain: a changed DLL of the SDK tools fails the hash check' (-not (Get-PackTuneToolchain -VerifyHash).IsComplete)
+'fake dll' | Set-Content (Join-Path $sdk 'appxsip.dll')
+$moduleText = Get-Content (Join-Path $repo 'Modules\PackTune.Sandbox.psm1') -Raw
+$sdkFn = [regex]::Match($moduleText, '(?s)function Update-SdkTools \{.*?\r?\n\}').Value
+Test-Check 'SDK tools: pinned package version and SHA256, zip-slip safe unpacking, Microsoft signature on every exe, dll and mui' ($pinned.Version -match '^\d+\.\d+\.\d+\.\d+$' -and $pinned.Sha256 -match '^[0-9A-F]{64}$' -and $sdkFn -match '\$script:SdkBuildTools\.Version' -and $sdkFn -notmatch 'index\.json' -and $sdkFn -match 'Expand-PackTuneZip' -and $sdkFn -notmatch 'ExtractToFile' -and $sdkFn -match "Extension -in '\.exe', '\.dll', '\.mui' \}\)\) \{ Assert-MicrosoftSignature" -and $sdkFn -match 'does not have the pinned SHA256') $sdkFn
+Test-Check 'SDK tools: every file of SdkTools goes into the SHA256 list' ($moduleText -match 'Get-ChildItem -LiteralPath \(Join-Path \$Dir ''SdkTools''\) -Recurse -File')
 'tampered' | Set-Content (Join-Path $ws.Toolchain 'MSIXPackagingTool.License.xml')
 Test-Check 'toolchain: a changed file fails the hash check' (-not (Get-PackTuneToolchain -VerifyHash).IsComplete -and (Get-PackTuneToolchain).IsComplete)
 "content of MSIXPackagingTool.License.xml" | Set-Content (Join-Path $ws.Toolchain 'MSIXPackagingTool.License.xml')
