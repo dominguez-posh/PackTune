@@ -183,8 +183,14 @@ if (-not $Found) { exit 1 }
 try { if ([version]$Found.Version -ge [version]$Version) { Write-Output "$Identity $($Found.Version) is provisioned"; exit 0 } } catch { }
 exit 1
 '@
+    # Every baked value is checked against its strict form and quoted for a single-quoted string (they run as SYSTEM)
+    if ($AppId -notmatch '^[a-z0-9][a-z0-9-]{0,79}$') { throw "The app id '$AppId' is not valid" }
+    if ($PackageName -notmatch '^[A-Za-z0-9][A-Za-z0-9.-]{2,49}$') { throw "The package name '$PackageName' is not valid" }
+    if ($Version -notmatch '^\d+(\.\d+){3}$') { throw "The package version '$Version' is not a version of four numbers" }
+    if ($Thumbprint -notmatch '^[0-9A-Fa-f]{40}$') { throw "The certificate thumbprint '$Thumbprint' is not valid" }
+    $Quote = { param($Text) ([string]$Text -replace '[^\x20-\x7E]', '').Replace("'", "''") }
     $Common = Get-DeviceScriptCommon
-    $Fill = { param($Text) $Text.Replace('__COMMON__', $Common).Replace('__APPID__', $AppId).Replace('__IDENTITY__', $PackageName).Replace('__VERSION__', $Version).Replace('__THUMBPRINT__', $Thumbprint) }
+    $Fill = { param($Text) $Text.Replace('__COMMON__', $Common).Replace('__APPID__', (& $Quote $AppId)).Replace('__IDENTITY__', (& $Quote $PackageName)).Replace('__VERSION__', (& $Quote $Version)).Replace('__THUMBPRINT__', (& $Quote $Thumbprint.ToUpper())) }
     [pscustomobject]@{ Install = (& $Fill $Install); Detection = (& $Fill $Detect) }
 }#Install and detection script of an MSIX delivered as a Win32 app
 
@@ -217,9 +223,12 @@ function Get-PackTuneLongPath {
 
 function Invoke-PackTuneCustomMsixBuild {
     <#
-        Captures the folder to an MSIX in a fresh sandbox and signs it with a certificate made for this call: non-exportable
-        key, deleted in finally (never stored). -BasePackage: update capture (the previous MSIX is restored first). Returns the
-        signed package, the public certificate, the thumbprint, the identity and the documentation.
+        Captures the folder to an MSIX in a fresh sandbox (unsigned, publisher = the fixed subject of the app), then makes a
+        certificate for this version only (non-exportable key, deleted in finally, never stored) and signs the package with it.
+        The identity is read again from the SIGNED package on this computer, never from what the sandbox reported (the
+        installer runs there and can change the job folder): name, publisher and version must be the expected ones and the
+        signer must be this certificate. -BasePackage: update capture (the previous MSIX is restored first). Returns the signed
+        package, the public certificate, the thumbprint, the identity and the documentation.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$Folder, [Parameter(Mandatory = $true)][string]$EntryPoint, [string]$Arguments = "",
@@ -229,24 +238,47 @@ function Invoke-PackTuneCustomMsixBuild {
     $Folder = Get-PackTuneLongPath -Path $Folder
     if ($BasePackage) { $BasePackage = Get-PackTuneLongPath -Path $BasePackage }
     $Identity = Get-PackTuneCustomMsixIdentity -Name $Name
+    $ExpectedVersion = ConvertTo-PackTuneMsixVersion $Version
+    $Params = @{
+        InstallerFolder = $Folder; EntryPoint = $EntryPoint; Arguments = $Arguments; PackageName = $Identity.PackageName; DisplayName = $Name
+        Version = $ExpectedVersion; PublisherDisplayName = $(if ($PublisherDisplayName) { $PublisherDisplayName } else { $Name }); SkipSigning = $true; Publisher = $Identity.Subject
+    }
+    if ($BasePackage) { $Params.BasePackage = $BasePackage }
+    $Result = Invoke-PackTuneMsixCapture @Params
+    if ($Result.State -ne "Succeeded" -or -not $Result.PackagePath) { throw "The capture failed: $($Result.Message) (logs: $($Result.JobPath))" }
+
+    # The certificate exists only from here to the end of the signing
     if (-not $CertFolder) { $CertFolder = Join-Path $script:WorkRoot ("certs\" + [guid]::NewGuid().ToString("N").Substring(0, 8)) }
     New-Item -ItemType Directory -Path $CertFolder -Force | Out-Null
     $Cert = New-PackTuneSigningCertificate -Subject $Identity.Subject -OutputFolder $CertFolder
-    try {
-        $Params = @{
-            InstallerFolder = $Folder; EntryPoint = $EntryPoint; Arguments = $Arguments; PackageName = $Identity.PackageName; DisplayName = $Name
-            Version = $Version; PublisherDisplayName = $(if ($PublisherDisplayName) { $PublisherDisplayName } else { $Name }); CertificateThumbprint = $Cert.Thumbprint
-        }
-        if ($BasePackage) { $Params.BasePackage = $BasePackage }
-        $Result = Invoke-PackTuneMsixCapture @Params
-    }
+    try { $null = Invoke-PackTuneSigning -Path $Result.PackagePath -CertificateThumbprint $Cert.Thumbprint }
     finally { [void](Remove-PackTuneSigningCertificate -Thumbprint $Cert.Thumbprint) }
-    if ($Result.State -ne "Succeeded" -or -not $Result.PackagePath) { throw "The capture failed: $($Result.Message) (logs: $($Result.JobPath))" }
+
+    $Signed = Assert-PackTuneSignedMsix -Path $Result.PackagePath -PackageName $Identity.PackageName -Publisher $Cert.Subject -Version $ExpectedVersion -Thumbprint $Cert.Thumbprint
     [pscustomobject]@{
-        Msix = $Result.PackagePath; Cer = $Cert.CerPath; Thumbprint = $Cert.Thumbprint; Subject = $Cert.Subject; Identity = $Result.Identity
-        PackageName = $Identity.PackageName; Version = [string]$Result.Identity.Version; JobPath = $Result.JobPath; Documentation = $Result.Documentation
+        Msix = $Result.PackagePath; Cer = $Cert.CerPath; Thumbprint = $Cert.Thumbprint; Subject = $Cert.Subject; Identity = $Signed
+        PackageName = [string]$Signed.Name; Version = [string]$Signed.Version; JobPath = $Result.JobPath; Documentation = $Result.Documentation
     }
 }#Captures and signs one version
+
+function Assert-PackTuneSignedMsix {
+    <#
+        The identity of a signed MSIX, read from the package itself on this computer: refused unless name, publisher and
+        version are exactly the expected ones, the version has four numbers, and the signer is the certificate of this version.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Path, [Parameter(Mandatory = $true)][string]$PackageName, [Parameter(Mandatory = $true)][string]$Publisher,
+        [Parameter(Mandatory = $true)][string]$Version, [Parameter(Mandatory = $true)][string]$Thumbprint)
+    $Found = Get-PackTuneMsixIdentity -Path $Path
+    if ([string]$Found.Version -notmatch '^\d+(\.\d+){3}$') { throw "The package has an invalid version '$($Found.Version)': not used." }
+    if ([string]$Found.Name -cne $PackageName) { throw "The package name is '$($Found.Name)', expected '$PackageName': not used." }
+    if ([string]$Found.Publisher -ne $Publisher) { throw "The package publisher is '$($Found.Publisher)', expected '$Publisher': not used." }
+    if ([string]$Found.Version -ne $Version) { throw "The package version is '$($Found.Version)', expected '$Version': not used." }
+    $Signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if (-not $Signature.SignerCertificate -or $Signature.SignerCertificate.Thumbprint -ne $Thumbprint.ToUpper() -or [string]$Signature.Status -in "HashMismatch", "NotSigned") {
+        throw "The package is not signed with the certificate of this version (status $($Signature.Status)): not used."
+    }
+    return $Found
+}
 
 function New-PackTuneCustomMsixPackage {
     # The Win32 package of one MSIX version: install.ps1, package.msix, signing.cer; the .intunewin and the detection rule file

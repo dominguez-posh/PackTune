@@ -60,23 +60,46 @@ $script:FailCapture = $false
 $script:CertCounter = 0
 $script:SandboxHere = $true
 function Test-PackTuneSandboxAvailable { $script:SandboxHere }
+$script:Events = New-Object System.Collections.ArrayList
+$script:Signed = New-Object System.Collections.ArrayList
+$script:Tamper = $null   # a script block that changes the unsigned capture output (what an installer in the sandbox could do)
 function New-PackTuneSigningCertificate { param([string]$Subject, [string]$OutputFolder)
+    [void]$script:Events.Add('cert')
     $script:CertCounter++
     $thumb = ('{0:X40}' -f $script:CertCounter)
     $cer = Join-Path $OutputFolder "$thumb.cer"; "public certificate $thumb" | Set-Content $cer
     [void]$script:Certs.Add(@{ Thumbprint = $thumb; Subject = $Subject })
     [pscustomobject]@{ Thumbprint = $thumb; Subject = $Subject; CerPath = $cer; NotAfter = (Get-Date).AddYears(5) }
 }
-function Remove-PackTuneSigningCertificate { param([string]$Thumbprint) [void]$script:CertsRemoved.Add($Thumbprint); $true }
+function Remove-PackTuneSigningCertificate { param([string]$Thumbprint) [void]$script:Events.Add('remove'); [void]$script:CertsRemoved.Add($Thumbprint); $true }
 function Invoke-PackTuneMsixCapture {
-    param([string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$PackageName, [string]$DisplayName, [string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertificateThumbprint)
+    param([string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$PackageName, [string]$DisplayName, [string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertificateThumbprint, [switch]$SkipSigning, [string]$Publisher)
+    [void]$script:Events.Add('capture')
     $baseBytes = if ($BasePackage) { [IO.File]::ReadAllBytes($BasePackage) } else { $null }
-    [void]$script:Captures.Add(@{ Folder = $InstallerFolder; Entry = $EntryPoint; Arguments = $Arguments; PackageName = $PackageName; Version = $Version; Thumbprint = $CertificateThumbprint; Base = $BasePackage; BaseBytes = $baseBytes; Files = @(Get-ChildItem $InstallerFolder -Recurse -File).Name })
+    [void]$script:Captures.Add(@{ Folder = $InstallerFolder; Entry = $EntryPoint; Arguments = $Arguments; PackageName = $PackageName; Version = $Version; Thumbprint = $CertificateThumbprint; SkipSigning = [bool]$SkipSigning; Publisher = $Publisher; Base = $BasePackage; BaseBytes = $baseBytes; Files = @(Get-ChildItem $InstallerFolder -Recurse -File).Name })
     if ($script:FailCapture) { return [pscustomobject]@{ State = 'Failed'; Message = 'the installer exited with code 1603'; PackagePath = $null; JobPath = 'C:\jobs\x'; Identity = $null; Documentation = $null } }
     $out = Join-Path $work "msix\$PackageName`_$Version.msix"; New-Item -ItemType Directory -Path (Split-Path $out) -Force | Out-Null
-    [IO.File]::WriteAllBytes($out, [Text.Encoding]::ASCII.GetBytes("MSIX $PackageName $Version signed with $CertificateThumbprint"))
+    $text = "MSIX $PackageName $Version publisher $Publisher"
+    if ($script:Tamper) { $text = & $script:Tamper $text }
+    [IO.File]::WriteAllBytes($out, [Text.Encoding]::ASCII.GetBytes($text))
     $doc = Join-Path $work "doc-$Version"; New-Item -ItemType Directory -Path $doc -Force | Out-Null; '<html>doc</html>' | Set-Content (Join-Path $doc 'index.html')
+    # The sandbox reports the identity it was asked for; the build must not trust it (it reads the signed package)
     [pscustomobject]@{ State = 'Succeeded'; Message = 'ok'; PackagePath = $out; JobPath = 'C:\jobs\ok'; Identity = [pscustomobject]@{ Name = $PackageName; Version = $Version; FullName = "$PackageName`_$Version`_x64__abc" }; Documentation = $doc }
+}
+function Invoke-PackTuneSigning { param([string]$Path, [string]$CertificateThumbprint, [switch]$AllowNoTimestamp)
+    $live = @($script:Certs | Where-Object { $_.Thumbprint -eq $CertificateThumbprint }).Count -eq 1 -and $script:CertsRemoved -notcontains $CertificateThumbprint
+    [void]$script:Events.Add('sign')
+    [void]$script:Signed.Add(@{ Path = $Path; Thumbprint = $CertificateThumbprint; CertLive = $live })
+    [IO.File]::WriteAllText($Path, [IO.File]::ReadAllText($Path) + " signed with $CertificateThumbprint")
+}
+# The package identity and its signature, read from the (fake) package file itself
+function Get-PackTuneMsixIdentity { param([string]$Path)
+    $m = [regex]::Match([IO.File]::ReadAllText($Path), '^MSIX (\S+) (\S+) publisher (.+?)( signed with ([0-9A-F]{40}))?$')
+    [pscustomobject]@{ Name = $m.Groups[1].Value; Version = $m.Groups[2].Value; Publisher = $m.Groups[3].Value; FullName = "$($m.Groups[1].Value)_$($m.Groups[2].Value)_x64__abc" }
+}
+function Get-AuthenticodeSignature { param([string]$LiteralPath)
+    $m = [regex]::Match([IO.File]::ReadAllText($LiteralPath), 'signed with ([0-9A-F]{40})$')
+    if ($m.Success) { [pscustomobject]@{ Status = 'UnknownError'; SignerCertificate = [pscustomobject]@{ Thumbprint = $m.Groups[1].Value } } } else { [pscustomobject]@{ Status = 'NotSigned'; SignerCertificate = $null } }
 }
 
 # --- the capture needs Windows Sandbox: without it nothing is started and no certificate is made
@@ -97,9 +120,21 @@ $null = Initialize-PackTuneStore
 # --- capture failure: certificate removed, nothing stored or uploaded
 $script:FailCapture = $true
 $threw = $false; $msg = ''; try { $null = New-PackTuneCustomOtherApp -Folder $folder -EntryPoint 'setup.exe' -Arguments '/S' -Name 'Contoso Helper Tool' -Publisher 'Contoso' } catch { $threw = $true; $msg = $_.Exception.Message }
-Test-Check 'capture failure: error with the cause, the certificate of the attempt is removed, nothing stored or uploaded' ($threw -and ($msg -like '*1603*') -and ($script:Certs.Count -eq 1) -and ($script:CertsRemoved.Count -eq 1) -and ($script:CertsRemoved[0] -eq $script:Certs[0].Thumbprint) -and ($script:Fs.Count -eq 0) -and (@(Get-Store).Count -eq 0)) $msg
+Test-Check 'capture failure: error with the cause, no certificate was ever made, nothing stored or uploaded' ($threw -and ($msg -like '*1603*') -and ($script:Certs.Count -eq 0) -and ($script:Fs.Count -eq 0) -and (@(Get-Store).Count -eq 0)) $msg
 $script:FailCapture = $false
-$script:Certs.Clear(); $script:CertsRemoved.Clear(); $script:Captures.Clear()
+# A capture output that does not match what was asked for (the installer changed the job folder): refused after
+# signing, the certificate is removed, nothing stored or uploaded
+foreach ($t in @(@('version', { param($x) $x -replace ' 1\.0\.0\.0 ', " 1.0.0.0';calc;' " }), @('name', { param($x) $x -replace 'PackTune\.ContosoHelperTool', 'PackTune.Other' }), @('publisher', { param($x) $x -replace 'publisher .*$', 'publisher CN=Evil' }), @('higher version', { param($x) $x -replace ' 1\.0\.0\.0 ', ' 9.9.9.9 ' }))) {
+    $script:Tamper = $t[1]; $script:Certs.Clear(); $script:CertsRemoved.Clear()
+    $threw = $false; $msg = ''; try { $null = New-PackTuneCustomOtherApp -Folder $folder -EntryPoint 'setup.exe' -Name 'Contoso Helper Tool' -Publisher 'Contoso' -Version '1.0.0.0' } catch { $threw = $true; $msg = $_.Exception.Message }
+    Test-Check "tampered capture output ($($t[0])): refused, certificate removed, nothing stored or uploaded" ($threw -and ($msg -like '*not used*') -and ($script:Certs.Count -eq 1) -and ($script:CertsRemoved.Count -eq 1) -and ($script:Fs.Count -eq 0) -and (@(Get-Store).Count -eq 0)) $msg
+}
+$script:Tamper = $null
+$script:Certs.Clear(); $script:CertsRemoved.Clear(); $script:Captures.Clear(); $script:Events.Clear(); $script:Signed.Clear()
+$threw = $false; try { $null = Get-PackTuneCustomMsixScripts -AppId 'x-1' -PackageName 'PackTune.X' -Version "1.0.0.0';calc;'" -Thumbprint ('A' * 40) } catch { $threw = $true }
+Test-Check 'device scripts: a version that is not four numbers is refused before it is baked in' $threw
+$threw = $false; try { $null = Get-PackTuneCustomMsixScripts -AppId "x';calc;'" -PackageName 'PackTune.X' -Version '1.0.0.0' -Thumbprint ('A' * 40) } catch { $threw = $true }
+Test-Check 'device scripts: an app id with quotes is refused' $threw
 foreach ($bad in @(@('..\x', 'setup.exe'), @($folder, 'missing.exe'), @((Join-Path $work 'nofolder'), 'setup.exe'))) {
     $threw = $false; try { $null = New-PackTuneCustomOtherApp -Folder $bad[0] -EntryPoint $bad[1] -Name 'Contoso Helper Tool' } catch { $threw = $true }
     Test-Check "deploy refuses: folder '$(Split-Path $bad[0] -Leaf)' entry '$($bad[1])'" ($threw -and ($script:Captures.Count -eq 0))
@@ -113,7 +148,8 @@ $cap = $script:Captures[0]
 $thumb = $script:Certs[0].Thumbprint
 $notes1 = ConvertFrom-PackTuneCustomNotes $a1.notes
 Test-Check 'deploy: ONE Intune app (no second app, no certificate profile), Win32, Available' (($apps.Count -eq 1) -and ($a1.displayName -eq 'Contoso Helper Tool') -and ($a1.publisher -eq 'Contoso') -and ($a1.assignment -eq 'available') -and (@($a1.dependencies).Count -eq 0))
-Test-Check 'deploy: the capture got the folder, entry point, arguments and the identity; the version certificate signed it' (($cap.Folder -eq $folder) -and ($cap.Entry -eq 'setup.exe') -and ($cap.Arguments -eq '/S') -and ($cap.PackageName -eq 'PackTune.ContosoHelperTool') -and ($cap.Thumbprint -eq $thumb) -and ([string]::IsNullOrEmpty($cap.Base))) "folder=$($cap.Folder) entry=$($cap.Entry) args=$($cap.Arguments) pn=$($cap.PackageName) th=$($cap.Thumbprint) vs $thumb base=$($cap.Base)"
+Test-Check 'deploy: the capture got the folder, entry point, arguments and the identity; the version certificate signed it' (($cap.Folder -eq $folder) -and ($cap.Entry -eq 'setup.exe') -and ($cap.Arguments -eq '/S') -and ($cap.PackageName -eq 'PackTune.ContosoHelperTool') -and $cap.SkipSigning -and ($cap.Publisher -eq 'CN=PackTune Contoso Helper Tool') -and ($script:Signed[0].Thumbprint -eq $thumb) -and $script:Signed[0].CertLive -and ([string]::IsNullOrEmpty($cap.Base))) "folder=$($cap.Folder) entry=$($cap.Entry) args=$($cap.Arguments) pn=$($cap.PackageName) skip=$($cap.SkipSigning) base=$($cap.Base)"
+Test-Check 'certificate: made only after the capture finished, removed right after signing' (($script:Events -join ',') -eq 'capture,cert,sign,remove') ($script:Events -join ',')
 Test-Check 'certificate: made for the call with the fixed subject, removed right after, also the only one' (($script:Certs.Count -eq 1) -and ($script:Certs[0].Subject -eq 'CN=PackTune Contoso Helper Tool') -and ($script:CertsRemoved -contains $thumb) -and ($script:CertsRemoved.Count -eq 1))
 Test-Check 'notes: custom=msix with app, version, identity, certificate thumbprint and the manifest start' (($notes1.Kind -eq 'msix') -and ($notes1.Version -eq '1.0.0.0') -and ($notes1.Identity -eq 'PackTune.ContosoHelperTool') -and ($notes1.Thumbprint -eq $thumb) -and ($notes1.Manifest.Length -eq 16) -and ($a1.notes.Length -lt 400)) $a1.notes
 $detText = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($a1.detection))
@@ -133,7 +169,7 @@ $custom = @(Get-PackTuneCustomApps)
 Test-Check 'the list shows it with kind msix, identity and thumbprint' (($custom.Count -eq 1) -and ($custom[0].Kind -eq 'msix') -and ($custom[0].Identity -eq 'PackTune.ContosoHelperTool') -and ($custom[0].Thumbprint -eq $thumb))
 
 # --- update: previous MSIX from the store, new version, new certificate, same subject, supersedence
-$v1Msix = [Text.Encoding]::ASCII.GetBytes("MSIX PackTune.ContosoHelperTool 1.0.0.0 signed with $thumb")
+$v1Msix = [Text.Encoding]::ASCII.GetBytes("MSIX PackTune.ContosoHelperTool 1.0.0.0 publisher CN=PackTune Contoso Helper Tool signed with $thumb")
 $folder2 = Join-Path $work 'helper-setup-2'; New-Item -ItemType Directory -Path $folder2 -Force | Out-Null; 'setup v2' | Set-Content (Join-Path $folder2 'setup.exe'); 'new file' | Set-Content (Join-Path $folder2 'extra.dll')
 $script:Captures.Clear()
 $id2 = Update-PackTuneCustomOtherApp -AppId $id1 -InstallerFolder $folder2
@@ -143,7 +179,7 @@ $thumb2 = $script:Certs[1].Thumbprint
 $notes2 = ConvertFrom-PackTuneCustomNotes $a2.notes
 Test-Check 'update: the previous MSIX from the store is the base of the capture (restored in the sandbox)' (($cap2.Base -like '*previous*package.msix') -and ([Text.Encoding]::ASCII.GetString($cap2.BaseBytes) -eq [Text.Encoding]::ASCII.GetString($v1Msix)))
 Test-Check 'update: the new installer folder, the stored entry point and arguments, version one higher' (($cap2.Folder -eq $folder2) -and ($cap2.Entry -eq 'setup.exe') -and ($cap2.Arguments -eq '/S') -and ($cap2.Version -eq '1.0.0.1') -and ($cap2.PackageName -eq 'PackTune.ContosoHelperTool'))
-Test-Check 'update: a NEW certificate with the SAME subject, the earlier one is not used, both private keys are gone' (($thumb2 -ne $thumb) -and ($script:Certs[1].Subject -eq $script:Certs[0].Subject) -and ($cap2.Thumbprint -eq $thumb2) -and ($script:CertsRemoved -contains $thumb2) -and ($script:CertsRemoved.Count -eq 2))
+Test-Check 'update: a NEW certificate with the SAME subject, the earlier one is not used, both private keys are gone' (($thumb2 -ne $thumb) -and ($script:Certs[1].Subject -eq $script:Certs[0].Subject) -and ($script:Signed[-1].Thumbprint -eq $thumb2) -and ($script:CertsRemoved -contains $thumb2) -and ($script:CertsRemoved.Count -eq 2))
 Test-Check 'update: a new app that supersedes the old one (update) with the assignment, still no dependency' ((@($a2.supersedence).Count -eq 1) -and ($a2.supersedence[0].targetId -eq $id1) -and ($a2.supersedence[0].supersedenceType -eq 'update') -and ($a2.assignments[0].Intent -eq 'available') -and ($a2.assignments[0].AutoUpdateSupersededApps -eq 'enabled') -and (@($a2.dependencies).Count -eq 0))
 Test-Check 'update: notes of the new version, name and publisher of the old one' (($notes2.Version -eq '1.0.0.1') -and ($notes2.Thumbprint -eq $thumb2) -and ($a2.displayName -eq 'Contoso Helper Tool') -and ($a2.publisher -eq 'Contoso') -and ($notes2.AppId -eq $notes1.AppId))
 $keys2 = @($script:Fs.Keys | Where-Object { $_ -like "$($notes1.AppId)/1.0.0.1/*" } | ForEach-Object { $_.Split('/')[-1] } | Sort-Object)
