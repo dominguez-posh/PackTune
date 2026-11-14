@@ -8,6 +8,8 @@
     powershell -NoProfile -ExecutionPolicy Bypass -File .\Tests\Check-StoreSite.ps1
 #>
 $ErrorActionPreference = 'Stop'
+# A check that dies half way is a failure, with a clear line and a non-zero exit code
+trap { "FAIL  the check stopped before the end: $($_.Exception.Message)"; exit 1 }
 $repo = Split-Path $PSScriptRoot -Parent
 $work = Join-Path ([IO.Path]::GetTempPath()) ('PackTuneStoreSite-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path (Join-Path $work 'PackTune') -Force | Out-Null
@@ -142,7 +144,10 @@ Test-Check 'setup: without a known SharePoint host it says to use the advanced a
 $setupId = '14d82eec-204b-4c2f-b7e8-296a70dab67e'
 $s = Get-PackTuneSettings; $s.ClientID = $client; $s.TenantID = 'contoso.onmicrosoft.com'; [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings; $script:StoreHost = $null
 Test-Check 'client id: the settings of PackTune give its own app registration' ((Get-PackTuneAppClientId) -eq $client)
-$s.ClientID = $setupId; [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings
+# Settings of an earlier version that still hold the setup app (Save-PackTuneSettings refuses it, see Check-ClientId): in memory only
+$saveMsg = ''; try { $s.ClientID = $setupId; [void](Save-PackTuneSettings -Settings $s) } catch { $saveMsg = $_.Exception.Message }
+Test-Check 'client id: the setup app of Microsoft cannot be saved as the client id' ($saveMsg -like '*Microsoft Graph Command Line Tools*') $saveMsg
+$script:Settings = Get-PackTuneSettings; $script:Settings.ClientID = $setupId
 $Global:AccessToken = [pscustomobject]@{ ClientID = $client; access_token = 'x.e30.y' }
 $msgFirst = ''; try { $null = Get-PackTuneAppClientId } catch { $msgFirst = $_.Exception.Message }
 Test-Check 'client id: when the settings hold the setup app of Microsoft it is refused, whatever the sign-in says' ($msgFirst -like 'App registration missing - set it up first*')
