@@ -51,6 +51,64 @@ function Get-PackTuneMinimumWindows {
     return $null
 }
 
+function Complete-PackTuneSupersedingApp {
+    <#
+        The second half of a release through supersedence (also used by custom applications): the new app, just uploaded,
+        gets the dependencies and the assignments of the old one and supersedes it (type update, auto-update for Available
+        assignments). The assignment comes last; a failure before it removes the new app again.
+    #>
+    param([Parameter(Mandatory = $true)]$Old, [Parameter(Mandatory = $true)]$New)
+    $AppId = $Old.id
+    try {
+        # Dependencies first, then supersedence: the module keeps both when it adds the other. An app that still
+        # depends on the old Chocolatey or winget runtime app gets the PackTune Runtime instead.
+        $Dependencies = @(Invoke-IntuneModule { Get-IntuneWin32AppDependency -ID $AppId } | Where-Object { $_ })
+        $OldIds = @(Get-PackTuneOldDependencyApps | ForEach-Object { $_.Id })
+        if (@($Dependencies | Where-Object { [string]$_.targetId -in $OldIds }).Count -gt 0) {
+            $RuntimeId = Get-PackTuneRuntimeWin32ID
+            $Dependencies = @(@($Dependencies | Where-Object { [string]$_.targetId -notin $OldIds -and [string]$_.targetId -ne $RuntimeId }) + [pscustomobject]@{ targetId = $RuntimeId; dependencyType = "autoInstall" })
+        }
+        if ($Dependencies.Count -gt 0) {
+            Invoke-IntuneModule {
+                $Copies = @(foreach ($Dependency in $Dependencies) {
+                        $Type = if ([string]$Dependency.dependencyType -eq "detect") { "Detect" } else { "AutoInstall" }
+                        New-IntuneWin32AppDependency -ID $Dependency.targetId -DependencyType $Type
+                    })
+                Add-IntuneWin32AppDependency -ID $New.id -Dependency $Copies
+            } | Out-Null
+        }
+        else { Write-Warning "$($Old.displayName) has no dependency to copy" }
+
+        Write-Host "Superseding the old app (update)"
+        Invoke-IntuneModule {
+            $Supersedence = New-IntuneWin32AppSupersedence -ID $AppId -SupersedenceType Update
+            Add-IntuneWin32AppSupersedence -ID $New.id -Supersedence $Supersedence
+        } | Out-Null
+
+        # Same assignments as the old app. Available ones switch on auto-update of superseded apps (only possible now,
+        # because the module needs the supersedence to exist).
+        $Assignments = @(Invoke-IntuneModule { Get-IntuneWin32AppAssignment -ID $AppId } | Where-Object { $_ })
+        foreach ($Assignment in $Assignments) {
+            $Params = @{ ID = $New.id; Intent = [string]$Assignment.Intent; Notification = $(if ($Assignment.Notifications) { [string]$Assignment.Notifications } else { "showAll" }) }
+            # The module only accepts the auto-update setting for Available assignments
+            if ($Params.Intent -eq "available") { $Params.AutoUpdateSupersededApps = "enabled" }
+            $Type = [string]$Assignment.Type
+            Invoke-IntuneModule {
+                if ($Type -like "*allLicensedUsersAssignmentTarget") { Add-IntuneWin32AppAssignmentAllUsers @Params }
+                elseif ($Type -like "*allDevicesAssignmentTarget") { Add-IntuneWin32AppAssignmentAllDevices @Params }
+                elseif ($Type -like "*exclusionGroupAssignmentTarget") { Add-IntuneWin32AppAssignmentGroup @Params -GroupID $Assignment.GroupID }
+                elseif ($Type -like "*groupAssignmentTarget") { Add-IntuneWin32AppAssignmentGroup @Params -Include -GroupID $Assignment.GroupID }
+                else { Write-Warning "Assignment type $Type was not copied" }
+            } | Out-Null
+        }
+    }
+    catch {
+        $Message = $_.Exception.Message
+        try { Invoke-IntuneModule { Remove-IntuneWin32App -ID $New.id } | Out-Null } catch { Write-Warning "The unfinished new app $($New.id) could not be removed: $($_.Exception.Message)" }
+        throw "The release of $($Old.displayName) was not finished and the new app was removed again: $Message"
+    }
+}#Dependencies, supersedence and assignments of a new version
+
 function Publish-PackTuneSupersedingApp {
     <#
         The supersedence path of a release: creates the app of the new version next to the old one and lets it
@@ -120,54 +178,7 @@ function Publish-PackTuneSupersedingApp {
     $New = Invoke-IntuneModule { Add-IntuneWin32App @AppParams }
     if ($null -eq $New -or -not $New.id) { throw "Intune did not return the created app" }
 
-    try {
-        # Dependencies first, then supersedence: the module keeps both when it adds the other. An app that still
-        # depends on the old Chocolatey or winget runtime app gets the PackTune Runtime instead.
-        $Dependencies = @(Invoke-IntuneModule { Get-IntuneWin32AppDependency -ID $AppId } | Where-Object { $_ })
-        $OldIds = @(Get-PackTuneOldDependencyApps | ForEach-Object { $_.Id })
-        if (@($Dependencies | Where-Object { [string]$_.targetId -in $OldIds }).Count -gt 0) {
-            $RuntimeId = Get-PackTuneRuntimeWin32ID
-            $Dependencies = @(@($Dependencies | Where-Object { [string]$_.targetId -notin $OldIds -and [string]$_.targetId -ne $RuntimeId }) + [pscustomobject]@{ targetId = $RuntimeId; dependencyType = "autoInstall" })
-        }
-        if ($Dependencies.Count -gt 0) {
-            Invoke-IntuneModule {
-                $Copies = @(foreach ($Dependency in $Dependencies) {
-                        $Type = if ([string]$Dependency.dependencyType -eq "detect") { "Detect" } else { "AutoInstall" }
-                        New-IntuneWin32AppDependency -ID $Dependency.targetId -DependencyType $Type
-                    })
-                Add-IntuneWin32AppDependency -ID $New.id -Dependency $Copies
-            } | Out-Null
-        }
-        else { Write-Warning "$($Old.displayName) has no dependency to copy" }
-
-        Write-Host "Superseding the old app (update)"
-        Invoke-IntuneModule {
-            $Supersedence = New-IntuneWin32AppSupersedence -ID $AppId -SupersedenceType Update
-            Add-IntuneWin32AppSupersedence -ID $New.id -Supersedence $Supersedence
-        } | Out-Null
-
-        # Same assignments as the old app. Available ones switch on auto-update of superseded apps (only possible now,
-        # because the module needs the supersedence to exist).
-        $Assignments = @(Invoke-IntuneModule { Get-IntuneWin32AppAssignment -ID $AppId } | Where-Object { $_ })
-        foreach ($Assignment in $Assignments) {
-            $Params = @{ ID = $New.id; Intent = [string]$Assignment.Intent; Notification = $(if ($Assignment.Notifications) { [string]$Assignment.Notifications } else { "showAll" }) }
-            # The module only accepts the auto-update setting for Available assignments
-            if ($Params.Intent -eq "available") { $Params.AutoUpdateSupersededApps = "enabled" }
-            $Type = [string]$Assignment.Type
-            Invoke-IntuneModule {
-                if ($Type -like "*allLicensedUsersAssignmentTarget") { Add-IntuneWin32AppAssignmentAllUsers @Params }
-                elseif ($Type -like "*allDevicesAssignmentTarget") { Add-IntuneWin32AppAssignmentAllDevices @Params }
-                elseif ($Type -like "*exclusionGroupAssignmentTarget") { Add-IntuneWin32AppAssignmentGroup @Params -GroupID $Assignment.GroupID }
-                elseif ($Type -like "*groupAssignmentTarget") { Add-IntuneWin32AppAssignmentGroup @Params -Include -GroupID $Assignment.GroupID }
-                else { Write-Warning "Assignment type $Type was not copied" }
-            } | Out-Null
-        }
-    }
-    catch {
-        $Message = $_.Exception.Message
-        try { Invoke-IntuneModule { Remove-IntuneWin32App -ID $New.id } | Out-Null } catch { Write-Warning "The unfinished new app $($New.id) could not be removed: $($_.Exception.Message)" }
-        throw "The release of $($Old.displayName) was not finished and the new app was removed again: $Message"
-    }
+    Complete-PackTuneSupersedingApp -Old $Old -New $New
     Write-Host "Done: devices with the old version get the new one through supersedence."
     return $New.id
 }#Creates the new version of an Available app and supersedes the old one
@@ -216,7 +227,8 @@ function Get-PackTuneSupersededApps {
     Assert-PackTunePrerequisites
     Assert-PackTuneConnection
     Update-PackTuneToken
-    $Apps = @(Get-PackTuneTenantApps | Where-Object { -not $_.IsChocolatey })
+    # The apps of the catalog and the custom applications
+    $Apps = @(Get-PackTuneTenantApps | Where-Object { -not $_.IsChocolatey }) + @(Get-PackTuneCustomApps | ForEach-Object { [pscustomobject]@{ Id = $_.Id; DisplayName = $_.DisplayName; AppVersion = $_.Version; IsChocolatey = $false } })
     $ById = @{}; foreach ($App in $Apps) { $ById[$App.Id] = $App }
     foreach ($New in $Apps) {
         foreach ($Relation in @(Invoke-IntuneModule { Get-IntuneWin32AppSupersedence -ID $New.Id } | Where-Object { $_ })) {

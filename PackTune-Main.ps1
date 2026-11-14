@@ -390,6 +390,8 @@ function Get-PackTuneNotesSource {
     # Source of an app this tool created, from its notes: "Chocolatey", "Winget" or $null (not an app of the tool).
     # Reads the current marker (PoweredByPackTune;from=...) and the earlier ones (PoweredByChocolatey, PoweredByWinget).
     param([string]$Notes)
+    # Custom applications (PoweredByPackTune;custom=msi;...) are not catalog apps: they have their own list
+    if ($Notes -like "$($script:ToolMarker);custom=*") { return $null }
     if ($Notes -like "$($script:ToolMarker)*") { if ($Notes -match '(?:^|;)from=winget(?:;|$)') { return "Winget" } else { return "Chocolatey" } }
     if ($Notes -like "$($script:WingetMarker)*") { return "Winget" }
     if ($Notes -like "$($script:AppMarker)*") { return "Chocolatey" }
@@ -2634,7 +2636,7 @@ function Remove-PackTuneApp {
     param([Parameter(Mandatory = $true)][string]$Id)
 
     # Only apps this tool created (recognized by their notes) are removed, never anything else in the tenant
-    $Apps = @(Get-PackTuneTenantApps)
+    $Apps = @(Get-PackTuneTenantApps) + @(Get-PackTuneCustomApps)
     $App = $Apps | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
     if (-not $App) { throw "App $Id was not created by this tool or does not exist anymore, nothing was removed" }
     if ($App.IsChocolatey) {
@@ -2686,6 +2688,7 @@ function New-PackTuneAppFromCatalog {
 . (Join-Path $PSScriptRoot "PackTune-Sources.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Runtime.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Release.ps1")
+. (Join-Path $PSScriptRoot "PackTune-Custom.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Aliases.ps1")
 
 # Tenant insight (import of existing apps, install status): own module, gets the functions it needs from here

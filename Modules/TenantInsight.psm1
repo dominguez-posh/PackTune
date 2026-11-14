@@ -187,7 +187,7 @@ function ConvertTo-InsightApp {
     }
     $IsInfra = $Notes -like "*$($Markers.ChocolateyApp)*" -and $Raw.displayName -eq 'Chocolatey'
     # Current marker: PoweredByPackTune;from=Chocolatey|Winget. The two earlier markers are still read.
-    $IsNew = $Markers.PackTune -and $Notes -like "$($Markers.PackTune)*"
+    $IsNew = $Markers.PackTune -and $Notes -like "$($Markers.PackTune)*" -and $Notes -notlike "$($Markers.PackTune);custom=*"
     $IsWinget = $Notes -like "$($Markers.Winget)*" -or ($IsNew -and $Notes -match '(?:^|;)from=winget(?:;|$)')
     $IsChoco = $Notes -like "$($Markers.Tool)*" -or ($IsNew -and -not $IsWinget)
     if ($IsInfra -or $IsWinget -or $IsChoco) {
