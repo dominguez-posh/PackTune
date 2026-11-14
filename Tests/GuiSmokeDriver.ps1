@@ -592,6 +592,92 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $true
         }
         $true } }
+    @{ Name = 'custom applications: MSI deploy, new version, remove'; Phase = 0; Do = {
+        param($s)
+        function New-SmokeMsi([string]$Path, [hashtable]$Properties) {
+            $installer = New-Object -ComObject WindowsInstaller.Installer
+            $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Path, 3))
+            $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @('CREATE TABLE `Property` (`Property` CHAR(72) NOT NULL, `Value` CHAR(255) NOT NULL PRIMARY KEY `Property`)'))
+            [void]$view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null)
+            foreach ($key in $Properties.Keys) {
+                $v = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @("INSERT INTO ``Property`` (``Property``, ``Value``) VALUES ('$key', '$($Properties[$key])')"))
+                [void]$v.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $v, $null)
+            }
+            [void]$db.GetType().InvokeMember('Commit', 'InvokeMethod', $null, $db, $null)
+            foreach ($o in $v, $view, $db, $installer) { if ($o) { [void][Runtime.InteropServices.Marshal]::ReleaseComObject($o) } }
+            [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+        }
+        if ($s.Phase -eq 0) {
+            $s.Phase = 1
+            $s.Dir = Join-Path $env:LOCALAPPDATA 'smoke-msi'; New-Item -ItemType Directory -Path $s.Dir -Force | Out-Null
+            New-SmokeMsi (Join-Path $s.Dir 'tool-1.0.msi') @{ ProductCode = '{BBBBBBBB-0000-0000-0000-000000000001}'; ProductName = 'Smoke Tool'; ProductVersion = '1.0.0'; Manufacturer = 'Smoke Corp'; UpgradeCode = '{BBBBBBBB-1111-1111-1111-111111111111}' }
+            New-SmokeMsi (Join-Path $s.Dir 'tool-2.0.msi') @{ ProductCode = '{BBBBBBBB-0000-0000-0000-000000000002}'; ProductName = 'Smoke Tool'; ProductVersion = '2.0.0'; Manufacturer = 'Smoke Corp'; UpgradeCode = '{BBBBBBBB-1111-1111-1111-111111111111}' }
+            New-SmokeMsi (Join-Path $s.Dir 'old-0.5.msi') @{ ProductCode = '{BBBBBBBB-0000-0000-0000-000000000009}'; ProductName = 'Smoke Tool'; ProductVersion = '0.5.0'; Manufacturer = 'Smoke Corp'; UpgradeCode = '{BBBBBBBB-1111-1111-1111-111111111111}' }
+            Test-Smoke 'Custom applications has its place in the navigation' ($ui.NavCustom -and $script:Pages -contains 'Custom') ''
+            Show-Page 'Custom'
+            return $false
+        }
+        if ($s.Phase -eq 1) {
+            if (-not (Test-Idle 'customlist')) { return $false }
+            $s.Phase = 2
+            Test-Smoke 'custom page: signed in, no custom application yet, says where to start' ($ui.PageCustom.Visibility -eq 'Visible' -and $script:CustomRows.Count -eq 0 -and $ui.TxtCustomEmpty.Text -like '*New application*') $ui.TxtCustomEmpty.Text
+            Save-SmokeShot '32-custom-empty'
+            & $script:ClickActions[$ui.BtnCustomNew]
+            Test-Smoke 'New application opens the dialog with MSI chosen' ($ui.DlgCustom.Visibility -eq 'Visible' -and $ui.RbCustomMsi.IsChecked -and -not $ui.BtnCustomDeploy.IsEnabled) ''
+            Test-Smoke 'Other is visible but disabled until the MSIX capture exists' ((-not $ui.RbCustomOther.IsEnabled) -and $ui.TxtCustomOther.Text -like '*next step*') ''
+            Set-CustomPath (Join-Path $s.Dir 'missing.msi')
+            Test-Smoke 'a missing file is reported, nothing to deploy' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.TxtCustomRead.Text) $ui.TxtCustomRead.Text
+            Set-CustomPath (Join-Path $s.Dir 'tool-1.0.msi')
+            Test-Smoke 'the MSI properties are shown' ($ui.TxtMsiName.Text -eq 'Smoke Tool' -and $ui.TxtMsiVersion.Text -eq '1.0.0' -and $ui.TxtMsiProduct.Text -eq '{BBBBBBBB-0000-0000-0000-000000000001}' -and $ui.TxtMsiManufacturer.Text -eq 'Smoke Corp' -and $ui.BtnCustomDeploy.IsEnabled) $ui.TxtMsiName.Text
+            Save-SmokeShot '33-custom-dialog'
+            $ui.TxtCustomProps.Text = 'ALLUSERS=1'
+            $ui.CmbCustomAssign.SelectedIndex = 1
+            & $script:ClickActions[$ui.BtnCustomDeploy]
+            return $false
+        }
+        if ($s.Phase -eq 2) {
+            if (-not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
+            $s.Phase = 3
+            $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
+            Test-Smoke 'deploy: the app is in Intune with the custom marker and the Available assignment' ($fake.Count -eq 1 -and $fake[0].displayName -eq 'Smoke Tool' -and $fake[0].assignment -eq 'available' -and $fake[0].notes -like '*ver=1.0.0;product={BBBBBBBB-0000-0000-0000-000000000001}*') (($fake | ForEach-Object notes) -join ';')
+            Test-Smoke 'the custom page lists it with version and assignment' ($script:CustomRows.Count -eq 1 -and $script:CustomRows[0]['Title'] -eq 'Smoke Tool' -and $script:CustomRows[0]['Kind'] -eq 'MSI 1.0.0' -and $script:CustomRows[0]['Assigned'] -eq 'Available') ($script:CustomRows | ForEach-Object { $_['Kind'] })
+            Test-Smoke 'it is no catalog app in the In tenant list' (@($script:TenantApps | Where-Object { $_.DisplayName -eq 'Smoke Tool' }).Count -eq 0) ''
+            Show-Page 'Custom'
+            $ui.LstCustom.SelectedIndex = 0
+            Test-Smoke 'details: version, product code and assignment' ($ui.PanelCustomDetails.Visibility -eq 'Visible' -and $ui.TxtCustomVersion.Text -eq '1.0.0' -and $ui.TxtCustomProduct.Text -like '{BBBB*01}' -and $ui.TxtCustomAssigned.Text -eq 'Available' -and $ui.BtnCustomNewVersion.IsEnabled) ''
+            Save-SmokeShot '34-custom-details'
+            & $script:ClickActions[$ui.BtnCustomNewVersion]
+            Test-Smoke 'New version opens the dialog for this app, without the kind choice' ($ui.DlgCustom.Visibility -eq 'Visible' -and $ui.TxtCustomDlgTitle.Text -like 'New version of Smoke Tool' -and $ui.BoxCustomKind.Visibility -eq 'Collapsed' -and $ui.BtnCustomDeploy.Content -eq 'Publish version') $ui.TxtCustomDlgTitle.Text
+            Set-CustomPath (Join-Path $s.Dir 'old-0.5.msi')
+            Test-Smoke 'an older MSI is refused' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.TxtCustomRead.Text -like '*not newer*') $ui.TxtCustomRead.Text
+            Set-CustomPath $s.Dir
+            Test-Smoke 'a folder with several MSI files offers a choice' ($ui.CmbCustomMsi.Visibility -eq 'Visible' -and $ui.CmbCustomMsi.Items.Count -eq 3) $ui.CmbCustomMsi.Items.Count
+            Set-CustomPath (Join-Path $s.Dir 'tool-2.0.msi')
+            Test-Smoke 'the newer MSI is accepted' ($ui.BtnCustomDeploy.IsEnabled -and $ui.TxtCustomRead.Text -like '*Newer than 1.0.0*') $ui.TxtCustomRead.Text
+            & $script:ClickActions[$ui.BtnCustomDeploy]
+            return $false
+        }
+        if ($s.Phase -eq 3) {
+            if (-not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
+            $s.Phase = 4
+            $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
+            $new = $fake | Where-Object { $_.displayVersion -eq '2.0.0' }
+            Test-Smoke 'new version: a second app that supersedes the first, with its assignment' ($fake.Count -eq 2 -and $new -and @($new.supersedence).Count -eq 1 -and $new.assignments[0].Intent -eq 'available') ($fake | ForEach-Object displayVersion)
+            Test-Smoke 'the list shows both, the older one marked as replaced' ($script:CustomRows.Count -eq 2 -and @($script:CustomRows | Where-Object { $_['Kind'] -like '*(replaced)' }).Count -eq 1) ($script:CustomRows | ForEach-Object { $_['Kind'] })
+            Save-SmokeShot '35-custom-versions'
+            $ui.LstCustom.SelectedIndex = 0
+            & $script:ClickActions[$ui.BtnCustomRemove]
+            return $false
+        }
+        if ($s.Phase -eq 4) {
+            if (-not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
+            $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
+            Test-Smoke 'remove: one custom app is gone from Intune and from the list' ($fake.Count -eq 1 -and $script:CustomRows.Count -eq 1 -and $ui.PanelCustomDetails.Visibility -eq 'Collapsed') ($fake | ForEach-Object displayVersion)
+            Remove-Item $s.Dir -Recurse -Force -ErrorAction SilentlyContinue
+            Show-Page 'Apps'
+            return $true
+        }
+        $true } }
     @{ Name = 'winget deploy and runtime dependency'; Phase = 0; Do = {
         param($s)
         if ($s.Phase -eq 0) {

@@ -123,6 +123,23 @@
             </Border>
         </DataTemplate>
 
+        <DataTemplate x:Key="CustomRowTemplate">
+            <Grid Margin="0,9">
+                <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="150"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
+                <Border Style="{StaticResource MonoTile}" Width="36" Height="36" Margin="0,0,12,0" Background="{Binding [TileBg]}" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding [Mono]}" FontWeight="Bold" FontSize="14" Foreground="{Binding [TileFg]}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
+                    <TextBlock Text="{Binding [Title]}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock Text="{Binding [Sub]}" FontSize="12" Foreground="{StaticResource MutedText}" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2" VerticalAlignment="Center">
+                    <Border Style="{StaticResource Pill}" Background="{Binding [KindBg]}" HorizontalAlignment="Left"><TextBlock Text="{Binding [Kind]}" FontSize="12" FontWeight="SemiBold" Foreground="{Binding [KindFg]}"/></Border>
+                </StackPanel>
+                <TextBlock Grid.Column="3" Text="{Binding [Assigned]}" VerticalAlignment="Center" FontSize="13" Foreground="{StaticResource Text2}" TextTrimming="CharacterEllipsis"/>
+            </Grid>
+        </DataTemplate>
+
         <DataTemplate x:Key="AddRowTemplate">
             <Grid Margin="0,8">
                 <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
@@ -258,6 +275,9 @@
                         </RadioButton>
                         <RadioButton x:Name="NavApps" Style="{StaticResource NavItem}" GroupName="Nav" AutomationProperties.Name="Apps">
                             <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE71D;"/><TextBlock Text="Apps"/></StackPanel>
+                        </RadioButton>
+                        <RadioButton x:Name="NavCustom" Style="{StaticResource NavItem}" GroupName="Nav" AutomationProperties.Name="Custom applications">
+                            <StackPanel Orientation="Horizontal"><TextBlock Style="{StaticResource NavGlyph}" Text="&#xE8B7;"/><TextBlock Text="Custom"/></StackPanel>
                         </RadioButton>
                         <RadioButton x:Name="NavTenant" Style="{StaticResource NavItem}" GroupName="Nav" AutomationProperties.Name="In tenant">
                             <Grid>
@@ -447,6 +467,57 @@
                         </Grid>
 
                         <!-- ============ In tenant ============ -->
+                        <Grid x:Name="PageCustom" Visibility="Collapsed">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <ScrollViewer Style="{StaticResource PageScroll}">
+                                <StackPanel Margin="28,24,28,24">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="Custom applications" Style="{StaticResource PageTitle}"/>
+                                            <TextBlock x:Name="TxtCustomSubtitle" Style="{StaticResource Subtitle}" Text="Your own software as Win32 apps: an MSI is read, packaged and deployed automatically. Sign in to see the custom applications in your tenant."/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Bottom">
+                                            <Button x:Name="BtnCustomNew" Style="{StaticResource PrimaryButton}" Content="New application" Tag="&#xE710;" Margin="0,0,8,0" Padding="16,8"/>
+                                            <Button x:Name="BtnCustomRefresh" Content="Refresh" Tag="&#xE72C;"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <Grid Margin="0,18,0,0">
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="36"/><ColumnDefinition Width="*"/><ColumnDefinition Width="150"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
+                                        <Grid.Resources><Style TargetType="TextBlock"><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{StaticResource MutedText}"/></Style></Grid.Resources>
+                                        <TextBlock Grid.Column="1" Margin="12,0,0,6" Text="Application"/><TextBlock Grid.Column="2" Text="Kind and version"/><TextBlock Grid.Column="3" Text="Assigned"/>
+                                    </Grid>
+                                    <Border BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="0,1,0,0">
+                                        <Grid>
+                                            <ListBox x:Name="LstCustom" Style="{StaticResource PlainList}" ItemTemplate="{StaticResource CustomRowTemplate}" MaxHeight="620"/>
+                                            <TextBlock x:Name="TxtCustomEmpty" Style="{StaticResource Hint}" FontSize="13" Margin="0,16"/>
+                                        </Grid>
+                                    </Border>
+                                </StackPanel>
+                            </ScrollViewer>
+                            <Border x:Name="PanelCustomDetails" Grid.Column="1" Width="340" Visibility="Collapsed" Background="White" BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="1,0,0,0">
+                                <ScrollViewer Style="{StaticResource PageScroll}">
+                                    <StackPanel Margin="24">
+                                        <TextBlock x:Name="TxtCustomTitle" FontSize="18" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                        <TextBlock x:Name="TxtCustomMeta" Style="{StaticResource Hint}"/>
+                                        <TextBlock Text="Version" Style="{StaticResource FieldLabel}" Margin="0,16,0,4"/>
+                                        <TextBlock x:Name="TxtCustomVersion"/>
+                                        <TextBlock Text="Product code" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
+                                        <TextBox x:Name="TxtCustomProduct" Style="{StaticResource SelectableText}" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
+                                        <TextBlock Text="Upgrade code" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
+                                        <TextBox x:Name="TxtCustomUpgrade" Style="{StaticResource SelectableText}" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
+                                        <TextBlock Text="Assigned" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
+                                        <TextBlock x:Name="TxtCustomAssigned" TextWrapping="Wrap"/>
+                                        <Button x:Name="BtnCustomNewVersion" Margin="0,20,0,0" Content="New version ..." Tag="&#xE898;"/>
+                                        <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Pick a newer MSI: a new app is created that supersedes this one on the devices."/>
+                                        <Button x:Name="BtnCustomOpen" Margin="0,14,0,0" Content="Open in Intune" Tag="&#xE774;"/>
+                                        <Button x:Name="BtnCustomRemove" Margin="0,14,0,0" Content="Remove from Intune" Tag="&#xE74D;"/>
+                                        <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Devices keep the installed software."/>
+                                    </StackPanel>
+                                </ScrollViewer>
+                            </Border>
+                        </Grid>
+
                         <Grid x:Name="PageTenant" Visibility="Collapsed">
                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                             <ScrollViewer Style="{StaticResource PageScroll}">
@@ -932,6 +1003,68 @@
                             <StackPanel Grid.Column="1" Orientation="Horizontal">
                                 <Button x:Name="BtnScheduleCancel" Content="Cancel" Margin="0,0,8,0" Padding="16,8"/>
                                 <Button x:Name="BtnScheduleApply" Style="{StaticResource PrimaryButton}" Padding="18,8" Content="Apply in Intune"/>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <!-- Custom application -->
+            <Border x:Name="DlgCustom" Style="{StaticResource Dialog}" Width="760" Visibility="Collapsed">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <StackPanel Margin="28,22,28,10">
+                        <TextBlock x:Name="TxtCustomDlgTitle" Text="New application" FontSize="20" FontWeight="SemiBold"/>
+                        <TextBlock x:Name="TxtCustomDlgSub" Style="{StaticResource Subtitle}" Text="Choose how the software is packaged."/>
+                        <Border x:Name="BoxCustomKind" Style="{StaticResource Segmented}" Margin="0,14,0,0" HorizontalAlignment="Left" AutomationProperties.Name="Kind of application">
+                            <StackPanel Orientation="Horizontal">
+                                <RadioButton x:Name="RbCustomMsi" GroupName="CustomKind" Style="{StaticResource SegmentItem}" Content="MSI" IsChecked="True"/>
+                                <RadioButton x:Name="RbCustomOther" GroupName="CustomKind" Style="{StaticResource SegmentItem}" Content="Other" IsEnabled="False" ToolTip="MSIX capture comes in the next step"/>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock x:Name="TxtCustomOther" Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Other: installers, scripts and several files are captured as an MSIX in Windows Sandbox. MSIX capture comes in the next step."/>
+                    </StackPanel>
+                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="420">
+                        <StackPanel x:Name="PanelCustomMsi" Margin="28,0,28,8">
+                            <TextBlock Text="MSI file" Style="{StaticResource FieldLabel}"/>
+                            <Grid Margin="0,4,0,0">
+                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                <TextBox x:Name="TxtCustomPath" AutomationProperties.Name="MSI file or folder"/>
+                                <Button x:Name="BtnCustomFile" Grid.Column="1" Margin="8,0,0,0" Content="Choose file ..."/>
+                                <Button x:Name="BtnCustomFolder" Grid.Column="2" Margin="8,0,0,0" Content="Choose folder ..."/>
+                            </Grid>
+                            <ComboBox x:Name="CmbCustomMsi" Margin="0,8,0,0" Visibility="Collapsed" AutomationProperties.Name="MSI files in the folder"/>
+                            <TextBlock x:Name="TxtCustomRead" Style="{StaticResource Hint}" Margin="0,8,0,0" TextWrapping="Wrap"/>
+                            <Border x:Name="BoxCustomProps" Visibility="Collapsed" Background="#F7F7F7" CornerRadius="6" Padding="14,10" Margin="0,10,0,0">
+                                <Grid>
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="130"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                                    <Grid.RowDefinitions><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/><RowDefinition/></Grid.RowDefinitions>
+                                    <Grid.Resources><Style TargetType="TextBlock"><Setter Property="Margin" Value="0,2"/></Style></Grid.Resources>
+                                    <TextBlock Text="Name" Foreground="{StaticResource MutedText}"/><TextBlock x:Name="TxtMsiName" Grid.Column="1" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                    <TextBlock Grid.Row="1" Text="Version" Foreground="{StaticResource MutedText}"/><TextBlock x:Name="TxtMsiVersion" Grid.Row="1" Grid.Column="1"/>
+                                    <TextBlock Grid.Row="2" Text="Manufacturer" Foreground="{StaticResource MutedText}"/><TextBlock x:Name="TxtMsiManufacturer" Grid.Row="2" Grid.Column="1" TextWrapping="Wrap"/>
+                                    <TextBlock Grid.Row="3" Text="Product code" Foreground="{StaticResource MutedText}"/><TextBlock x:Name="TxtMsiProduct" Grid.Row="3" Grid.Column="1" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
+                                    <TextBlock Grid.Row="4" Text="Upgrade code" Foreground="{StaticResource MutedText}"/><TextBlock x:Name="TxtMsiUpgrade" Grid.Row="4" Grid.Column="1" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
+                                    <TextBlock Grid.Row="5" Text="Size" Foreground="{StaticResource MutedText}"/><TextBlock x:Name="TxtMsiSize" Grid.Row="5" Grid.Column="1"/>
+                                </Grid>
+                            </Border>
+                            <StackPanel x:Name="PanelCustomAssign">
+                                <TextBlock Text="Assignment" Style="{StaticResource FieldLabel}" Margin="0,14,0,4"/>
+                                <ComboBox x:Name="CmbCustomAssign" HorizontalAlignment="Left" Width="260" AutomationProperties.Name="Assignment"/>
+                            </StackPanel>
+                            <TextBlock Text="Extra MSI properties (optional)" Style="{StaticResource FieldLabel}" Margin="0,14,0,4"/>
+                            <TextBox x:Name="TxtCustomProps" AutomationProperties.Name="Extra MSI properties" ToolTip="NAME=value pairs separated by spaces, e.g. ALLUSERS=1 INSTALLDIR=C:\Tools\App"/>
+                            <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,0" Text="Installs silently with msiexec /i /qn /norestart as SYSTEM; removed by product code. Detected by product code and version."/>
+                        </StackPanel>
+                    </ScrollViewer>
+                    <Border Grid.Row="2" Style="{StaticResource DialogFooter}" Padding="28,14">
+                        <Grid>
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <Button x:Name="BtnCustomTest" Content="Test in sandbox" Tag="&#xE768;" Margin="0,0,16,0"/>
+                            <TextBlock x:Name="TxtCustomDlgStatus" Grid.Column="1" Style="{StaticResource Hint}" VerticalAlignment="Center" FontSize="13" Margin="0,0,16,0"/>
+                            <StackPanel Grid.Column="2" Orientation="Horizontal">
+                                <Button x:Name="BtnCustomCancel" Content="Cancel" Margin="0,0,8,0" Padding="16,8"/>
+                                <Button x:Name="BtnCustomDeploy" Style="{StaticResource PrimaryButton}" Padding="18,8" Content="Deploy"/>
                             </StackPanel>
                         </Grid>
                     </Border>

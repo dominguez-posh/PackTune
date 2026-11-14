@@ -670,7 +670,7 @@ function Update-ConnectionStatus {
 $script:AccountText = ''
 
 # ---------------------------------------------------------------- navigation, dialogs, help
-$script:Pages = @('Start', 'Apps', 'Tenant', 'Status', 'Activity', 'Settings')
+$script:Pages = @('Start', 'Apps', 'Custom', 'Tenant', 'Status', 'Activity', 'Settings')
 $script:CurrentPage = 'Start'
 function Show-Page([string]$Name) {
     Close-Dialog
@@ -681,12 +681,13 @@ function Show-Page([string]$Name) {
     switch ($Name) {
         'Start'    { $script:SandboxState = $null; Update-Readiness }
         'Apps'     { Update-CatalogRows; Update-AppList; Start-CatalogPrefetch }
+        'Custom'   { if ((Test-SignedIn) -and $null -eq $script:CustomApps) { Start-CustomRefresh } else { Update-CustomRows } }
         'Tenant'   { if ((Test-SignedIn) -and $null -eq $script:TenantApps -and -not (Test-TaskRunning 'tenant')) { Start-TenantRefresh } else { Update-TenantRows } }
         'Settings' { Update-SettingsView }
     }
     Update-SelectionBar
 }
-foreach ($p in 'Start', 'Apps', 'Tenant', 'Activity', 'Settings') {
+foreach ($p in 'Start', 'Apps', 'Custom', 'Tenant', 'Activity', 'Settings') {
     $ui["Nav$p"].Add_Checked({
         param($src)
         $name = $src.Name -replace '^Nav', ''
@@ -696,13 +697,13 @@ foreach ($p in 'Start', 'Apps', 'Tenant', 'Activity', 'Settings') {
 }
 
 function Show-Dialog([string]$Name) {
-    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgHelp') { $ui[$d].Visibility = if ($d -eq $Name) { 'Visible' } else { 'Collapsed' } }
+    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgHelp') { $ui[$d].Visibility = if ($d -eq $Name) { 'Visible' } else { 'Collapsed' } }
     $ui.DialogLayer.Visibility = 'Visible'
     $script:OpenDialog = $Name
 }
 function Close-Dialog {
     $ui.DialogLayer.Visibility = 'Collapsed'
-    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgHelp') { $ui[$d].Visibility = 'Collapsed' }
+    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgHelp') { $ui[$d].Visibility = 'Collapsed' }
     $script:OpenDialog = $null
 }
 $script:OpenDialog = $null
@@ -1352,6 +1353,228 @@ function Start-AppSearch {
     } -Hidden)
 }
 Add-Click $ui.BtnSearchRepos { Start-AppSearch }
+
+# ---------------------------------------------------------------- custom applications (MSI; Other follows with the MSIX capture)
+$script:CustomApps = $null           # the custom applications of the tenant, $null = not read yet
+$script:CustomMode = 'New'           # New | Version
+$script:CustomUpdateApp = $null
+$script:CustomInfo = $null
+$script:CustomRows = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+$ui.LstCustom.ItemsSource = $script:CustomRows
+$ui.CmbCustomAssign.ItemsSource = @('Required (installed on all devices)', 'Available in the Company Portal', 'None (assign in Intune yourself)')
+$ui.CmbCustomAssign.SelectedIndex = [Math]::Max(0, [Array]::IndexOf(@('Required', 'Available', 'None'), [string]$script:Settings.Assignment))
+
+function Get-IntentsText($Intents) {
+    $i = @($Intents | Where-Object { $_ })
+    if (-not $i.Count) { return 'Not assigned' }
+    (@($i | ForEach-Object { switch ($_) { 'required' { 'Required' } 'available' { 'Available' } default { $_ } } }) -join ', ')
+}
+function Update-CustomRows {
+    $script:CustomRows.Clear()
+    $apps = @($script:CustomApps | Where-Object { $_ })
+    foreach ($a in $apps) {
+        $newer = @($apps | Where-Object { $_.AppId -eq $a.AppId -and $_.Id -ne $a.Id -and (Compare-SourceVersion $_.Version $a.Version) -eq 1 }).Count -gt 0
+        $kind = "$($a.Kind.ToUpper()) $($a.Version)"
+        if ($newer) { $kind += ' (replaced)' }
+        $colors = if ($newer) { $script:PillColors['gray'] } else { $script:PillColors['info'] }
+        $row = New-Row (@{
+            Data = $a; Title = $a.DisplayName; Sub = "$($a.Publisher)  $([char]0x00B7)  $($a.ProductCode)"; Kind = $kind; KindBg = $colors[0]; KindFg = $colors[1]
+            Assigned = (Get-IntentsText $a.Intents)
+        } + (Get-TileStyle $a.DisplayName))
+        $script:CustomRows.Add($row)
+    }
+    $count = @($apps | Where-Object { $a = $_; -not (@($apps | Where-Object { $_.AppId -eq $a.AppId -and $_.Id -ne $a.Id -and (Compare-SourceVersion $_.Version $a.Version) -eq 1 }).Count) }).Count
+    $ui.TxtCustomSubtitle.Text = if (-not (Test-SignedIn)) { 'Your own software as Win32 apps: an MSI is read, packaged and deployed automatically. Sign in to see the custom applications in your tenant.' }
+    elseif ($null -eq $script:CustomApps) { 'Reading the custom applications of your tenant ...' }
+    else { "$count custom application(s) in your tenant. An MSI is read, packaged and deployed automatically." }
+    $ui.TxtCustomEmpty.Text = if (-not (Test-SignedIn)) { 'Sign in first.' } elseif ($null -eq $script:CustomApps) { '' } elseif (-not $apps.Count) { 'No custom applications yet. New application starts with an MSI.' } else { '' }
+    $ui.BtnCustomRefresh.IsEnabled = (Test-SignedIn)
+}
+function Start-CustomRefresh {
+    if (-not (Test-SignedIn) -or (Test-TaskRunning 'customlist')) { Update-CustomRows; return }
+    Update-UiToken
+    [void](Start-UiTask -Kind 'customlist' -Title 'Reading the custom applications' -Display 'Custom applications' -Hidden -NeedsAuth -Pool $script:UserPool -Work 'Get-PackTuneCustomApps -WithAssignments' -OnDone {
+        param($Result, $Job)
+        # (an if-expression would turn an empty list into $null)
+        if ($Job.Status -eq 'succeeded') { $script:CustomApps = @($Result | Where-Object { $_ -and $_.Id }) } else { $script:CustomApps = $null }
+        if ($Job.Status -eq 'failed') { Write-UiLog 'The custom applications could not be read, see above.' 'Warning' }
+        Update-CustomRows
+    })
+    Update-CustomRows
+}
+Add-Click $ui.BtnCustomRefresh { $script:CustomApps = $null; Start-CustomRefresh }
+function Show-CustomDetails($App) {
+    $ui.PanelCustomDetails.Visibility = if ($App) { 'Visible' } else { 'Collapsed' }
+    if (-not $App) { return }
+    $ui.TxtCustomTitle.Text = $App.DisplayName
+    $ui.TxtCustomMeta.Text = "$($App.Kind.ToUpper()) application, $($App.Publisher)"
+    $ui.TxtCustomVersion.Text = $App.Version
+    $ui.TxtCustomProduct.Text = $App.ProductCode
+    $ui.TxtCustomUpgrade.Text = $App.UpgradeCode
+    $ui.TxtCustomAssigned.Text = Get-IntentsText $App.Intents
+    $ui.BtnCustomNewVersion.IsEnabled = ($App.Kind -eq 'msi')
+}
+$ui.LstCustom.Add_SelectionChanged({
+    $row = $ui.LstCustom.SelectedItem
+    try { Show-CustomDetails $(if ($row) { $row.Data }) } catch { Show-Error $_.Exception.Message }
+})
+function Get-SelectedCustomApp { $row = $ui.LstCustom.SelectedItem; if ($row) { $row.Data } }
+
+function ConvertFrom-CustomProps([string]$Text) {
+    # "ALLUSERS=1 INSTALLDIR=C:\Tools" or NAME="a value": public MSI properties; anything else is refused
+    $result = @{}
+    $rest = $Text.Trim()
+    while ($rest) {
+        if ($rest -notmatch '^([A-Z][A-Z0-9_]*)=("([^"]*)"|\S*)\s*') { throw "'$rest' is not a public MSI property (NAME=value, name in capitals)." }
+        $result[$Matches[1]] = if ($Matches[3] -ne $null -and $Matches[2].StartsWith('"')) { $Matches[3] } else { $Matches[2] }
+        $rest = $rest.Substring($Matches[0].Length)
+    }
+    return $result
+}
+function Set-CustomInfo($Info, [string]$Message) {
+    $script:CustomInfo = $Info
+    $ui.TxtCustomRead.Text = $Message
+    $ui.BoxCustomProps.Visibility = ConvertTo-Vis ([bool]$Info)
+    if ($Info) {
+        $ui.TxtMsiName.Text = $Info.Name; $ui.TxtMsiVersion.Text = $Info.Version; $ui.TxtMsiManufacturer.Text = $Info.Manufacturer
+        $ui.TxtMsiProduct.Text = $Info.ProductCode; $ui.TxtMsiUpgrade.Text = $(if ($Info.UpgradeCode) { $Info.UpgradeCode } else { '(none)' }); $ui.TxtMsiSize.Text = "$($Info.SizeMB) MB"
+    }
+    $ui.BtnCustomDeploy.IsEnabled = [bool]$Info
+    $ui.BtnCustomTest.IsEnabled = [bool]$Info
+}
+function Read-CustomMsi([string]$Path) {
+    try {
+        $info = Get-PackTuneMsiInfo -Path $Path
+        $message = "Read from the MSI, nothing was installed."
+        if ($script:CustomMode -eq 'Version' -and $script:CustomUpdateApp) {
+            $old = $script:CustomUpdateApp
+            if ($old.UpgradeCode -and $info.UpgradeCode -and $old.UpgradeCode -ne $info.UpgradeCode) { Set-CustomInfo $null "This MSI belongs to another product (upgrade code $($info.UpgradeCode))."; return }
+            if ($info.ProductCode -eq $old.ProductCode) { Set-CustomInfo $null 'Same product code as the installed version: devices could not tell the versions apart. Build a major upgrade with a new product code.'; return }
+            if ((Compare-SourceVersion $info.Version $old.Version) -ne 1) { Set-CustomInfo $null "Version $($info.Version) is not newer than $($old.Version)."; return }
+            $message = "Newer than $($old.Version): the new app supersedes the old one on the devices."
+        }
+        Set-CustomInfo $info $message
+    }
+    catch { Set-CustomInfo $null $_.Exception.Message }
+}
+function Set-CustomPath([string]$Path) {
+    $ui.TxtCustomPath.Text = $Path
+    $ui.CmbCustomMsi.Visibility = 'Collapsed'
+    $script:CustomMsiFiles = @()
+    if (-not $Path) { Set-CustomInfo $null ''; return }
+    if (Test-Path -LiteralPath $Path -PathType Container) {
+        $files = @(Get-ChildItem -LiteralPath $Path -Filter '*.msi' -File | Sort-Object Name)
+        if (-not $files.Count) { Set-CustomInfo $null 'There is no .msi file in this folder.'; return }
+        $script:CustomMsiFiles = $files
+        if ($files.Count -gt 1) {
+            $ui.CmbCustomMsi.ItemsSource = @($files | ForEach-Object { $_.Name })
+            $ui.CmbCustomMsi.Visibility = 'Visible'
+            $ui.CmbCustomMsi.SelectedIndex = 0   # reads the first one
+            return
+        }
+        $Path = $files[0].FullName
+    }
+    Read-CustomMsi $Path
+}
+$ui.CmbCustomMsi.Add_SelectionChanged({
+    $i = $ui.CmbCustomMsi.SelectedIndex
+    if ($i -ge 0 -and $i -lt $script:CustomMsiFiles.Count) { Read-CustomMsi $script:CustomMsiFiles[$i].FullName }
+})
+$ui.TxtCustomPath.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { try { Set-CustomPath $ui.TxtCustomPath.Text.Trim().Trim('"') } catch { Show-Error $_.Exception.Message } } })
+$ui.TxtCustomPath.Add_LostFocus({ if ($ui.TxtCustomPath.Text.Trim() -and -not $script:CustomInfo) { try { Set-CustomPath $ui.TxtCustomPath.Text.Trim().Trim('"') } catch { } } })
+Add-Click $ui.BtnCustomFile {
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Title = 'Choose the MSI'; $dlg.Filter = 'Windows Installer (*.msi)|*.msi'
+    if ($dlg.ShowDialog($window)) { Set-CustomPath $dlg.FileName }
+}
+Add-Click $ui.BtnCustomFolder {
+    Add-Type -AssemblyName System.Windows.Forms
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = 'Folder with the MSI (several MSI files: you choose one)'
+    if ($dlg.ShowDialog() -eq 'OK') { Set-CustomPath $dlg.SelectedPath }
+}
+function Show-CustomDialog([string]$Mode, $App) {
+    $script:CustomMode = $Mode
+    $script:CustomUpdateApp = $App
+    $isVersion = $Mode -eq 'Version'
+    $ui.TxtCustomDlgTitle.Text = if ($isVersion) { "New version of $($App.DisplayName)" } else { 'New application' }
+    $ui.TxtCustomDlgSub.Text = if ($isVersion) { "Installed version: $($App.Version). Pick the newer MSI of the same product." } else { 'Choose how the software is packaged.' }
+    $ui.BoxCustomKind.Visibility = ConvertTo-Vis (-not $isVersion)
+    $ui.TxtCustomOther.Visibility = ConvertTo-Vis (-not $isVersion)
+    $ui.PanelCustomAssign.Visibility = ConvertTo-Vis (-not $isVersion)
+    $ui.BtnCustomDeploy.Content = if ($isVersion) { 'Publish version' } else { 'Deploy' }
+    $ui.TxtCustomProps.Text = ''
+    $ui.TxtCustomDlgStatus.Text = ''
+    $ui.CmbCustomMsi.Visibility = 'Collapsed'
+    Set-CustomPath ''
+    Show-Dialog 'DlgCustom'
+}
+Add-Click $ui.BtnCustomNew { Show-CustomDialog 'New' $null }
+Add-Click $ui.BtnCustomNewVersion {
+    $app = Get-SelectedCustomApp
+    if ($app) { Show-CustomDialog 'Version' $app }
+}
+Add-Click $ui.BtnCustomCancel { Close-Dialog }
+Add-Click $ui.BtnCustomDeploy {
+    if (-not $script:CustomInfo) { throw 'Choose an MSI first.' }
+    if (-not (Test-SignedIn)) { throw 'Sign in to Intune first (Sign in, top right).' }
+    $props = ConvertFrom-CustomProps $ui.TxtCustomProps.Text
+    $msi = $script:CustomInfo.Path
+    $name = $script:CustomInfo.Name
+    if ($script:CustomMode -eq 'Version') {
+        $old = $script:CustomUpdateApp
+        Close-Dialog
+        Update-UiToken
+        [void](Start-UiTask -Kind 'custom' -Title "New version $($script:CustomInfo.Version) of $($old.DisplayName)" -Display "$name $($script:CustomInfo.Version)" -NeedsAuth -Arguments @{ Id = $old.Id; Msi = $msi; Props = $props } `
+            -Work 'param($Id, $Msi, $Props) Publish-PackTuneCustomVersion -AppId $Id -MsiPath $Msi -Properties $Props' -OnDone {
+            param($Result, $Job)
+            if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] published: devices with the old version get it through supersedence." 'Success'; Show-Toast "$($Job.Display) was published." 'ok' }
+            $script:CustomApps = $null; Start-CustomRefresh
+        })
+    }
+    else {
+        $assign = $script:AssignValues[[Math]::Max(0, $ui.CmbCustomAssign.SelectedIndex)]
+        Close-Dialog
+        Update-UiToken
+        [void](Start-UiTask -Kind 'custom' -Title "Deploying $name ($($script:CustomInfo.Version)) from the MSI" -Display "$name $($script:CustomInfo.Version)" -NeedsAuth -Arguments @{ Msi = $msi; Assignment = $assign; Props = $props } `
+            -Work 'param($Msi, $Assignment, $Props) New-PackTuneCustomMsiApp -MsiPath $Msi -Assignment $Assignment -Properties $Props' -OnDone {
+            param($Result, $Job)
+            if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] created in Intune." 'Success'; Show-Toast "$($Job.Display) is in Intune." 'ok' }
+            $script:CustomApps = $null; Start-CustomRefresh
+        })
+    }
+    Show-Page 'Activity'
+}
+Add-Click $ui.BtnCustomTest {
+    if (-not $script:CustomInfo) { return }
+    if (Test-TaskRunning 'test') { throw 'A sandbox test is already running (Windows Sandbox runs one at a time).' }
+    if (-not (Find-SandboxStudio)) { throw 'MSIX Sandbox Studio (WindowsSandboxMSIXInstaller) was not found. Enter its folder under Settings > Sandbox test.' }
+    $props = ConvertFrom-CustomProps $ui.TxtCustomProps.Text
+    $name = $script:CustomInfo.Name
+    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: run Install, Detect and Uninstall in the sandbox, then report the result there" -Display "Sandbox: $name" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props } `
+        -Work 'param($Msi, $Props) Test-PackTuneCustomApp -MsiPath $Msi -Properties $Props' -OnDone {
+        param($Result, $Job)
+        $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
+        if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Display)] the sandbox test could not run, see above." 'Error' }
+        elseif ($outcome.Verdict -eq 'Passed') { Write-UiLog "[$($Job.Display)] sandbox test passed." 'Success'; Show-Toast "$($Job.Display) passed." 'ok' }
+        else { Write-UiLog "[$($Job.Display)] sandbox test failed: $($outcome.Message)" 'Warning'; Show-Toast "Sandbox test failed: $($outcome.Message)" 'warn' }
+    })
+}
+Add-Click $ui.BtnCustomOpen {
+    $app = Get-SelectedCustomApp
+    if ($app) { Start-Process "https://intune.microsoft.com/#view/Microsoft_Intune_Apps/SettingsMenu/~/0/appId/$($app.Id)" }
+}
+Add-Click $ui.BtnCustomRemove {
+    $app = Get-SelectedCustomApp
+    if (-not $app) { return }
+    if (-not (Confirm-Action "Remove '$($app.DisplayName) $($app.Version)' from Intune?`n`nThe app and its assignments are deleted in the tenant. Devices keep the installed software.")) { return }
+    Update-UiToken
+    [void](Start-UiTask -Kind 'custom' -Title "Removing $($app.DisplayName) from Intune" -Display $app.DisplayName -NeedsAuth -Arguments @{ Id = $app.Id } -Work 'param($Id) Remove-PackTuneCustomApp -Id $Id' -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] removed from Intune." 'Success'; Show-Toast "$($Job.Display) was removed from Intune." 'ok' }
+        $script:CustomApps = $null; Show-CustomDetails $null; Start-CustomRefresh
+    })
+}
 
 # ---------------------------------------------------------------- add application: live search in both repositories
 $script:AddRows = New-Object System.Collections.ObjectModel.ObservableCollection[object]
@@ -3075,7 +3298,7 @@ function Resolve-AccountTenant([string]$User) {
 function Switch-Tenant([string]$TenantID, [string]$ClientID) {
     $s = Get-PackTuneSettings; $s.TenantID = $TenantID; $s.ClientID = $ClientID
     [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings
-    $script:TenantApps = $null; $script:TenantPackages = @{}
+    $script:TenantApps = $null; $script:CustomApps = $null; $script:TenantPackages = @{}
     Update-SettingsView
     Update-ConnectionStatus
     Write-UiLog "Tenant switched to $TenantID$(if ($ClientID) { " (app registration $ClientID)" } else { ', no app registration yet' })."
@@ -3095,7 +3318,7 @@ function Complete-SignIn([string]$How) {
 function Disconnect-Intune {
     $script:Shared.Auth = $null
     Set-PackTuneAuthState @{}
-    $script:TenantApps = $null; $script:TenantPackages = @{}; $script:RuntimeId = $null; $script:RuntimeInfo = $null; $script:StatusScript = $null; $script:SupersededOld = @()
+    $script:TenantApps = $null; $script:CustomApps = $null; $script:TenantPackages = @{}; $script:RuntimeId = $null; $script:RuntimeInfo = $null; $script:StatusScript = $null; $script:SupersededOld = @()
     $script:DeviceCounts = @{}; $script:WingetNoRuntime = @(); $script:ImportApps = $null
     Update-TenantRows
     Update-AppList
