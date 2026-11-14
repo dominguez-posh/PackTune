@@ -1244,22 +1244,38 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $true } }
     @{ Name = 'embedded sign-in is the default'; Phase = 0; Do = {
         param($s)
-        function New-FakeToken([string]$Name) {
+        function New-FakeToken([string]$Name, [bool]$Consent = $false) {
             $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("{`"name`":`"$Name`",`"upn`":`"admin@contoso.onmicrosoft.com`",`"tid`":`"t-1`"}")).TrimEnd('=').Replace('+', '-').Replace('/', '_')
             [pscustomobject]@{ token_type = 'Bearer'; expires_in = 3600; access_token = "x.$claims.y"; refresh_token = "refresh-$Name"
-                scope = 'https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All' }
+                scope = ('https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All' + $(if ($Consent) { ' https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All https://graph.microsoft.com/Sites.Selected' } else { '' })) }
         }
         switch ($s.Phase) {
             0 {
                 if (-not (Test-Idle)) { return $false }
                 $script:EmbeddedCalls = New-Object System.Collections.ArrayList
                 $script:EmbeddedAvailableOverride = $true
-                $script:EmbeddedSignInOverride = { param($t, $c, $sc, $h) [void]$script:EmbeddedCalls.Add(@($t, $c, ($sc -join ','), $h)); New-FakeToken 'Embedded Admin' }
+                $script:EmbeddedSignInOverride = { param($t, $c, $sc, $h, $pr, $folder) [void]$script:EmbeddedCalls.Add(@($t, $c, ($sc -join ','), $h, $pr, $folder)); New-FakeToken 'Embedded Admin' ($pr -eq 'consent') }
                 $script:Shared.UrlHit = $false
                 Connect-Intune
                 Test-Smoke 'normal sign-in uses the embedded window by default' ($script:LastSignInPath -eq 'embedded' -and $script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][0] -eq 'contoso.onmicrosoft.com' -and $script:EmbeddedCalls[0][1] -eq $script:Settings.ClientID) ($script:EmbeddedCalls | ConvertTo-Json -Compress)
                 Test-Smoke 'embedded sign-in signs in, no browser opened, no task needed' ((Test-SignedIn) -and $script:AccountText -like '*Embedded Admin*' -and -not $script:Shared.UrlHit -and -not (Test-TaskRunning 'connect'))
+                # Missing permissions are confirmed in the normal sign-in (dynamic consent), not in a setup window
+                $call = $script:EmbeddedCalls[0]
+                Test-Smoke 'normal sign-in asks for the new scopes (managed devices, Sites.Selected), no forced prompt' ($call[2] -like '*DeviceManagementManagedDevices.Read.All*' -and $call[2] -like '*Sites.Selected*' -and $call[2] -like '*DeviceManagementApps.ReadWrite.All*' -and $call[4] -eq 'default') ($call -join ' | ')
+                $ar = @(Get-ReadinessItems | Where-Object { $_.Key -eq 'appreg' })[0]
+                Test-Smoke 'missing permission: item says they are confirmed at the next sign-in, button Confirm now' ($ar.State -eq 'warn' -and $ar.Text -like 'New permissions needed*next sign-in*DeviceManagementManagedDevices.Read.All*' -and $ar.Fix -eq 'Confirm now') "$($ar.State) $($ar.Fix) $($ar.Text)"
+                $script:EmbeddedCalls.Clear()
+                & $ar.Action
+                $call = $script:EmbeddedCalls[0]
+                Test-Smoke 'Confirm now: one normal sign-in with prompt=consent and the new scopes, own app registration, no setup window' ($script:EmbeddedCalls.Count -eq 1 -and $call[1] -eq $script:Settings.ClientID -and $call[4] -eq 'consent' -and $call[2] -like '*Sites.Selected*' -and $call[2] -notlike '*Application.ReadWrite.All*') ($call -join ' | ')
+                Test-Smoke 'after the consent the granted scopes are read again: item green' ((@(Get-MissingScopes).Count -eq 0) -and (@(Get-ReadinessItems | Where-Object { $_.Key -eq 'appreg' })[0].State -eq 'ok')) (@(Get-MissingScopes) -join ',')
+                $urlC = Get-PackTuneAuthorizeUrl -TenantID 'contoso.onmicrosoft.com' -ClientID $script:Settings.ClientID -Scopes (Get-PackTuneSignInScopes) -State 's' -Challenge 'c' -Prompt 'consent' -LoginHint 'admin@contoso.onmicrosoft.com'
+                $urlD = Get-PackTuneAuthorizeUrl -TenantID 'contoso.onmicrosoft.com' -ClientID $script:Settings.ClientID -Scopes (Get-PackTuneSignInScopes) -State 's' -Challenge 'c' -Prompt 'default'
+                Test-Smoke 'authorize URL (v2) with the new scopes: prompt=consent when permissions are missing' ($urlC -like '*/oauth2/v2.0/authorize?*' -and $urlC -like '*prompt=consent*' -and $urlC -like '*Sites.Selected*' -and $urlC -like '*DeviceManagementManagedDevices.Read.All*' -and $urlC -like '*login_hint=*') $urlC
+                Test-Smoke 'authorize URL without missing permissions: no prompt at all (never login)' ($urlD -notlike '*prompt=*' -and $urlD -like '*Sites.Selected*') $urlD
+                Test-Smoke 'sign-in profile folder: per Windows user, current user only' (($script:SignInSession -like '*WebView2Session') -and (Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..\Start-PackTune.ps1') -Raw) -match 'Get-PackTuneSessionFolder \}' -and (Get-PackTuneSessionFolder -Root (Join-Path (Split-Path $script:SignInSession) 'acl')).Length -gt 0 -and (New-Object System.IO.DirectoryInfo (Join-Path (Split-Path $script:SignInSession) 'acl\WebView2Session')).GetAccessControl().AreAccessRulesProtected) $script:SignInSession
                 Disconnect-Intune
+                Test-Smoke 'sign out clears the sign-in profile' (-not (Test-Path $script:SignInSession)) $script:SignInSession
                 # Setup: the sign-in of the app registration in the embedded window, the Graph work in the task
                 $script:EmbeddedCalls.Clear()
                 Start-AppRegistration
@@ -1268,12 +1284,13 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             1 {
                 if (-not (Test-Idle)) { return $false }
                 Test-Smoke 'app registration setup signs in with the embedded window (setup app, admin scopes)' ($script:LastSignInPath -eq 'embedded' -and $script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][1] -eq '14d82eec-204b-4c2f-b7e8-296a70dab67e' -and $script:EmbeddedCalls[0][2] -like '*Application.ReadWrite.All*DelegatedPermissionGrant.ReadWrite.All*') ($script:EmbeddedCalls | ConvertTo-Json -Compress)
+                Test-Smoke 'setup sign-in uses the same profile folder, no forced prompt' ($script:EmbeddedCalls[0][5] -eq $script:SignInSession -and $script:EmbeddedCalls[0][4] -eq 'default') ($script:EmbeddedCalls[0] -join ' | ')
                 Test-Smoke 'setup finished with the embedded token, browser untouched' (-not $script:Shared.UrlHit -and (Get-SmokeLog) -match 'App registration ready' -and (Get-JobLog) -match 'Admin consent granted') ''
                 # Shared session: the account of the setup sign-in is the login hint of the next one
                 $script:EmbeddedCalls.Clear()
                 Connect-Intune
                 Test-Smoke 'normal sign-in after the setup gets the setup account as login hint (shared session)' ($script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][3] -eq 'admin@contoso.onmicrosoft.com') ($script:EmbeddedCalls | ConvertTo-Json -Compress)
-                Test-Smoke 'one sign-in profile folder per run' ($script:SignInSession -like '*PackTuneSignIn-*')
+                Test-Smoke 'setup sign-in and normal sign-in use the same profile folder' ($script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][5] -eq $script:SignInSession -and $script:EmbeddedCalls[0][4] -eq 'default')
                 # Hint from the current token (signed in by browser or Keevault), session folder and prompt of the real call
                 Connect-Intune   # signed in with the fake embedded window (account admin@contoso)
                 $script:EmbeddedSignInOverride = $null; $script:SignInHint = ''
@@ -1284,7 +1301,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'hint taken from the current token before an embedded sign-in (grant new permissions)' ($b.LoginHint -like '*@contoso.onmicrosoft.com') $b.LoginHint
                 Test-Smoke 'known account: no account picker, no forced prompt; shared session folder' ($b.Prompt -eq 'default' -and $b.UserDataFolder -eq $script:SignInSession) "$($b.Prompt) $($b.UserDataFolder)"
                 $script:BrowserSignIn = 'Invoke-PackTuneBrowserSignIn'
-                Test-Smoke 'Keevault sign-in gets the same session folder' ((Get-Command Connect-PackTuneWithKeevault).Parameters.ContainsKey('UserDataFolder') -and (Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..\Start-PackTune.ps1') -Raw) -match '-UserDataFolder \$script:SignInSession -Owner')
+                Test-Smoke 'Keevault sign-in gets the same session folder' ((Get-Command Connect-PackTuneWithKeevault).Parameters.ContainsKey('UserDataFolder') -and (Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..\Start-PackTune.ps1') -Raw) -match '-UserDataFolder \$script:SignInSession -Scopes')
                 Disconnect-Intune
                 Disconnect-Intune
                 # The system browser as an explicit choice
