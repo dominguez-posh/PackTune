@@ -10,4 +10,7 @@ New-Item -ItemType Directory -Path $dest -Force | Out-Null
 Copy-Item (Join-Path $job 'job.json') $dest
 if (Test-Path (Join-Path $job 'input\source')) { Copy-Item (Join-Path $job 'input\source') (Join-Path $dest 'source') -Recurse }
 Set-Content -Path (Join-Path $dest 'started.txt') -Value (Get-Date).ToString('o')
-@{ State = 'Succeeded'; Step = 'Done'; Message = 'Fake test lab'; Result = @{ Verdict = 'Passed'; Notes = 'fake' } } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $job 'status.json')
+# A check can make the next tests fail: %LOCALAPPDATA%\fake-sandbox-verdict.txt holds Failed
+$fail = (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-sandbox-verdict.txt')) -and ((Get-Content (Join-Path $env:LOCALAPPDATA 'fake-sandbox-verdict.txt') -Raw).Trim() -eq 'Failed')
+if ($fail) { @{ State = 'Failed'; Step = 'Done'; Message = 'Failed at step 2 of 5: Install exited with 1603'; Result = @{ Verdict = 'Failed'; Notes = 'fake' } } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $job 'status.json') }
+else { @{ State = 'Succeeded'; Step = 'Done'; Message = 'Fake test lab'; Result = @{ Verdict = 'Passed'; Notes = 'fake' } } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $job 'status.json') }

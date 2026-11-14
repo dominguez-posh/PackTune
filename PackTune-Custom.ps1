@@ -250,7 +250,7 @@ function ConvertFrom-PackTuneCustomNotes {
     # Kind, app id, version, product code and upgrade code of a custom app from its notes; $null for anything else
     param([string]$Notes)
     if ($Notes -notlike "$($script:CustomMarker)*") { return $null }
-    $Result = [ordered]@{ Kind = $null; AppId = $null; Version = ""; ProductCode = ""; UpgradeCode = ""; Manifest = ""; Identity = ""; Thumbprint = ""; Repo = ""; Commit = ""; ApprovedBy = "" }
+    $Result = [ordered]@{ Kind = $null; AppId = $null; Version = ""; ProductCode = ""; UpgradeCode = ""; Manifest = ""; Identity = ""; Thumbprint = ""; Repo = ""; Commit = ""; ApprovedBy = ""; TestDate = ""; TestHash = "" }
     if ($Notes -match '(?:^|;)custom=(msi|msix)(?:;|$)') { $Result.Kind = $Matches[1] } else { return $null }
     if ($Notes -match '(?:^|;)app=([a-z0-9-]+)(?:;|$)') { $Result.AppId = $Matches[1] }
     if ($Notes -match '(?:^|;)ver=([0-9.]+)(?:;|$)') { $Result.Version = $Matches[1] }
@@ -261,6 +261,7 @@ function ConvertFrom-PackTuneCustomNotes {
     if ($Notes -match '(?:^|;)repo=([A-Za-z0-9-]+/[A-Za-z0-9._-]+)(?:;|$)') { $Result.Repo = $Matches[1] }
     if ($Notes -match '(?:^|;)commit=([0-9a-f]{7,40})(?:;|$)') { $Result.Commit = $Matches[1] }
     if ($Notes -match '(?:^|;)by=([A-Za-z0-9._-]{1,20})(?:;|$)') { $Result.ApprovedBy = $Matches[1] }
+    if ($Notes -match '(?:^|;)test=passed;date=([0-9]{8});hash=([0-9a-f]{8,64})(?:;|$)') { $Result.TestDate = $Matches[1]; $Result.TestHash = $Matches[2] }
     if ($Notes -match '(?:^|;)identity=([A-Za-z0-9._-]+)(?:;|$)') { $Result.Identity = $Matches[1] }
     if ($Notes -match '(?:^|;)thumb=([0-9A-Fa-f]{40})(?:;|$)') { $Result.Thumbprint = $Matches[1].ToUpper() }
     return [pscustomobject]$Result
@@ -289,6 +290,84 @@ function Get-PackTuneCustomApps {
     }
     return @($Rows | Sort-Object -Property @{ Expression = { $_.DisplayName } }, @{ Expression = { $_.Created }; Descending = $true })
 }#Custom applications found in the tenant
+
+#endregion
+
+#region sandbox test gate
+
+function Get-PackTunePackageFingerprint {
+    <#
+        The SHA256 that binds a sandbox test to exactly one package: every file of the package source (install script, the MSI
+        or MSIX and certificate, all helper files), the detection script, the icon that was chosen and the install arguments.
+        The .intunewin itself is not hashed (it is encrypted with new keys at every build); it is made from these files.
+        Any change of any part gives another fingerprint, so a passed test never carries over to a changed package.
+    #>
+    param([Parameter(Mandatory = $true)][string]$SourcePath, [Parameter(Mandatory = $true)][string]$DetectionFile, [string]$IconFile, [string]$IconBase64, [string]$Arguments = "")
+    $Root = (Resolve-Path -LiteralPath $SourcePath).ProviderPath.TrimEnd("\")
+    $Lines = New-Object System.Collections.Generic.List[string]
+    foreach ($File in @(Get-ChildItem -LiteralPath $Root -File -Recurse)) {
+        $Lines.Add("file|$($File.FullName.Substring($Root.Length + 1).ToLower())|$((Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash)")
+    }
+    $Lines.Add("detection|$((Get-FileHash -LiteralPath $DetectionFile -Algorithm SHA256).Hash)")
+    $IconHash = ""
+    if ($IconFile -and (Test-Path -LiteralPath $IconFile)) { $IconHash = (Get-FileHash -LiteralPath $IconFile -Algorithm SHA256).Hash }
+    elseif ($IconBase64) {
+        $Sha = [Security.Cryptography.SHA256]::Create()
+        try { $IconHash = ([BitConverter]::ToString($Sha.ComputeHash([Convert]::FromBase64String($IconBase64)))).Replace("-", "") } finally { $Sha.Dispose() }
+    }
+    $Lines.Add("icon|$IconHash")
+    $Lines.Add("arguments|$Arguments")
+    $Array = $Lines.ToArray()
+    [Array]::Sort($Array, [StringComparer]::Ordinal)
+    $Sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($Sha.ComputeHash([Text.Encoding]::UTF8.GetBytes(($Array -join "`n"))))).Replace("-", "").ToLower() } finally { $Sha.Dispose() }
+}
+
+function Get-PackTuneTestResultPath {
+    param([Parameter(Mandatory = $true)][string]$Fingerprint)
+    if ($Fingerprint -notmatch '^[0-9a-f]{64}$') { throw "Not a package fingerprint: $Fingerprint" }
+    Join-Path (Join-Path $script:WorkRoot "testresults") "$Fingerprint.json"
+}
+
+function Save-PackTuneTestResult {
+    # Keeps the outcome of a sandbox test for the package it was run for (verdict, date, package hash, steps)
+    param([Parameter(Mandatory = $true)][string]$Fingerprint, [Parameter(Mandatory = $true)][ValidateSet("Passed", "Failed")][string]$Verdict, [string]$Message, $Steps, [bool]$UpdatePath, [string]$Name, [string]$Version)
+    $Record = [ordered]@{ format = "PackTune.SandboxTest"; verdict = $Verdict; date = (Get-Date).ToUniversalTime().ToString("o"); packageHash = $Fingerprint; updatePath = $UpdatePath; name = $Name; version = $Version; message = $Message; steps = $Steps }
+    $Path = Get-PackTuneTestResultPath -Fingerprint $Fingerprint
+    New-Item -ItemType Directory -Path (Split-Path $Path -Parent) -Force | Out-Null
+    [IO.File]::WriteAllText($Path, ($Record | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
+    return [pscustomobject]$Record
+}
+
+function Get-PackTuneTestResult {
+    # The recorded test of exactly this package, or $null
+    param([Parameter(Mandatory = $true)][string]$Fingerprint)
+    $Path = Get-PackTuneTestResultPath -Fingerprint $Fingerprint
+    if (-not (Test-Path -LiteralPath $Path)) { return $null }
+    try { $Record = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch { return $null }
+    if ($Record.packageHash -ne $Fingerprint) { return $null }
+    return $Record
+}
+
+function Assert-PackTuneTestPassed {
+    <#
+        The backend side of the rule "custom applications go out only after a successful sandbox test": refuses unless a PASSED
+        test is recorded for exactly this package (-RequireUpdatePath: one that also played the update from the previous
+        version). There is no override. Returns the record.
+    #>
+    param([Parameter(Mandatory = $true)][string]$Fingerprint, [switch]$RequireUpdatePath)
+    $Record = Get-PackTuneTestResult -Fingerprint $Fingerprint
+    if (-not $Record) { throw "Run the sandbox test first: no test is recorded for exactly this package (a change of the files, icon or arguments needs a new test). Nothing was deployed." }
+    if ($Record.verdict -ne "Passed") { throw "The sandbox test of this package failed ($($Record.message)). A failed test does not allow the deployment. Nothing was deployed." }
+    if ($RequireUpdatePath -and -not $Record.updatePath) { throw "Run the sandbox test first, including the update from the previous version: the recorded test of this package did not play the update path. Nothing was deployed." }
+    return $Record
+}
+
+function ConvertTo-PackTuneTestNote {
+    # test=passed;date=<yyyyMMdd>;hash=<first 12 of the package hash> for the Intune notes
+    param([Parameter(Mandatory = $true)]$Record)
+    "test=passed;date=$(([datetime]$Record.date).ToUniversalTime().ToString('yyyyMMdd'));hash=$(([string]$Record.packageHash).Substring(0, 12))"
+}
 
 #endregion
 
@@ -360,7 +439,7 @@ function Save-PackTuneCustomMsiToStore {
         applications need the store: a store that is not ready is an error, so the state of an application is always kept
         somewhere. Returns the manifest hash.
     #>
-    param([Parameter(Mandatory = $true)]$Info, [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)]$Built, [string]$Extra)
+    param([Parameter(Mandatory = $true)]$Info, [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)]$Built, [string]$Extra, $TestRecord)
     $State = Get-PackTuneStoreState
     if ($State.State -ne "Ready") { throw "Custom applications need the package store, and it is not ready: $($State.Message) Set it up on the Start page first." }
     $Folder = Join-Path ([IO.Path]::GetTempPath()) ("packtune-msi-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
@@ -369,7 +448,7 @@ function Save-PackTuneCustomMsiToStore {
         Copy-Item -LiteralPath $Info.Path -Destination (Join-Path $Folder $Info.FileName)
         $Recipe = [ordered]@{ format = "PackTune.Recipe"; kind = "msi"; app = $AppId; name = $Info.Name; version = $Info.Version; publisher = $Info.Manufacturer; productCode = $Info.ProductCode; upgradeCode = $Info.UpgradeCode; msi = $Info.FileName; arguments = $Extra }
         Write-Host "Keeping this version in the package store"
-        return (Save-PackTuneCustomVersionToStore -AppId $AppId -Version $Info.Version -Kind "msi" -InstallerFolder $Folder -Recipe $Recipe -IntuneWin $Built.Package.Path -Store $State.Store)
+        return (Save-PackTuneCustomVersionToStore -AppId $AppId -Version $Info.Version -Kind "msi" -InstallerFolder $Folder -Recipe $Recipe -IntuneWin $Built.Package.Path -TestRecord $TestRecord -Store $State.Store)
     }
     finally { Remove-Item -LiteralPath $Folder -Recurse -Force -ErrorAction SilentlyContinue }
 }
@@ -403,10 +482,12 @@ function New-PackTuneCustomMsiApp {
 
     Write-Host "Building the package for $($Info.Name) $($Info.Version)"
     $Built = New-PackTuneCustomAppPackage -Info $Info -AppId $AppId -ExtraArguments $Extra
+    # The gate: only a package with a passed sandbox test goes out (nothing is stored or uploaded before this check)
+    $Test = Assert-PackTuneTestPassed -Fingerprint (Get-PackTunePackageFingerprint -SourcePath $Built.SourcePath -DetectionFile $Built.DetectionFile -IconFile $IconFile -Arguments $Extra)
     $Icon = Get-PackTuneMsiIconBase64 -Info $Info -IconFile $IconFile
-    $Manifest = Save-PackTuneCustomMsiToStore -Info $Info -AppId $AppId -Built $Built -Extra $Extra
+    $Manifest = Save-PackTuneCustomMsiToStore -Info $Info -AppId $AppId -Built $Built -Extra $Extra -TestRecord $Test
     Write-Host "Creating and uploading $Name as win32 App to Intune"
-    $App = Add-PackTuneCustomIntuneApp -Info $Info -AppId $AppId -Built $Built -DisplayName $Name -Description $Description -Publisher $(if ($Publisher) { $Publisher } else { $Info.Manufacturer }) -IconBase64 $Icon -Architecture $Architecture -Manifest $Manifest
+    $App = Add-PackTuneCustomIntuneApp -Info $Info -AppId $AppId -Built $Built -DisplayName $Name -Description $Description -Publisher $(if ($Publisher) { $Publisher } else { $Info.Manufacturer }) -IconBase64 $Icon -Architecture $Architecture -Manifest $Manifest -ExtraNotes (ConvertTo-PackTuneTestNote $Test)
     Set-PackTuneAssignment -Id $App.id -Assignment $Assignment
     Write-Host "Deployment of $Name was successful"
     return $App.id
@@ -444,14 +525,16 @@ function Publish-PackTuneCustomVersion {
 
     Write-Host "Building the package for $($Info.Name) $($Info.Version)"
     $Built = New-PackTuneCustomAppPackage -Info $Info -AppId $AppKey -ExtraArguments $Extra
+    # The gate: a passed sandbox test of exactly this package, including the update from the previous version
+    $Test = Assert-PackTuneTestPassed -Fingerprint (Get-PackTunePackageFingerprint -SourcePath $Built.SourcePath -DetectionFile $Built.DetectionFile -IconFile $IconFile -Arguments $Extra) -RequireUpdatePath
     $Icon = if ($IconFile) { Get-PackTuneMsiIconBase64 -Info $Info -IconFile $IconFile } elseif ($Old.largeIcon -and $Old.largeIcon.value) { [string]$Old.largeIcon.value } else { Get-PackTuneMsiIconBase64 -Info $Info }
     $Architecture = ConvertTo-PackTuneArchitecture $Old
     if (-not $Architecture) { $Architecture = $script:Settings.Architecture }
     $Windows = Get-PackTuneMinimumWindows $Old
     if (-not $Windows) { $Windows = "W10_1607" }
-    $Manifest = Save-PackTuneCustomMsiToStore -Info $Info -AppId $AppKey -Built $Built -Extra $Extra
+    $Manifest = Save-PackTuneCustomMsiToStore -Info $Info -AppId $AppKey -Built $Built -Extra $Extra -TestRecord $Test
     Write-Host "Creating and uploading the new app"
-    $New = Add-PackTuneCustomIntuneApp -Info $Info -AppId $AppKey -Built $Built -DisplayName ([string]$Old.displayName) -Description ([string]$Old.description) -Publisher ([string]$Old.publisher) -IconBase64 $Icon -Architecture $Architecture -MinimumWindows $Windows -Manifest $Manifest
+    $New = Add-PackTuneCustomIntuneApp -Info $Info -AppId $AppKey -Built $Built -DisplayName ([string]$Old.displayName) -Description ([string]$Old.description) -Publisher ([string]$Old.publisher) -IconBase64 $Icon -Architecture $Architecture -MinimumWindows $Windows -Manifest $Manifest -ExtraNotes (ConvertTo-PackTuneTestNote $Test)
     Complete-PackTuneSupersedingApp -Old $Old -New $New
     return $New.id
 }#New version of a custom MSI app through supersedence
@@ -479,7 +562,9 @@ function Test-PackTuneCustomApp {
     #>
     param([Parameter(Mandatory = $true)][string]$MsiPath, [hashtable]$Properties = @{}, [string]$PreviousMsiPath, [hashtable]$PreviousProperties = @{}, [switch]$AutoRun,
         # Intune custom app id (the AppId of the notes): its latest stored version in the package store is the previous version
-        [string]$PreviousStoreAppId)
+        [string]$PreviousStoreAppId,
+        # The icon chosen for the package: part of what the passed test is bound to
+        [string]$IconFile)
     if ($PreviousStoreAppId -and -not $PreviousMsiPath) {
         $StoreFolder = New-PackTuneWorkFolder -Name "previous-$PreviousStoreAppId"
         Write-Host "Taking the previous version of $PreviousStoreAppId from the package store"
@@ -495,6 +580,9 @@ function Test-PackTuneCustomApp {
     $SourcePath = Join-Path $WorkPath "source"
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $Scripts.Install -Encoding ASCII
     Copy-Item -LiteralPath $Info.Path -Destination (Join-Path $SourcePath $Info.FileName) -Force
+    $DetectionFile = Join-Path $WorkPath "detection.ps1"
+    Set-Content -Path $DetectionFile -Value $Scripts.Detection -Encoding ASCII
+    $Fingerprint = Get-PackTunePackageFingerprint -SourcePath $SourcePath -DetectionFile $DetectionFile -IconFile $IconFile -Arguments (ConvertTo-PackTuneMsiArguments $Properties)
     $LabInstall = "& `"`$PSScriptRoot\choco-app.ps1`"`r`nexit `$LASTEXITCODE"
     $LabUninstall = "& `"`$PSScriptRoot\choco-app.ps1`" -Uninstall`r`nexit `$LASTEXITCODE"
     $LabFiles = Join-Path $WorkPath "lab"
@@ -519,7 +607,8 @@ function Test-PackTuneCustomApp {
     Write-Host "Opening the test lab in Windows Sandbox for $($Info.Name): detect, install$(if ($PreviousMsiPath) { " (previous version first, then the update)" }), detect, uninstall, detect"
     $Result = Start-PackTuneWin32Lab -DisplayName "$($Info.Name) (custom MSI)" -Version $Info.Version -SourcePath $LabFiles -AutoRun:$AutoRun @LabParams
     Write-Host "Test result: $($Result.Verdict). $($Result.Message)"
-    [pscustomobject]@{ Package = $Info.Name; Verdict = $Result.Verdict; Message = $Result.Message; JobPath = $Result.JobPath }
+    $Record = Save-PackTuneTestResult -Fingerprint $Fingerprint -Verdict $Result.Verdict -Message $Result.Message -Steps $Result.Result -UpdatePath ([bool]$PreviousMsiPath) -Name $Info.Name -Version $Info.Version
+    [pscustomobject]@{ Package = $Info.Name; Verdict = $Result.Verdict; Message = $Result.Message; JobPath = $Result.JobPath; Fingerprint = $Fingerprint; UpdatePath = $Record.updatePath }
 }#Tests an MSI app in Windows Sandbox
 
 #endregion

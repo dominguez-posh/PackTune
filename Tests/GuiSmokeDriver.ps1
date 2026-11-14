@@ -758,16 +758,49 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Set-CustomPath (Join-Path $s.Dir 'missing.msi')
             Test-Smoke 'a missing file is reported, nothing to deploy' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.TxtCustomRead.Text) $ui.TxtCustomRead.Text
             Set-CustomPath (Join-Path $s.Dir 'tool-1.0.msi')
-            Test-Smoke 'the MSI properties are shown' ($ui.TxtMsiName.Text -eq 'Smoke Tool' -and $ui.TxtMsiVersion.Text -eq '1.0.0' -and $ui.TxtMsiProduct.Text -eq '{BBBBBBBB-0000-0000-0000-000000000001}' -and $ui.TxtMsiManufacturer.Text -eq 'Smoke Corp' -and $ui.BtnCustomDeploy.IsEnabled) $ui.TxtMsiName.Text
+            Test-Smoke 'the MSI properties are shown' ($ui.TxtMsiName.Text -eq 'Smoke Tool' -and $ui.TxtMsiVersion.Text -eq '1.0.0' -and $ui.TxtMsiProduct.Text -eq '{BBBBBBBB-0000-0000-0000-000000000001}' -and $ui.TxtMsiManufacturer.Text -eq 'Smoke Corp') $ui.TxtMsiName.Text
             Save-SmokeShot '33-custom-dialog'
             $ui.TxtCustomProps.Text = 'ALLUSERS=1'
             $ui.CmbCustomAssign.SelectedIndex = 1
+            Test-Smoke 'gate: Deploy is off before the sandbox test, the tooltip says why' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.BtnCustomDeploy.ToolTip -eq 'Run the sandbox test first') ([string]$ui.BtnCustomDeploy.ToolTip)
+            $refused = ''; try { $null = New-PackTuneCustomMsiApp -MsiPath (Join-Path $s.Dir 'tool-1.0.msi') -Assignment None -Properties @{ ALLUSERS = '1' } } catch { $refused = $_.Exception.Message }
+            Test-Smoke 'gate: the backend refuses a deployment without a passed test, whatever the buttons say' ($refused -like '*Run the sandbox test first*') $refused
+            Set-Content (Join-Path $env:LOCALAPPDATA 'fake-sandbox-verdict.txt') 'Failed'
+            & $script:ClickActions[$ui.BtnCustomTest]
+            $s.Phase = 'T1'
+            return $false
+        }
+        if ("$($s.Phase)" -eq 'T1') {
+            if (-not (Test-Idle 'test')) { return $false }
+            Test-Smoke 'gate: a failed test shows the failing step and keeps Deploy off' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.TxtCustomDlgStatus.Text -like '*failed*Failed at step 2 of 5*') $ui.TxtCustomDlgStatus.Text
+            Set-Content (Join-Path $env:LOCALAPPDATA 'fake-sandbox-verdict.txt') 'Passed'
+            & $script:ClickActions[$ui.BtnCustomTest]
+            $s.Phase = 'T2'
+            return $false
+        }
+        if ("$($s.Phase)" -eq 'T2') {
+            if (-not (Test-Idle 'test')) { return $false }
+            Test-Smoke 'gate: after a passed test of this package Deploy is on' ($ui.BtnCustomDeploy.IsEnabled -and $ui.TxtCustomDlgStatus.Text -like '*passed*') $ui.TxtCustomDlgStatus.Text
+            $ui.TxtCustomProps.Text = 'ALLUSERS=2'
+            Test-Smoke 'gate: any change (the arguments) resets the test, Deploy is off again' (-not $ui.BtnCustomDeploy.IsEnabled)
+            $ui.TxtCustomProps.Text = 'ALLUSERS=1'
+            Test-Smoke 'gate: changing it back does not bring the old result back' (-not $ui.BtnCustomDeploy.IsEnabled)
+            & $script:ClickActions[$ui.BtnCustomTest]
+            $s.Phase = 'T3'
+            return $false
+        }
+        if ("$($s.Phase)" -eq 'T3') {
+            if (-not (Test-Idle 'test')) { return $false }
+            Test-Smoke 'gate: the new test of the same package turns Deploy on' $ui.BtnCustomDeploy.IsEnabled
             & $script:ClickActions[$ui.BtnCustomDeploy]
+            $s.Phase = 2
             return $false
         }
         if ($s.Phase -eq 2) {
             if (-not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
             $s.Phase = 3
+            $deployedNotes = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | ForEach-Object { $_.notes }) -join ';'
+            Test-Smoke 'gate: the deployed app carries the test record in its notes' ($deployedNotes -like '*;test=passed;date=*;hash=*') $deployedNotes
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'deploy: the app is in Intune with the custom marker and the Available assignment' ($fake.Count -eq 1 -and $fake[0].displayName -eq 'Smoke Tool' -and $fake[0].assignment -eq 'available' -and $fake[0].notes -like '*ver=1.0.0;product={BBBBBBBB-0000-0000-0000-000000000001}*') (($fake | ForEach-Object notes) -join ';')
             Test-Smoke 'the custom page lists it with version and assignment' ($script:CustomRows.Count -eq 1 -and $script:CustomRows[0]['Title'] -eq 'Smoke Tool' -and $script:CustomRows[0]['Kind'] -eq 'MSI 1.0.0' -and $script:CustomRows[0]['Assigned'] -eq 'Available') ($script:CustomRows | ForEach-Object { $_['Kind'] })
@@ -783,8 +816,24 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Set-CustomPath $s.Dir
             Test-Smoke 'a folder with several MSI files offers a choice' ($ui.CmbCustomMsi.Visibility -eq 'Visible' -and $ui.CmbCustomMsi.Items.Count -eq 3) $ui.CmbCustomMsi.Items.Count
             Set-CustomPath (Join-Path $s.Dir 'tool-2.0.msi')
-            Test-Smoke 'the newer MSI is accepted' ($ui.BtnCustomDeploy.IsEnabled -and $ui.TxtCustomRead.Text -like '*Newer than 1.0.0*') $ui.TxtCustomRead.Text
+            Test-Smoke 'the newer MSI is accepted, Publish stays off until the sandbox test' ((-not $ui.BtnCustomDeploy.IsEnabled) -and $ui.TxtCustomRead.Text -like '*Newer than 1.0.0*') $ui.TxtCustomRead.Text
+            Start-CustomTest
+            $s.Phase = 'V1'
+            return $false
+        }
+        if ("$($s.Phase)" -eq 'V1') {
+            if (-not (Test-Idle 'test')) { return $false }
+            Test-Smoke 'gate: a new version tested for installation only is not enough, Publish needs the update test' ((-not $ui.BtnCustomDeploy.IsEnabled) -and ([string]$ui.BtnCustomDeploy.ToolTip) -like '*update from the previous version*') ([string]$ui.BtnCustomDeploy.ToolTip)
+            # the package store of the smoke is a stub that stores nothing, so the previous version comes from the file here (the store route is checked in Check-Custom)
+            Start-CustomTest (Join-Path $s.Dir 'tool-1.0.msi')
+            $s.Phase = 'V2'
+            return $false
+        }
+        if ("$($s.Phase)" -eq 'V2') {
+            if (-not (Test-Idle 'test')) { return $false }
+            Test-Smoke 'gate: the test of a new version plays the update from the previous version, then Publish is on' ($ui.BtnCustomDeploy.IsEnabled -and $ui.TxtCustomDlgStatus.Text -like '*update from the previous version*') $ui.TxtCustomDlgStatus.Text
             & $script:ClickActions[$ui.BtnCustomDeploy]
+            $s.Phase = 3
             return $false
         }
         if ($s.Phase -eq 3) {
@@ -804,6 +853,9 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'remove: one custom app is gone from Intune and from the list' ($fake.Count -eq 1 -and $script:CustomRows.Count -eq 1 -and $ui.PanelCustomDetails.Visibility -eq 'Collapsed') ($fake | ForEach-Object displayVersion)
             Remove-Item $s.Dir -Recurse -Force -ErrorAction SilentlyContinue
+            # the lab runs of this step must not shift the numbering the sandbox step counts on
+            Remove-Item (Join-Path $env:LOCALAPPDATA 'fake-sandbox') -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item (Join-Path $env:LOCALAPPDATA 'fake-sandbox-verdict.txt') -Force -ErrorAction SilentlyContinue
             Show-Page 'Apps'
             return $true
         }
@@ -837,7 +889,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             # New application, Other
             & $script:ClickActions[$ui.BtnCustomNew]
             $ui.RbCustomOther.IsChecked = $true
-            Test-Smoke 'Other: the panel for the installation folder shows, MSI panel hidden, nothing to deploy yet' ($ui.PanelCustomOther.Visibility -eq 'Visible' -and $ui.PanelCustomMsi.Visibility -eq 'Collapsed' -and -not $ui.BtnCustomDeploy.IsEnabled -and $ui.BtnCustomDeploy.Content -eq 'Capture and deploy' -and $ui.BtnCustomTest.Visibility -eq 'Collapsed') ''
+            Test-Smoke 'Other: the panel for the installation folder shows, MSI panel hidden, nothing to deploy yet' ($ui.PanelCustomOther.Visibility -eq 'Visible' -and $ui.PanelCustomMsi.Visibility -eq 'Collapsed' -and -not $ui.BtnCustomDeploy.IsEnabled -and $ui.BtnCustomDeploy.Content -eq 'Capture, test and deploy' -and $ui.BtnCustomTest.Visibility -eq 'Collapsed') ''
             Set-OtherFolder $s.Dir
             Test-Smoke 'Other: entry point candidates (exe, cmd), setup.exe preselected, name from the folder' (@($ui.CmbOtherEntry.ItemsSource).Count -eq 2 -and $ui.CmbOtherEntry.SelectedItem -eq 'setup.exe' -and $ui.TxtOtherName.Text -eq 'smoke other') ((@($ui.CmbOtherEntry.ItemsSource)) -join ',')
             Test-Smoke 'Other: network for the capture is offered and off by default' ($ui.ChkOtherNetwork -and -not $ui.ChkOtherNetwork.IsChecked -and $ui.ChkOtherNetwork.Visibility -eq 'Visible')
@@ -848,7 +900,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             & $script:ClickActions[$ui.BtnCustomCancel]
             # Update dialog of the MSIX app
             & $script:ClickActions[$ui.BtnCustomNewVersion]
-            Test-Smoke 'New version of an MSIX app: the update dialog, next version, name fixed, stored files by default' ($ui.DlgCustom.Visibility -eq 'Visible' -and $ui.TxtCustomDlgTitle.Text -eq 'New version of Captured Tool' -and $ui.TxtOtherVersion.Text -eq '1.0.0.1' -and -not $ui.TxtOtherName.IsEnabled -and $ui.BoxCustomKind.Visibility -eq 'Collapsed' -and $ui.BtnCustomDeploy.Content -eq 'Capture and publish' -and $ui.BtnCustomDeploy.IsEnabled) $ui.TxtOtherVersion.Text
+            Test-Smoke 'New version of an MSIX app: the update dialog, next version, name fixed, stored files by default' ($ui.DlgCustom.Visibility -eq 'Visible' -and $ui.TxtCustomDlgTitle.Text -eq 'New version of Captured Tool' -and $ui.TxtOtherVersion.Text -eq '1.0.0.1' -and -not $ui.TxtOtherName.IsEnabled -and $ui.BoxCustomKind.Visibility -eq 'Collapsed' -and $ui.BtnCustomDeploy.Content -eq 'Capture, test and publish' -and $ui.BtnCustomDeploy.IsEnabled) $ui.TxtOtherVersion.Text
             Save-SmokeShot '38-custom-update'
             $ui.TxtOtherVersion.Text = ''
             Test-Smoke 'update: without a version there is nothing to publish' (-not $ui.BtnCustomDeploy.IsEnabled) ''
@@ -1483,9 +1535,16 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 if ($custom.Count) {
                     $ui.LstTenant.SelectedItem = $custom[0]
                     Test-Smoke 'panel of a custom app: counts and assignment switch like other apps, policy / sandbox / remove replaced by the link to the Custom page' ($ui.BoxTenantCustom.Visibility -eq 'Visible' -and $ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.BoxTenantSummary.Visibility -eq 'Visible' -and $ui.GbTenantPolicy.Visibility -eq 'Collapsed' -and $ui.BtnTenantTest.Visibility -eq 'Collapsed' -and $ui.BtnTenantRemove.Visibility -eq 'Collapsed')
+                    $s.CustomId = $custom[0].Data.Id
                     & $script:ClickActions[$ui.BtnTenantCustomPage]
-                    Test-Smoke 'the link opens the Custom page with that app selected' ($script:CurrentPage -eq 'Custom' -and $ui.LstCustom.SelectedItem -and $ui.LstCustom.SelectedItem.Data.Id -eq $custom[0].Data.Id)
+                    $s.Phase = 2; return $false
                 }
+                Show-Page 'Tenant'
+                $true
+            }
+            2 {
+                if (-not (Test-Idle 'customlist')) { return $false }
+                Test-Smoke 'the link opens the Custom page with that app selected' ($script:CurrentPage -eq 'Custom' -and $ui.LstCustom.SelectedItem -and $ui.LstCustom.SelectedItem.Data.Id -eq $s.CustomId) "$($script:CurrentPage) $($ui.LstCustom.SelectedItem.Data.Id) vs $($s.CustomId)"
                 Show-Page 'Tenant'
                 $true
             }

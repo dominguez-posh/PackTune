@@ -72,6 +72,16 @@ function New-PackTuneSigningCertificate { param([string]$Subject, [string]$Outpu
     [pscustomobject]@{ Thumbprint = $thumb; Subject = $Subject; CerPath = $cer; NotAfter = (Get-Date).AddYears(5) }
 }
 function Remove-PackTuneSigningCertificate { param([string]$Thumbprint) [void]$script:Events.Add('remove'); [void]$script:CertsRemoved.Add($Thumbprint); $true }
+
+# The sandbox lab is faked: the verdict is set per check, every call is kept (scripts, previous version)
+$script:LabVerdict = 'Passed'; $script:LabCalls = New-Object System.Collections.ArrayList
+function Start-PackTuneWin32Lab {
+    param([string]$DisplayName, [string]$Version, [hashtable]$Scripts, [string]$SourcePath, [hashtable]$PreviousScripts, [string]$PreviousSourcePath, [string]$PreviousVersion, [switch]$AutoRun)
+    [void]$script:LabCalls.Add(@{ Name = $DisplayName; Previous = [bool]$PreviousScripts; AutoRun = [bool]$AutoRun })
+    $steps = @(@{ Name = 'Detect before'; Status = 'Passed' }, @{ Name = 'Install'; Status = $(if ($script:LabVerdict -eq 'Passed') { 'Passed' } else { 'Failed' }) })
+    [pscustomobject]@{ State = $(if ($script:LabVerdict -eq 'Passed') { 'Succeeded' } else { 'Failed' }); Verdict = $script:LabVerdict; Message = $(if ($script:LabVerdict -eq 'Passed') { 'All 5 steps passed' } else { 'Failed at step 2 of 5: Install exited with 1603' }); Result = $steps; JobPath = 'x' }
+}
+
 function Invoke-PackTuneMsixCapture {
     param([string]$InstallerFolder, [string]$EntryPoint, [string]$Arguments, [string]$PackageName, [string]$DisplayName, [string]$Version, [string]$PublisherDisplayName, [string]$BasePackage, [string]$CertificateThumbprint, [switch]$SkipSigning, [string]$Publisher, [switch]$AllowNetwork)
     [void]$script:Events.Add('capture')
@@ -140,6 +150,12 @@ foreach ($bad in @(@('..\x', 'setup.exe'), @($folder, 'missing.exe'), @((Join-Pa
     Test-Check "deploy refuses: folder '$(Split-Path $bad[0] -Leaf)' entry '$($bad[1])'" ($threw -and ($script:Captures.Count -eq 0))
 }
 
+# --- the test gate for captured packages: a failed sandbox test of the captured package stops before anything is stored or uploaded
+$script:LabVerdict = 'Failed'; $script:LabCalls.Clear(); $script:Certs.Clear(); $script:Captures.Clear()
+$threw = $false; $msg = ''; try { $null = New-PackTuneCustomOtherApp -Folder $folder -EntryPoint 'setup.exe' -Arguments '/S' -Name 'Contoso Helper Tool' -Publisher 'Contoso' -Version '1.0.0.0' } catch { $threw = $true; $msg = $_.Exception.Message }
+Test-Check 'gate: a failed sandbox test of the captured package refuses the deployment, nothing stored or uploaded' ($threw -and ($msg -like '*failed*Failed at step 2*') -and ($script:LabCalls.Count -eq 1) -and ($script:Fs.Count -eq 0) -and (@(Get-Store).Count -eq 0)) $msg
+$script:LabVerdict = 'Passed'; $script:LabCalls.Clear(); $script:Certs.Clear(); $script:CertsRemoved.Clear(); $script:Captures.Clear(); $script:Signed.Clear(); $script:Events.Clear()
+
 # --- deploy: ONE Win32 app, cert inside, files in the store
 $id1 = New-PackTuneCustomOtherApp -Folder $folder -EntryPoint 'setup.exe' -Arguments '/S' -Name 'Contoso Helper Tool' -Publisher 'Contoso' -Assignment Available -Version '1.0.0.0'
 $apps = @(Get-Store)
@@ -158,7 +174,7 @@ $src = Join-Path $work "PackTune\package\custom-$($notes1.AppId)\source"
 Test-Check 'package: install.ps1, package.msix and the public certificate of this version, no private key anywhere' ((Test-Path (Join-Path $src 'install.ps1')) -and (Test-Path (Join-Path $src 'package.msix')) -and ((Get-Content (Join-Path $src 'signing.cer') -Raw) -like "*$thumb*") -and (@(Get-ChildItem $src -Recurse | Where-Object { $_.Extension -in '.pfx', '.pvk', '.key' }).Count -eq 0))
 Test-Check 'package: the install script carries the thumbprint of this version' ((Get-Content (Join-Path $src 'install.ps1') -Raw) -match "\`$Thumbprint = '$thumb'")
 $keys = @($script:Fs.Keys | Where-Object { $_ -like "$($notes1.AppId)/1.0.0.0/*" } | ForEach-Object { $_.Split('/')[-1] } | Sort-Object)
-Test-Check 'store: package, original installer files (zip), recipe, certificate, documentation and the manifest' (($keys -join ',') -eq 'documentation.zip,installer.zip,manifest.json,package.intunewin,package.msix,recipe.json,signing.cer') ($keys -join ',')
+Test-Check 'store: package, original installer files (zip), recipe, certificate, documentation, the manifest and the passed sandbox test' (($keys -join ',') -eq 'documentation.zip,installer.zip,manifest.json,package.intunewin,package.msix,recipe.json,signing.cer,test.json') ($keys -join ',')
 $recipe = [Text.Encoding]::UTF8.GetString($script:Fs["$($notes1.AppId)/1.0.0.0/recipe.json"]) | ConvertFrom-Json
 Test-Check 'store: the recipe holds entry point, arguments, subject and thumbprint' (($recipe.entryPoint -eq 'setup.exe') -and ($recipe.arguments -eq '/S') -and ($recipe.subject -eq 'CN=PackTune Contoso Helper Tool') -and ($recipe.thumbprint -eq $thumb))
 $sha = [Security.Cryptography.SHA256]::Create(); $mh = -join ($sha.ComputeHash($script:Fs["$($notes1.AppId)/1.0.0.0/manifest.json"]) | ForEach-Object { $_.ToString('x2') })
@@ -173,6 +189,7 @@ $v1Msix = [Text.Encoding]::ASCII.GetBytes("MSIX PackTune.ContosoHelperTool 1.0.0
 $folder2 = Join-Path $work 'helper-setup-2'; New-Item -ItemType Directory -Path $folder2 -Force | Out-Null; 'setup v2' | Set-Content (Join-Path $folder2 'setup.exe'); 'new file' | Set-Content (Join-Path $folder2 'extra.dll')
 $script:Captures.Clear()
 $id2 = Update-PackTuneCustomOtherApp -AppId $id1 -InstallerFolder $folder2
+Test-Check 'gate: the update of a captured package was tested in the lab with the previous version first, and the notes carry the test record' (@($script:LabCalls | Where-Object { $_.Previous }).Count -ge 1 -and ((Get-Store | Where-Object id -eq $id2).notes -like '*;test=passed;date=*;hash=*'))
 $a2 = Get-Store | Where-Object id -eq $id2
 $cap2 = $script:Captures[0]
 $thumb2 = $script:Certs[1].Thumbprint
@@ -183,7 +200,7 @@ Test-Check 'update: a NEW certificate with the SAME subject, the earlier one is 
 Test-Check 'update: a new app that supersedes the old one (update) with the assignment, still no dependency' ((@($a2.supersedence).Count -eq 1) -and ($a2.supersedence[0].targetId -eq $id1) -and ($a2.supersedence[0].supersedenceType -eq 'update') -and ($a2.assignments[0].Intent -eq 'available') -and ($a2.assignments[0].AutoUpdateSupersededApps -eq 'enabled') -and (@($a2.dependencies).Count -eq 0))
 Test-Check 'update: notes of the new version, name and publisher of the old one' (($notes2.Version -eq '1.0.0.1') -and ($notes2.Thumbprint -eq $thumb2) -and ($a2.displayName -eq 'Contoso Helper Tool') -and ($a2.publisher -eq 'Contoso') -and ($notes2.AppId -eq $notes1.AppId))
 $keys2 = @($script:Fs.Keys | Where-Object { $_ -like "$($notes1.AppId)/1.0.0.1/*" } | ForEach-Object { $_.Split('/')[-1] } | Sort-Object)
-Test-Check 'update: both versions are in the store, the new installer files are kept with the new version' ((($keys2 -join ',') -eq 'documentation.zip,installer.zip,manifest.json,package.intunewin,package.msix,recipe.json,signing.cer') -and (@(Get-PackTuneStoreVersions -AppId $notes1.AppId | Where-Object Complete).Count -eq 2))
+Test-Check 'update: both versions are in the store, the new installer files are kept with the new version' ((($keys2 -join ',') -eq 'documentation.zip,installer.zip,manifest.json,package.intunewin,package.msix,recipe.json,signing.cer,test.json') -and (@(Get-PackTuneStoreVersions -AppId $notes1.AppId | Where-Object Complete).Count -eq 2))
 # the stored installer.zip of 1.0.0.1 holds the new files
 $tmpZip = Join-Path $work 'v2-installer.zip'; [IO.File]::WriteAllBytes($tmpZip, $script:Fs["$($notes1.AppId)/1.0.0.1/installer.zip"]); Expand-PackTuneZip -Path $tmpZip -Destination (Join-Path $work 'v2-files')
 Test-Check 'update: installer.zip of the new version holds the files of the new folder' ((Test-Path (Join-Path $work 'v2-files\extra.dll')) -and ((Get-Content (Join-Path $work 'v2-files\setup.exe') -Raw).Trim() -eq 'setup v2'))

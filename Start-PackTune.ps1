@@ -1780,6 +1780,11 @@ function Update-CustomRows {
     $ui.TxtCustomStoreBanner.Text = if ($script:StoreState -and $script:StoreState.Message -and $script:StoreState.State -ne 'Ready') { "Set up the package store first. $($script:StoreState.Message) Custom applications keep every version there, so New application, New version and Export need it. Existing applications are shown and can be removed." } else { 'Set up the package store first. Custom applications keep every version in the package store, so New application, New version and Export need it. Existing applications are shown and can be removed.' }
     $ui.BtnCustomNew.IsEnabled = $ready
     $ui.BtnCustomNew.ToolTip = if ($ready) { $null } else { 'Set up the package store first' }
+    if ($script:CustomPendingSelect) {
+        # coming from In tenant: select that app as soon as the list has it
+        $pending = @($script:CustomRows | Where-Object { $_.Data.Id -eq $script:CustomPendingSelect }) | Select-Object -First 1
+        if ($pending) { $ui.LstCustom.SelectedItem = $pending; $script:CustomPendingSelect = $null }
+    }
     if ($ui.LstCustom.SelectedItem) { $ui.BtnCustomNewVersion.IsEnabled = $ready; $ui.BtnCustomExport.IsEnabled = $ready -and [bool]$ui.LstCustom.SelectedItem.Data.Manifest }
 }
 Add-Click $ui.BtnCustomStoreSetup { Show-StoreDialog }
@@ -1892,6 +1897,7 @@ function Set-CustomAppIcon([string]$Path) {
     }
     finally { $window.Cursor = $null }
     Update-CustomIconPreview
+    try { Update-CustomDeployGate } catch { }
 }
 Add-Click $ui.BtnCustomAppIconPick {
     $dlg = New-Object Microsoft.Win32.OpenFileDialog
@@ -1900,21 +1906,40 @@ Add-Click $ui.BtnCustomAppIconPick {
     if (-not $dlg.ShowDialog($window)) { return }
     Set-CustomAppIcon $dlg.FileName
 }
-Add-Click $ui.BtnCustomAppIconReset { $script:CustomIconFile = $null; Update-CustomIconPreview }
+Add-Click $ui.BtnCustomAppIconReset { $script:CustomIconFile = $null; Update-CustomIconPreview; Update-CustomDeployGate }
 $ui.CmbOtherEntry.Add_LostFocus({ try { Update-CustomIconPreview } catch { } })
 $ui.CmbOtherEntry.Add_SelectionChanged({ try { Update-CustomIconPreview } catch { } })
 
+# ---- test gate of the dialog: Deploy is on only after a passed sandbox test of exactly this package (the backend enforces the same)
+$script:CustomTest = $null          # @{ Key; UpdatePath } of the last passed test
+function Get-CustomTestKey {
+    # What the test is bound to in the dialog: the MSI (SHA256), the arguments, the icon file and the way it was started
+    if (-not $script:CustomInfo) { return $null }
+    $icon = if ($script:CustomIconFile -and (Test-Path -LiteralPath $script:CustomIconFile)) { (Get-FileHash -LiteralPath $script:CustomIconFile -Algorithm SHA256).Hash } else { '' }
+    "$($script:CustomInfo.Sha256)|$($ui.TxtCustomProps.Text.Trim())|$icon"
+}
+function Update-CustomDeployGate {
+    if ($script:CustomKind -ne 'Msi' -or $script:CustomMode -notin 'New', 'Version') { return }
+    if ($script:CustomTest -and $script:CustomTest.Key -ne (Get-CustomTestKey)) { $script:CustomTest = $null }   # any change resets the test
+    $t = $script:CustomTest
+    $ok = [bool]$script:CustomInfo -and $t -and ($t.Key -eq (Get-CustomTestKey)) -and ($script:CustomMode -ne 'Version' -or $t.UpdatePath)
+    $ui.BtnCustomDeploy.IsEnabled = [bool]$ok
+    $ui.BtnCustomDeploy.ToolTip = if ($ok) { $null } elseif ($t -and $t.Key -eq (Get-CustomTestKey) -and $script:CustomMode -eq 'Version') { 'Run the sandbox test first: it must include the update from the previous version' } else { 'Run the sandbox test first' }
+}
+[System.Windows.Controls.ToolTipService]::SetShowOnDisabled($ui.BtnCustomDeploy, $true)
+$ui.TxtCustomProps.Add_TextChanged({ try { Update-CustomDeployGate } catch { } })
 function Set-CustomInfo($Info, [string]$Message) {
     $script:CustomInfo = $Info
+    $script:CustomTest = $null
     $ui.TxtCustomRead.Text = $Message
     $ui.BoxCustomProps.Visibility = ConvertTo-Vis ([bool]$Info)
     if ($Info) {
         $ui.TxtMsiName.Text = $Info.Name; $ui.TxtMsiVersion.Text = $Info.Version; $ui.TxtMsiManufacturer.Text = $Info.Manufacturer
         $ui.TxtMsiProduct.Text = $Info.ProductCode; $ui.TxtMsiUpgrade.Text = $(if ($Info.UpgradeCode) { $Info.UpgradeCode } else { '(none)' }); $ui.TxtMsiSize.Text = "$($Info.SizeMB) MB"
     }
-    $ui.BtnCustomDeploy.IsEnabled = [bool]$Info
     $ui.BtnCustomTest.IsEnabled = [bool]$Info
     Update-CustomIconPreview
+    Update-CustomDeployGate
 }
 function Read-CustomMsi([string]$Path) {
     try {
@@ -2002,8 +2027,8 @@ function Set-CustomKind([string]$Kind) {
     $ui.PanelCustomMsi.Visibility = ConvertTo-Vis ($Kind -eq 'Msi')
     $ui.PanelCustomOther.Visibility = ConvertTo-Vis ($Kind -eq 'Other')
     $ui.TxtCustomOther.Visibility = ConvertTo-Vis ($Kind -eq 'Msi' -and $script:CustomMode -eq 'New' -and -not $ui.RbCustomOther.IsEnabled)
-    if ($Kind -eq 'Other') { $ui.BtnCustomDeploy.IsEnabled = $false; $ui.BtnCustomTest.Visibility = 'Collapsed'; $ui.BtnCustomDeploy.Content = if ($script:CustomMode -eq 'Update') { 'Capture and publish' } else { 'Capture and deploy' }; Update-OtherDeploy }
-    else { $ui.BtnCustomTest.Visibility = 'Visible'; $ui.BtnCustomDeploy.Content = if ($script:CustomMode -eq 'Version') { 'Publish version' } else { 'Deploy' }; $ui.BtnCustomDeploy.IsEnabled = [bool]$script:CustomInfo }
+    if ($Kind -eq 'Other') { $ui.BtnCustomDeploy.IsEnabled = $false; $ui.BtnCustomTest.Visibility = 'Collapsed'; $ui.BtnCustomDeploy.Content = if ($script:CustomMode -eq 'Update') { 'Capture, test and publish' } else { 'Capture, test and deploy' }; $ui.BtnCustomDeploy.ToolTip = 'The captured package is tested in the sandbox before anything is stored or uploaded; a failed test stops the deployment'; Update-OtherDeploy }
+    else { $ui.BtnCustomTest.Visibility = 'Visible'; $ui.BtnCustomDeploy.Content = if ($script:CustomMode -eq 'Version') { 'Publish version' } else { 'Deploy' }; Update-CustomDeployGate }
 }
 $script:CustomKind = 'Msi'
 $ui.CmbOtherAssign.ItemsSource = @('Required (installed on all devices)', 'Available in the Company Portal', 'None (assign in Intune yourself)')
@@ -2027,6 +2052,7 @@ function Show-CustomDialog([string]$Mode, $App) {
     $script:CustomUpdateApp = $App
     $script:CustomInfo = $null
     $script:CustomIconFile = $null
+    $script:CustomTest = $null
     $isNew = $Mode -eq 'New'
     $studio = Get-CustomCaptureState
     $ui.RbCustomOther.IsEnabled = ($studio.State -eq 'Ready')
@@ -2163,10 +2189,17 @@ function Start-CustomTest([string]$PreviousMsi, [string]$PreviousStoreAppId) {
     $props = ConvertFrom-CustomProps $ui.TxtCustomProps.Text
     $name = $script:CustomInfo.Name
     $authArgs = if ($PreviousStoreAppId) { @{ NeedsAuth = $true } } else { @{} }   # the package store needs the sign-in
-    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name$(if ($PreviousMsi -or $PreviousStoreAppId) { " (update from the previous version)" })" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props; Previous = $PreviousMsi; StoreApp = $PreviousStoreAppId } @authArgs `
-        -Work 'param($Msi, $Props, $Previous, $StoreApp) $p = @{ MsiPath = $Msi; Properties = $Props }; if ($Previous) { $p.PreviousMsiPath = $Previous }; if ($StoreApp) { $p.PreviousStoreAppId = $StoreApp }; Test-PackTuneCustomApp @p -AutoRun' -OnDone {
+    $script:CustomTestKey = Get-CustomTestKey   # what this test is for (read again when it is done)
+    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name$(if ($PreviousMsi -or $PreviousStoreAppId) { " (update from the previous version)" })" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props; Previous = $PreviousMsi; StoreApp = $PreviousStoreAppId; Icon = $script:CustomIconFile } @authArgs `
+        -Work 'param($Msi, $Props, $Previous, $StoreApp, $Icon) $p = @{ MsiPath = $Msi; Properties = $Props }; if ($Previous) { $p.PreviousMsiPath = $Previous }; if ($StoreApp) { $p.PreviousStoreAppId = $StoreApp }; if ($Icon) { $p.IconFile = $Icon }; Test-PackTuneCustomApp @p -AutoRun' -OnDone {
         param($Result, $Job)
         $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
+        if ($outcome -and $outcome.Verdict -eq 'Passed') { $script:CustomTest = @{ Key = $script:CustomTestKey; UpdatePath = [bool]$outcome.UpdatePath } }
+        elseif ($script:CustomTest -and $script:CustomTest.Key -eq $script:CustomTestKey) { $script:CustomTest = $null }
+        try {
+            $ui.TxtCustomDlgStatus.Text = if ($outcome -and $outcome.Verdict -eq 'Passed') { "Sandbox test passed$(if ($outcome.UpdatePath) { ' (including the update from the previous version)' }): Deploy is available." } elseif ($outcome) { "Sandbox test failed: $($outcome.Message)" } else { 'The sandbox test could not run: Deploy stays off.' }
+            Update-CustomDeployGate
+        } catch { }
         if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Display)] the sandbox test could not run, see above." 'Error'; Show-Toast "Sandbox test of $($Job.Display) could not run: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" 'bad' 'Details' { Show-Page 'Activity' } }
         elseif ($outcome.Verdict -eq 'Passed') { Write-UiLog "[$($Job.Display)] sandbox test passed." 'Success'; Show-Toast "$($Job.Display) passed." 'ok' }
         else { Write-UiLog "[$($Job.Display)] sandbox test failed: $($outcome.Message)" 'Warning'; Show-Toast "Sandbox test failed: $($outcome.Message)" 'warn' }
@@ -2174,7 +2207,10 @@ function Start-CustomTest([string]$PreviousMsi, [string]$PreviousStoreAppId) {
     })
     Show-SandboxStarted
 }
-Add-Click $ui.BtnCustomTest { Start-CustomTest }
+Add-Click $ui.BtnCustomTest {
+    # A new version is tested as an update from the previous version (taken from the package store): that is the test that unlocks Publish
+    if ($script:CustomMode -eq 'Version' -and $script:CustomUpdateApp -and $script:CustomUpdateApp.AppId -and (Test-SignedIn)) { Start-CustomTest '' ([string]$script:CustomUpdateApp.AppId) } else { Start-CustomTest }
+}
 Add-Click $ui.BtnCustomOpen {
     $app = Get-SelectedCustomApp
     if ($app) { Start-Process "https://intune.microsoft.com/#view/Microsoft_Intune_Apps/SettingsMenu/~/0/appId/$($app.Id)" }
@@ -3287,8 +3323,7 @@ Add-Click $ui.BtnTenantCustomPage {
     if (-not $app -or -not $app.IsCustom) { return }
     $script:CustomPendingSelect = [string]$app.Id
     Show-Page 'Custom'
-    $row = @($script:CustomRows | Where-Object { $_.Data.Id -eq $app.Id }) | Select-Object -First 1
-    if ($row) { $ui.LstCustom.SelectedItem = $row }
+    Update-CustomRows
 }
 Add-Click $ui.BtnSumStatus { $app = Get-SelectedTenantApp; if ($app) { Show-Page 'Status' } }
 

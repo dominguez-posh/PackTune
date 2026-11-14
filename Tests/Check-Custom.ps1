@@ -27,6 +27,16 @@ function Get-Store { @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.jso
 $settings = Get-PackTuneSettings; $settings.StoreSiteUrl = 'https://contoso.sharepoint.com/sites/PackTune'; Save-PackTuneSettings -Settings $settings | Out-Null; $script:Settings = Get-PackTuneSettings
 $null = Initialize-PackTuneStore
 
+
+# The sandbox lab is faked: the verdict is set per check, every call is kept (scripts, previous version)
+$script:LabVerdict = 'Passed'; $script:LabCalls = New-Object System.Collections.ArrayList
+function Start-PackTuneWin32Lab {
+    param([string]$DisplayName, [string]$Version, [hashtable]$Scripts, [string]$SourcePath, [hashtable]$PreviousScripts, [string]$PreviousSourcePath, [string]$PreviousVersion, [switch]$AutoRun)
+    [void]$script:LabCalls.Add(@{ Name = $DisplayName; Previous = [bool]$PreviousScripts; AutoRun = [bool]$AutoRun })
+    $steps = @(@{ Name = 'Detect before'; Status = 'Passed' }, @{ Name = 'Install'; Status = $(if ($script:LabVerdict -eq 'Passed') { 'Passed' } else { 'Failed' }) })
+    [pscustomobject]@{ State = $(if ($script:LabVerdict -eq 'Passed') { 'Succeeded' } else { 'Failed' }); Verdict = $script:LabVerdict; Message = $(if ($script:LabVerdict -eq 'Passed') { 'All 5 steps passed' } else { 'Failed at step 2 of 5: Install exited with 1603' }); Result = $steps; JobPath = 'x' }
+}
+
 function New-TestMsi {
     # A Property table is all PackTune reads; the file is not installable
     param([string]$Path, [hashtable]$Properties)
@@ -115,7 +125,27 @@ Test-Check 'notes: a custom app is no catalog app (source unknown)' ($null -eq (
 Test-Check 'notes stay short' ($notes.Length -lt 300) $notes.Length
 
 # --- deploy
+# --- the test gate: no deployment without a passed sandbox test of exactly this package
+function Get-StoreSafe { $f = Join-Path $env:LOCALAPPDATA 'fake-intune.json'; if (Test-Path $f) { @(Get-Content $f -Raw | ConvertFrom-Json | ForEach-Object { $_ }) } else { @() } }
+$gateMsg = ''; try { $null = New-PackTuneCustomMsiApp -MsiPath $msi1 -Assignment Available -Properties @{ ALLUSERS = '1' } } catch { $gateMsg = $_.Exception.Message }
+Test-Check 'gate: deploy without a test is refused by the backend, nothing stored or uploaded' (($gateMsg -like '*Run the sandbox test first*') -and (@(Get-StoreSafe).Count -eq 0) -and (@($script:Fs.Keys | Where-Object { $_ -like "$appId/*" }).Count -eq 0)) $gateMsg
+$script:LabVerdict = 'Failed'
+$t = Test-PackTuneCustomApp -MsiPath $msi1 -Properties @{ ALLUSERS = '1' } -AutoRun
+$gateMsg = ''; try { $null = New-PackTuneCustomMsiApp -MsiPath $msi1 -Assignment Available -Properties @{ ALLUSERS = '1' } } catch { $gateMsg = $_.Exception.Message }
+Test-Check 'gate: a failed test keeps the deployment refused and names the failing step' (($t.Verdict -eq 'Failed') -and ($gateMsg -like '*failed*Failed at step 2*') -and (@(Get-StoreSafe).Count -eq 0)) $gateMsg
+$script:LabVerdict = 'Passed'
+$null = Test-PackTuneCustomApp -MsiPath $msi1 -Properties @{ ALLUSERS = '2' } -AutoRun
+$gateMsg = ''; try { $null = New-PackTuneCustomMsiApp -MsiPath $msi1 -Assignment Available -Properties @{ ALLUSERS = '1' } } catch { $gateMsg = $_.Exception.Message }
+Test-Check 'gate: a passed test of other arguments does not count (reset by any change)' (($gateMsg -like '*Nothing was deployed*') -and (@(Get-StoreSafe).Count -eq 0)) $gateMsg
+$iconFile = Join-Path $work 'icon.png'; [IO.File]::WriteAllBytes($iconFile, [byte[]](137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3))
+$tPass = Test-PackTuneCustomApp -MsiPath $msi1 -Properties @{ ALLUSERS = '1' } -AutoRun
+$gateMsg = ''; try { $null = New-PackTuneCustomMsiApp -MsiPath $msi1 -Assignment Available -Properties @{ ALLUSERS = '1' } -IconFile $iconFile } catch { $gateMsg = $_.Exception.Message }
+Test-Check 'gate: another icon is another package, the passed test does not count' (($tPass.Verdict -eq 'Passed') -and ($gateMsg -like '*Run the sandbox test first*')) $gateMsg
 $id1 = New-PackTuneCustomMsiApp -MsiPath $msi1 -Assignment Available -Properties @{ ALLUSERS = '1' }
+$noteParsed = ConvertFrom-PackTuneCustomNotes ((Get-Store | Where-Object id -eq $id1).notes)
+$testJson = $script:Fs["$appId/1.0.0/test.json"]
+$testRec = if ($testJson) { [Text.Encoding]::UTF8.GetString($testJson) | ConvertFrom-Json } else { $null }
+Test-Check 'gate: the passed test is recorded in the store manifest (verdict, date, package hash, steps) and as a short record in the notes' (($testRec.verdict -eq 'Passed') -and ($testRec.packageHash -eq $tPass.Fingerprint) -and $testRec.date -and (@($testRec.steps).Count -ge 1) -and ($noteParsed.TestHash -eq $tPass.Fingerprint.Substring(0, 12)) -and ($noteParsed.TestDate -match '^\d{8}$') -and ((Get-Store | Where-Object id -eq $id1).notes -like '*;test=passed;date=*;hash=*')) ((Get-Store | Where-Object id -eq $id1).notes)
 $a1 = Get-Store | Where-Object id -eq $id1
 Test-Check 'deploy: a Win32 app with the MSI name, version, publisher, notes and assignment' (($a1.displayName -eq 'Contoso Tool') -and ($a1.displayVersion -eq '1.0.0') -and ($a1.publisher -eq 'Contoso Ltd') -and ($a1.notes -like "$notes;manifest=*") -and ($a1.assignment -eq 'available'))
 $detText = [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String($a1.detection))
@@ -135,6 +165,13 @@ $threw = $false; try { $null = Publish-PackTuneCustomVersion -AppId $id1 -MsiPat
 Test-Check 'new version: an MSI of another product is refused' $threw
 $threw = $false; try { $null = Publish-PackTuneCustomVersion -AppId $id1 -MsiPath $msi1 } catch { $threw = $true }
 Test-Check 'new version: the same MSI again is refused' $threw
+$gateMsg = ''; try { $null = Publish-PackTuneCustomVersion -AppId $id1 -MsiPath $msi2 } catch { $gateMsg = $_.Exception.Message }
+Test-Check 'gate: a new version without a test is refused' ($gateMsg -like '*Run the sandbox test first*') $gateMsg
+$null = Test-PackTuneCustomApp -MsiPath $msi2 -AutoRun
+$gateMsg = ''; try { $null = Publish-PackTuneCustomVersion -AppId $id1 -MsiPath $msi2 } catch { $gateMsg = $_.Exception.Message }
+Test-Check 'gate: a new version needs the update path from the previous version in the test, an install-only test is not enough' ($gateMsg -like '*update from the previous version*') $gateMsg
+$tUpd = Test-PackTuneCustomApp -MsiPath $msi2 -PreviousMsiPath $msi1 -PreviousProperties @{ ALLUSERS = '1' } -AutoRun
+Test-Check 'gate: the update test plays the previous version first' ($tUpd.UpdatePath -and $script:LabCalls[$script:LabCalls.Count - 1].Previous)
 $id2 = Publish-PackTuneCustomVersion -AppId $id1 -MsiPath $msi2
 $a2 = Get-Store | Where-Object id -eq $id2
 $o1 = Get-Store | Where-Object id -eq $id1

@@ -368,7 +368,7 @@ function Save-PackTuneCustomVersionToStore {
     #>
     param(
         [Parameter(Mandatory = $true)][string]$AppId, [Parameter(Mandatory = $true)][string]$Version, [Parameter(Mandatory = $true)][string]$Kind, [Parameter(Mandatory = $true)][string]$InstallerFolder,
-        [Parameter(Mandatory = $true)]$Recipe, [string]$IntuneWin, [string]$Msix, [string]$Cer, $Documentation, $Store = (Resolve-PackTuneStore)
+        [Parameter(Mandatory = $true)]$Recipe, [string]$IntuneWin, [string]$Msix, [string]$Cer, $Documentation, $TestRecord, $Store = (Resolve-PackTuneStore)
     )
     $Temp = Join-Path ([IO.Path]::GetTempPath()) ("packtune-store-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
     New-Item -ItemType Directory -Path $Temp -Force | Out-Null
@@ -378,6 +378,12 @@ function Save-PackTuneCustomVersionToStore {
         $RecipeFile = Join-Path $Temp "recipe.json"
         [IO.File]::WriteAllText($RecipeFile, ($Recipe | ConvertTo-Json -Depth 5), (New-Object Text.UTF8Encoding $false))
         $Files["recipe.json"] = $RecipeFile
+        if ($TestRecord) {
+            # The passed sandbox test of exactly this package (verdict, date, package hash, steps)
+            $TestFile = Join-Path $Temp "test.json"
+            [IO.File]::WriteAllText($TestFile, ($TestRecord | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding $false))
+            $Files["test.json"] = $TestFile
+        }
         if ($IntuneWin -and (Test-Path -LiteralPath $IntuneWin)) { $Files["package.intunewin"] = $IntuneWin }
         if ($Msix -and (Test-Path -LiteralPath $Msix)) { $Files["package.msix"] = $Msix }
         if ($Cer -and (Test-Path -LiteralPath $Cer)) { $Files["signing.cer"] = $Cer }
@@ -389,6 +395,35 @@ function Save-PackTuneCustomVersionToStore {
         return (Publish-PackTuneStoreVersion -AppId $AppId -Version $Version -Files $Files -Store $Store -Kind $Kind)
     }
     finally { Remove-Item -LiteralPath $Temp -Recurse -Force -ErrorAction SilentlyContinue }
+}
+
+function Test-PackTuneBuiltPackage {
+    <#
+        The sandbox test of a built MSIX package (the capture result is only known after the capture, so for "Other" the test runs
+        on the package that was just built): the test lab plays detect, install, detect, uninstall, detect (with -Previous first the
+        previous version and then the update) with the exact package files. The outcome is recorded for this package's fingerprint;
+        New-/Update-PackTuneCustomOtherApp deploy only on a passed record. -Previous: @{ SourcePath; DetectionFile; Version }.
+    #>
+    param([Parameter(Mandatory = $true)]$Package, [Parameter(Mandatory = $true)][string]$DisplayName, [string]$Version, [string]$IconBase64, [string]$Arguments = "", $Previous)
+    $Fingerprint = Get-PackTunePackageFingerprint -SourcePath $Package.SourcePath -DetectionFile $Package.DetectionFile -IconBase64 $IconBase64 -Arguments $Arguments
+    $LabInstall = "& `"`$PSScriptRoot\choco-app.ps1`"`r`nexit `$LASTEXITCODE"
+    $LabUninstall = "& `"`$PSScriptRoot\choco-app.ps1`" -Uninstall`r`nexit `$LASTEXITCODE"
+    $LabFiles = Join-Path $Package.WorkPath "lab"
+    New-Item -ItemType Directory -Path $LabFiles -Force | Out-Null
+    Copy-LabPackageFiles -SourcePath $Package.SourcePath -Destination $LabFiles
+    $LabParams = @{ Scripts = @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = (Get-Content -LiteralPath $Package.DetectionFile -Raw) } }
+    if ($Previous) {
+        $PreviousFiles = Join-Path $Package.WorkPath "lab-previous"
+        New-Item -ItemType Directory -Path $PreviousFiles -Force | Out-Null
+        Copy-LabPackageFiles -SourcePath $Previous.SourcePath -Destination $PreviousFiles
+        $LabParams.PreviousScripts = @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = (Get-Content -LiteralPath $Previous.DetectionFile -Raw) }
+        $LabParams.PreviousSourcePath = $PreviousFiles
+        $LabParams.PreviousVersion = [string]$Previous.Version
+    }
+    Write-Host "Testing the captured package in the sandbox lab: detect, install$(if ($Previous) { " (previous version first, then the update)" }), detect, uninstall, detect"
+    $Result = Start-PackTuneWin32Lab -DisplayName "$DisplayName (custom MSIX)" -Version $Version -SourcePath $LabFiles -AutoRun @LabParams
+    Write-Host "Test result: $($Result.Verdict). $($Result.Message)"
+    return (Save-PackTuneTestResult -Fingerprint $Fingerprint -Verdict $Result.Verdict -Message $Result.Message -Steps $Result.Result -UpdatePath ([bool]$Previous) -Name $DisplayName -Version $Version)
 }
 
 function New-PackTuneCustomOtherApp {
@@ -418,14 +453,17 @@ function New-PackTuneCustomOtherApp {
     $Build = Invoke-PackTuneCustomMsixBuild -Folder $Folder -EntryPoint $EntryPoint -Arguments $Arguments -Name $Name -Version $Version -PublisherDisplayName $Publisher -AllowNetwork:$AllowNetwork
     Write-Host "Building the Win32 package"
     $Package = New-PackTuneCustomMsixPackage -Build $Build -AppId $AppId
-    Write-Host "Keeping this version in the package store"
-    $Recipe = [ordered]@{ format = "PackTune.Recipe"; kind = "msix"; app = $AppId; name = $Name; version = $Build.Version; publisher = $Publisher; entryPoint = $EntryPoint; arguments = $Arguments; subject = $Build.Subject; identity = $Build.PackageName; thumbprint = $Build.Thumbprint }
-    $Manifest = Save-PackTuneCustomVersionToStore -AppId $AppId -Version $Build.Version -Kind "msix" -InstallerFolder $Folder -Recipe $Recipe -IntuneWin $Package.Package.Path -Msix $Build.Msix -Cer $Build.Cer -Documentation $Build.Documentation -Store $State.Store
-    Write-Host "Creating and uploading $Name as win32 App to Intune"
     # Icon: the one chosen, else the logo of the captured package, else the fallback (icon of the entry point)
     if (-not $IconBase64) { $IconBase64 = Get-PackTuneMsixLogoBase64 -MsixPath $Build.Msix }
     if (-not $IconBase64) { $IconBase64 = $FallbackIconBase64 }
-    $App = Add-PackTuneCustomMsixIntuneApp -Build $Build -AppId $AppId -Package $Package -DisplayName $Name -Description $Description -Publisher $Publisher -IconBase64 $IconBase64 -Manifest $Manifest
+    # The gate: the captured package must pass the sandbox test before anything is stored or uploaded
+    $null = Test-PackTuneBuiltPackage -Package $Package -DisplayName $Name -Version $Build.Version -IconBase64 $IconBase64 -Arguments $Arguments
+    $Test = Assert-PackTuneTestPassed -Fingerprint (Get-PackTunePackageFingerprint -SourcePath $Package.SourcePath -DetectionFile $Package.DetectionFile -IconBase64 $IconBase64 -Arguments $Arguments)
+    Write-Host "Keeping this version in the package store"
+    $Recipe = [ordered]@{ format = "PackTune.Recipe"; kind = "msix"; app = $AppId; name = $Name; version = $Build.Version; publisher = $Publisher; entryPoint = $EntryPoint; arguments = $Arguments; subject = $Build.Subject; identity = $Build.PackageName; thumbprint = $Build.Thumbprint }
+    $Manifest = Save-PackTuneCustomVersionToStore -AppId $AppId -Version $Build.Version -Kind "msix" -InstallerFolder $Folder -Recipe $Recipe -IntuneWin $Package.Package.Path -Msix $Build.Msix -Cer $Build.Cer -Documentation $Build.Documentation -TestRecord $Test -Store $State.Store
+    Write-Host "Creating and uploading $Name as win32 App to Intune"
+    $App = Add-PackTuneCustomMsixIntuneApp -Build $Build -AppId $AppId -Package $Package -DisplayName $Name -Description $Description -Publisher $Publisher -IconBase64 $IconBase64 -Manifest $Manifest -ExtraNotes (ConvertTo-PackTuneTestNote $Test)
     Set-PackTuneAssignment -Id $App.id -Assignment $Assignment
     Write-Host "Deployment of $Name was successful"
     return $App.id
@@ -472,14 +510,25 @@ function Update-PackTuneCustomOtherApp {
         $Build = Invoke-PackTuneCustomMsixBuild -Folder $Folder -EntryPoint $Entry -Arguments $Args -Name ([string]$Old.displayName) -Version $NewVersion -PublisherDisplayName ([string]$Old.publisher) -BasePackage $Msix -AllowNetwork:$AllowNetwork
         Write-Host "Building the Win32 package"
         $Package = New-PackTuneCustomMsixPackage -Build $Build -AppId $OldNotes.AppId
+        $Icon = if ($IconBase64) { $IconBase64 } elseif ($Old.largeIcon -and $Old.largeIcon.value) { [string]$Old.largeIcon.value } else { Get-PackTuneMsixLogoBase64 -MsixPath $Build.Msix }
+        # The gate: the update (previous version first, then the new one) must pass the sandbox test before anything is stored or uploaded
+        $PrevSource = Join-Path $Temp "previous-package"
+        New-Item -ItemType Directory -Path $PrevSource -Force | Out-Null
+        $PrevScripts = Get-PackTuneCustomMsixScripts -AppId $OldNotes.AppId -PackageName $OldNotes.Identity -Version $OldNotes.Version -Thumbprint $OldNotes.Thumbprint
+        Set-Content -Path (Join-Path $PrevSource "install.ps1") -Value $PrevScripts.Install -Encoding ASCII
+        Copy-Item -LiteralPath $Msix -Destination (Join-Path $PrevSource "package.msix") -Force
+        if (Test-Path -LiteralPath (Join-Path $Prev.Destination "signing.cer")) { Copy-Item -LiteralPath (Join-Path $Prev.Destination "signing.cer") -Destination (Join-Path $PrevSource "signing.cer") -Force }
+        $PrevDetection = Join-Path $Temp "previous-detection.ps1"
+        Set-Content -Path $PrevDetection -Value $PrevScripts.Detection -Encoding ASCII
+        $null = Test-PackTuneBuiltPackage -Package $Package -DisplayName ([string]$Old.displayName) -Version $Build.Version -IconBase64 $Icon -Arguments $Args -Previous @{ SourcePath = $PrevSource; DetectionFile = $PrevDetection; Version = $OldNotes.Version }
+        $Test = Assert-PackTuneTestPassed -Fingerprint (Get-PackTunePackageFingerprint -SourcePath $Package.SourcePath -DetectionFile $Package.DetectionFile -IconBase64 $Icon -Arguments $Args) -RequireUpdatePath
         Write-Host "Keeping the new version in the package store"
         $NewRecipe = [ordered]@{ format = "PackTune.Recipe"; kind = "msix"; app = $OldNotes.AppId; name = [string]$Old.displayName; version = $Build.Version; publisher = [string]$Old.publisher; entryPoint = $Entry; arguments = $Args; subject = $Build.Subject; identity = $Build.PackageName; thumbprint = $Build.Thumbprint }
-        $Manifest = Save-PackTuneCustomVersionToStore -AppId $OldNotes.AppId -Version $Build.Version -Kind "msix" -InstallerFolder $Folder -Recipe $NewRecipe -IntuneWin $Package.Package.Path -Msix $Build.Msix -Cer $Build.Cer -Documentation $Build.Documentation -Store $State.Store
-        $Icon = if ($IconBase64) { $IconBase64 } elseif ($Old.largeIcon -and $Old.largeIcon.value) { [string]$Old.largeIcon.value } else { Get-PackTuneMsixLogoBase64 -MsixPath $Build.Msix }
+        $Manifest = Save-PackTuneCustomVersionToStore -AppId $OldNotes.AppId -Version $Build.Version -Kind "msix" -InstallerFolder $Folder -Recipe $NewRecipe -IntuneWin $Package.Package.Path -Msix $Build.Msix -Cer $Build.Cer -Documentation $Build.Documentation -TestRecord $Test -Store $State.Store
         $Architecture = ConvertTo-PackTuneArchitecture $Old
         if (-not $Architecture) { $Architecture = $script:Settings.Architecture }
         Write-Host "Creating and uploading the new app"
-        $New = Add-PackTuneCustomMsixIntuneApp -Build $Build -AppId $OldNotes.AppId -Package $Package -DisplayName ([string]$Old.displayName) -Description ([string]$Old.description) -Publisher ([string]$Old.publisher) -IconBase64 $Icon -Manifest $Manifest -Architecture $Architecture
+        $New = Add-PackTuneCustomMsixIntuneApp -Build $Build -AppId $OldNotes.AppId -Package $Package -DisplayName ([string]$Old.displayName) -Description ([string]$Old.description) -Publisher ([string]$Old.publisher) -IconBase64 $Icon -Manifest $Manifest -Architecture $Architecture -ExtraNotes (ConvertTo-PackTuneTestNote $Test)
         Complete-PackTuneSupersedingApp -Old $Old -New $New
         return $New.id
     }
