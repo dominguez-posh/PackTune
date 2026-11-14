@@ -1060,6 +1060,127 @@ function Get-ChocoPackageBySearch {
 
 }
 
+function Get-PackTuneIcoFrame {
+    <#
+        The largest frame of an ICO file, read from its directory (System.Drawing cannot read Vista icons with PNG frames): Data (the
+        frame as stored: a PNG file or a DIB), IsPng, Width, Height. $null when the bytes are no ICO.
+    #>
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    if ($Bytes.Length -lt 22 -or $Bytes[0] -ne 0 -or $Bytes[1] -ne 0 -or $Bytes[2] -ne 1 -or $Bytes[3] -ne 0) { return $null }
+    $Count = [BitConverter]::ToUInt16($Bytes, 4)
+    $Best = $null
+    for ($i = 0; $i -lt $Count; $i++) {
+        $o = 6 + 16 * $i
+        if ($o + 16 -gt $Bytes.Length) { break }
+        $w = [int]$Bytes[$o]; if ($w -eq 0) { $w = 256 }
+        $h = [int]$Bytes[$o + 1]; if ($h -eq 0) { $h = 256 }
+        $bits = [int][BitConverter]::ToUInt16($Bytes, $o + 6)
+        $size = [int64][BitConverter]::ToUInt32($Bytes, $o + 8)
+        $offset = [int64][BitConverter]::ToUInt32($Bytes, $o + 12)
+        if ($size -le 0 -or $offset + $size -gt $Bytes.Length) { continue }
+        $score = [int64]$w * $h * 100 + $bits
+        if (-not $Best -or $score -gt $Best.Score) { $Best = @{ Score = $score; Width = $w; Height = $h; Offset = [int]$offset; Size = [int]$size } }
+    }
+    if (-not $Best) { return $null }
+    $Data = New-Object byte[] $Best.Size
+    [Array]::Copy($Bytes, $Best.Offset, $Data, 0, $Best.Size)
+    $IsPng = $Data.Length -gt 8 -and $Data[0] -eq 0x89 -and $Data[1] -eq 0x50 -and $Data[2] -eq 0x4E -and $Data[3] -eq 0x47
+    [pscustomobject]@{ Data = $Data; IsPng = $IsPng; Width = $Best.Width; Height = $Best.Height }
+}
+
+function ConvertFrom-PackTuneIco {
+    # PNG bytes of the largest frame of an ICO: a PNG frame as it is, a classic (DIB) frame decoded by WPF and encoded as PNG
+    param([Parameter(Mandatory = $true)][byte[]]$Bytes)
+    $Frame = Get-PackTuneIcoFrame -Bytes $Bytes
+    if (-not $Frame) { return $null }
+    if ($Frame.IsPng) { return ,$Frame.Data }
+    Add-Type -AssemblyName PresentationCore, WindowsBase
+    $Stream = New-Object IO.MemoryStream(, $Bytes)
+    $Out = New-Object IO.MemoryStream
+    try {
+        $Decoder = [System.Windows.Media.Imaging.BitmapDecoder]::Create($Stream, [System.Windows.Media.Imaging.BitmapCreateOptions]::PreservePixelFormat, [System.Windows.Media.Imaging.BitmapCacheOption]::OnLoad)
+        $Best = @($Decoder.Frames | Sort-Object { $_.PixelWidth * $_.PixelHeight } -Descending) | Select-Object -First 1
+        if (-not $Best) { throw "The icon has no frame that can be read" }
+        $Encoder = New-Object System.Windows.Media.Imaging.PngBitmapEncoder
+        $Encoder.Frames.Add([System.Windows.Media.Imaging.BitmapFrame]::Create($Best))
+        $Encoder.Save($Out)
+        return ,$Out.ToArray()
+    }
+    finally { $Stream.Dispose(); $Out.Dispose() }
+}
+
+function Get-PackTunePeIcon {
+    <# The first icon group of an .exe or .dll (an MSI Icon table may hold an EXE) as an ICO file in memory, or $null; the file is only read as data, never run. #>
+    param([Parameter(Mandatory = $true)][string]$Path)
+    if (-not ('PackTune.PeIcon' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Runtime.InteropServices;
+namespace PackTune {
+    public static class PeIcon {
+        delegate bool EnumProc(IntPtr module, IntPtr type, IntPtr name, IntPtr param);
+        [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)] static extern IntPtr LoadLibraryEx(string file, IntPtr h, uint flags);
+        [DllImport("kernel32", SetLastError = true)] static extern bool FreeLibrary(IntPtr module);
+        [DllImport("kernel32", CharSet = CharSet.Unicode, SetLastError = true)] static extern bool EnumResourceNames(IntPtr module, IntPtr type, EnumProc proc, IntPtr param);
+        [DllImport("kernel32", SetLastError = true)] static extern IntPtr FindResource(IntPtr module, IntPtr name, IntPtr type);
+        [DllImport("kernel32", SetLastError = true)] static extern IntPtr LoadResource(IntPtr module, IntPtr res);
+        [DllImport("kernel32", SetLastError = true)] static extern IntPtr LockResource(IntPtr res);
+        [DllImport("kernel32", SetLastError = true)] static extern uint SizeofResource(IntPtr module, IntPtr res);
+        static byte[] Read(IntPtr module, IntPtr name, IntPtr type) {
+            IntPtr r = FindResource(module, name, type);
+            if (r == IntPtr.Zero) return null;
+            uint size = SizeofResource(module, r);
+            IntPtr p = LockResource(LoadResource(module, r));
+            if (p == IntPtr.Zero || size == 0 || size > 8 * 1024 * 1024) return null;
+            byte[] data = new byte[size];
+            Marshal.Copy(p, data, 0, (int)size);
+            return data;
+        }
+        public static byte[] ExtractIco(string path) {
+            IntPtr module = LoadLibraryEx(path, IntPtr.Zero, 0x22);
+            if (module == IntPtr.Zero) return null;
+            try {
+                List<IntPtr> groups = new List<IntPtr>();
+                EnumResourceNames(module, (IntPtr)14, delegate(IntPtr m, IntPtr t, IntPtr n, IntPtr x) { groups.Add(n); return groups.Count < 1; }, IntPtr.Zero);
+                if (groups.Count == 0) return null;
+                byte[] dir = Read(module, groups[0], (IntPtr)14);
+                if (dir == null || dir.Length < 6) return null;
+                int count = BitConverter.ToUInt16(dir, 4);
+                List<byte[]> images = new List<byte[]>();
+                List<byte[]> heads = new List<byte[]>();
+                for (int i = 0; i < count; i++) {
+                    int o = 6 + 14 * i;
+                    if (o + 14 > dir.Length) break;
+                    byte[] img = Read(module, (IntPtr)BitConverter.ToUInt16(dir, o + 12), (IntPtr)3);
+                    if (img == null) continue;
+                    byte[] head = new byte[16];
+                    Array.Copy(dir, o, head, 0, 12);
+                    BitConverter.GetBytes((uint)img.Length).CopyTo(head, 8);
+                    images.Add(img); heads.Add(head);
+                }
+                if (images.Count == 0) return null;
+                MemoryStream ms = new MemoryStream();
+                ms.Write(new byte[] { 0, 0, 1, 0 }, 0, 4);
+                ms.Write(BitConverter.GetBytes((ushort)images.Count), 0, 2);
+                uint offset = (uint)(6 + 16 * images.Count);
+                for (int i = 0; i < images.Count; i++) {
+                    BitConverter.GetBytes(offset).CopyTo(heads[i], 12);
+                    ms.Write(heads[i], 0, 16);
+                    offset += (uint)images[i].Length;
+                }
+                foreach (byte[] img in images) ms.Write(img, 0, img.Length);
+                return ms.ToArray();
+            }
+            finally { FreeLibrary(module); }
+        }
+    }
+}
+"@
+    }
+    return [PackTune.PeIcon]::ExtractIco((Resolve-Path -LiteralPath $Path).ProviderPath)
+}
 function ConvertTo-PngBytes {
     param(
         [Parameter(Mandatory = $true)][byte[]]$Bytes,
@@ -1123,7 +1244,21 @@ function ConvertTo-PngBytes {
         return ,[IO.File]::ReadAllBytes($Png)
     }
 
-    # ICO, GIF, BMP and the like
+    # ICO (also Vista icons with PNG frames and classic ones: the largest frame is used) and EXE/DLL icons (an MSI icon can be an EXE)
+    $FromIco = ConvertFrom-PackTuneIco -Bytes $Bytes
+    if ($FromIco) { return ,$FromIco }
+    if ($Bytes.Length -gt 64 -and $Bytes[0] -eq 0x4D -and $Bytes[1] -eq 0x5A) {
+        $Pe = Join-Path $WorkPath ("icon-source-" + [guid]::NewGuid().ToString("N").Substring(0, 8) + ".bin")
+        try {
+            [IO.File]::WriteAllBytes($Pe, $Bytes)
+            $Ico = Get-PackTunePeIcon -Path $Pe
+            if (-not $Ico) { throw "The file has no icon resource" }
+            return ,(ConvertFrom-PackTuneIco -Bytes $Ico)
+        }
+        finally { Remove-Item -LiteralPath $Pe -Force -ErrorAction SilentlyContinue }
+    }
+
+    # GIF, BMP and the like
     Add-Type -AssemblyName System.Drawing
     $InStream = New-Object IO.MemoryStream(, $Bytes)
     $OutStream = New-Object IO.MemoryStream
@@ -2310,16 +2445,88 @@ function New-PackTuneWorkFolder {
     return $WorkPath
 }
 
+function Wait-PackTunePackaging([int]$Seconds) { Start-Sleep -Seconds $Seconds }
+
+function Wait-PackTuneSandboxRelease {
+    <#
+        A Windows Sandbox that has just finished holds its mapped folders until it is gone. PackTune closes the one it started after the
+        verdict; here it only waits (never stops anything, a sandbox of the user or one kept open is not touched) up to a minute. When one is
+        still open the job stops with "Close Windows Sandbox to continue" (Retry runs it again) instead of failing with access denied.
+    #>
+    param([int]$Seconds = 60)
+    if (-not (Get-Command Test-PackTuneSandboxRunning -ErrorAction SilentlyContinue) -or -not (Test-PackTuneSandboxRunning)) { return }
+    Write-Host "Waiting for Windows Sandbox to close ..."
+    $Waited = 0
+    while ($Waited -lt $Seconds -and (Test-PackTuneSandboxRunning)) { Wait-PackTunePackaging 2; $Waited += 2 }
+    if (Test-PackTuneSandboxRunning) { throw "Close Windows Sandbox to continue, then press Retry: it is still open and holds files that are needed for the package." }
+}
+function Reset-PackTuneFolderAccess {
+    # Our own packaging copy: normal inherited rights for the signed-in user, nothing read-only (best effort, never fatal)
+    param([Parameter(Mandatory = $true)][string]$Path)
+    try {
+        & icacls.exe $Path /reset /T /C /Q 2>&1 | Out-Null
+        & icacls.exe $Path /grant "$($env:USERDOMAIN)\$($env:USERNAME):(OI)(CI)F" /T /C /Q 2>&1 | Out-Null
+        foreach ($File in @(Get-ChildItem -LiteralPath $Path -Recurse -File -Force -ErrorAction SilentlyContinue)) { if ($File.IsReadOnly) { $File.IsReadOnly = $false } }
+    }
+    catch { Write-Verbose "Folder rights could not be reset: $($_.Exception.Message)" }
+}
+
 function New-PackTunePackage {
+    <#
+        Creates the .intunewin file and fails loudly instead of continuing without one. IntuneWinAppUtil works on a separate copy of
+        the source in a short folder of its own (not the work folder: a Windows Sandbox that just closed, a virus scanner or odd rights
+        there cannot block it), after the sandbox released its folders. "Access denied" (0x80070005) is retried with a wait; when it stays,
+        the message says what happened in plain words. The package is copied back to <WorkPath> as before.
+    #>
     param(
         [Parameter(Mandatory = $true)][string]$WorkPath
     )
     $SourcePath = Join-Path $WorkPath "source"
-    $Package = Invoke-IntuneModule { New-IntuneWin32AppPackage -SourceFolder $SourcePath -SetupFile "install.ps1" -OutputFolder $WorkPath -Force }
-    if ($null -eq $Package -or -not (Test-Path $Package.Path)) {
-        throw "Packaging with IntuneWinAppUtil.exe failed. Make sure IntuneWin32App $($script:MinimumModuleVersion)+ is loaded; if it still fails, delete $env:TEMP\IntuneWinAppUtil.exe so a fresh copy is downloaded."
+    $PackRoot = Join-Path $script:WorkRoot "pack"
+    New-Item -ItemType Directory -Path $PackRoot -Force | Out-Null
+    # Leftovers of earlier runs (older than a day) go
+    foreach ($Old in @(Get-ChildItem -LiteralPath $PackRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-1) })) { Remove-Item -LiteralPath $Old.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+    $Attempts = 3
+    $Denied = $false
+    $Detail = ""
+    for ($Try = 1; $Try -le $Attempts; $Try++) {
+        Wait-PackTuneSandboxRelease
+        $Pack = Join-Path $PackRoot ([guid]::NewGuid().ToString("N").Substring(0, 8))
+        $PackSource = Join-Path $Pack "source"
+        $PackOut = Join-Path $Pack "out"
+        $Texts = @()
+        $Package = $null
+        try {
+            New-Item -ItemType Directory -Path $PackOut -Force | Out-Null
+            Copy-Item -LiteralPath $SourcePath -Destination $PackSource -Recurse -Force
+            Reset-PackTuneFolderAccess -Path $Pack
+            # Warnings and errors of the module are caught with the result (they carry the Windows return code) and shown again
+            $All = @(Invoke-IntuneModule { New-IntuneWin32AppPackage -SourceFolder $PackSource -SetupFile "install.ps1" -OutputFolder $PackOut -Force -ErrorAction SilentlyContinue *>&1 })
+            foreach ($Item in $All) {
+                if ($Item -is [System.Management.Automation.WarningRecord] -or $Item -is [System.Management.Automation.ErrorRecord]) { $Texts += "$Item"; Write-Warning "$Item" }
+                elseif ($Item -and $Item.PSObject.Properties["Path"]) { $Package = $Item }
+            }
+        }
+        catch { $Texts += $_.Exception.Message }
+        try {
+            if ($Package -and $Package.Path -and (Test-Path -LiteralPath $Package.Path)) {
+                $Target = Join-Path $WorkPath (Split-Path -Leaf $Package.Path)
+                Copy-Item -LiteralPath $Package.Path -Destination $Target -Force
+                $Result = $Package | Select-Object *
+                $Result.Path = $Target
+                return $Result
+            }
+        }
+        finally { Remove-Item -LiteralPath $Pack -Recurse -Force -ErrorAction SilentlyContinue }
+        $Detail = (($Texts | ForEach-Object { "$_" }) -join " ").Trim()
+        $Denied = $Detail -match '-2147024891|0x80070005|E_ACCESSDENIED|access (to the path )?.*denied|zugriff'
+        if (-not $Denied) { break }
+        if ($Try -lt $Attempts) { Write-Warning "Windows denied access while packaging (attempt $Try of $Attempts), waiting and trying again."; Wait-PackTunePackaging (5 * $Try) }
     }
-    return $Package
+    if ($Denied) {
+        throw "Windows denied access to the package folder ($PackRoot): the files are probably still held by Windows Sandbox or locked by a virus scanner. Close Windows Sandbox, wait a minute and try again; if it repeats, exclude '$($script:WorkRoot)' from real-time scanning. (IntuneWinAppUtil: access denied, 0x80070005)"
+    }
+    throw "Packaging with IntuneWinAppUtil.exe failed$(if ($Detail) { ": $Detail" }). Make sure IntuneWin32App $($script:MinimumModuleVersion)+ is loaded; if it still fails, delete $env:TEMP\IntuneWinAppUtil.exe so a fresh copy is downloaded."
 }#Creates the .intunewin file and fails loudly instead of continuing without one
 
 function New-PackTuneChocolateyApp {

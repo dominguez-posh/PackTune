@@ -25,7 +25,13 @@ $script:Options = @{
     TimestampUrl      = 'http://timestamp.digicert.com'
     PollSeconds       = 3
     BootSeconds       = 90
+    # After the verdict the result stays visible in the sandbox for this long, then PackTune closes the sandbox it started itself.
+    # KeepOpen (or PACKTUNE_SANDBOX_KEEPOPEN=1, set by the "Keep the sandbox open" item of the test menu) leaves it open for manual checks.
+    CloseDelaySeconds = 10
+    ReleaseWaitSeconds = 60
+    KeepOpen          = $false
 }
+$script:SandboxOwned = $null                         # what PackTune launched: the sandbox processes that existed before, and when
 # The SDK signing tools: this NuGet package version and its SHA256 only (checked 2026-11-14: all 44 PE files of bin\*\x64
 # carry a valid Microsoft signature). A newer version is a deliberate change here.
 $script:SdkBuildTools = @{ Version = '10.0.28000.2957'; Sha256 = 'B7163FC6F636172726D0985963E4F7F11C41AFE1C7FDFE78F8051877360ED696' }
@@ -184,8 +190,55 @@ function Test-FakeLauncher {
     [bool]($script:Launcher -or $env:PACKTUNE_SANDBOX_LAUNCHER)
 }
 
+function Get-SandboxProcessIds {
+    # Ids of the Windows Sandbox processes that run now (replaceable in tests)
+    @(Get-Process -Name 'WindowsSandbox', 'WindowsSandboxClient', 'WindowsSandboxRemoteSession' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+}
+
+function Stop-SandboxProcessId([int]$Id) { Stop-Process -Id $Id -Force -ErrorAction SilentlyContinue }
+
+function Close-PackTuneOwnedSandbox {
+    <#
+        Closes the sandbox PackTune started for this job: only processes that did not exist when PackTune launched it (a sandbox the user
+        started himself is never touched; PackTune does not launch while one is open). Returns the ids it closed.
+    #>
+    if (-not $script:SandboxOwned) { return @() }
+    $Mine = @(Get-SandboxProcessIds | Where-Object { $_ -notin @($script:SandboxOwned.Before) })
+    foreach ($Id in $Mine) { Stop-SandboxProcessId -Id $Id }
+    $Mine
+}
+
+function Wait-PackTuneSandboxClosed {
+    # Waits (does not close anything) until the sandbox processes PackTune started have exited; $true = gone
+    param([int]$Seconds = $script:Options.ReleaseWaitSeconds)
+    $Until = (Get-Date).AddSeconds($Seconds)
+    while ($true) {
+        $Left = if ($script:SandboxOwned) { @(Get-SandboxProcessIds | Where-Object { $_ -notin @($script:SandboxOwned.Before) }) } else { @() }
+        if (-not $Left.Count) { return $true }
+        if ((Get-Date) -ge $Until) { return $false }
+        Start-Sleep -Seconds ([Math]::Min(2, [Math]::Max(0, $script:Options.PollSeconds)))
+    }
+}
+
+function Complete-SandboxJob {
+    <#
+        After the verdict: the result stays visible for CloseDelaySeconds, then the sandbox PackTune started is closed and its end is awaited,
+        so the mapped folders are free before anything is packaged. With KeepOpen it stays open (the user closes it).
+    #>
+    $Keep = $script:Options.KeepOpen -or $env:PACKTUNE_SANDBOX_KEEPOPEN -eq '1'
+    if (-not $script:SandboxOwned) { return }
+    if ($Keep) { Write-SandboxLog 'The Windows Sandbox stays open as you asked: close it yourself before you deploy.'; return }
+    Write-SandboxLog "Result received: the sandbox closes in $($script:Options.CloseDelaySeconds) seconds."
+    if ($script:Options.CloseDelaySeconds -gt 0) { Start-Sleep -Seconds $script:Options.CloseDelaySeconds }
+    $Closed = @(Close-PackTuneOwnedSandbox)
+    if ($Closed.Count -and -not (Wait-PackTuneSandboxClosed)) { Write-SandboxLog 'The Windows Sandbox is still closing; packaging waits for it.' 'Warning' }
+    else { Write-SandboxLog 'Windows Sandbox closed.' }
+    $script:SandboxOwned = $null
+}
+
 function Start-SandboxProcess {
     param([Parameter(Mandatory = $true)][string]$WsbPath)
+    $script:SandboxOwned = @{ Before = @(Get-SandboxProcessIds); Started = Get-Date }
     if ($script:Launcher) { & $script:Launcher $WsbPath; return }
     if ($env:PACKTUNE_SANDBOX_LAUNCHER) { & $env:PACKTUNE_SANDBOX_LAUNCHER $WsbPath; return }
     if (-not (Test-PackTuneSandboxAvailable)) { throw 'Windows Sandbox is not installed on this computer.' }
@@ -690,6 +743,7 @@ function Invoke-PackTuneMsixCapture {
     $Wsb = New-SandboxConfig -JobPath $Job -Networking ([bool]$AllowNetwork) -InputFolder (Resolve-Path -LiteralPath $InstallerFolder).ProviderPath
     Start-SandboxProcess -WsbPath $Wsb
     $Status = Wait-SandboxJob -JobPath $Job -TimeoutMinutes $TimeoutMinutes
+    Complete-SandboxJob
 
     $Raw = Join-Path $Job "out\$MsixName"
     if ($Status.State -ne 'Succeeded' -or -not (Test-Path -LiteralPath $Raw)) {
@@ -753,6 +807,7 @@ function Start-PackTuneWin32Lab {
     Write-SandboxLog "Step 3 of 4: $(if ($AutoRun) { 'installing as SYSTEM, detecting and uninstalling in the sandbox' } else { 'waiting for your result in the sandbox window (Install, Detect, Uninstall run there as SYSTEM)' })"
     $Status = Wait-SandboxJob -JobPath $Job -TimeoutMinutes $TimeoutMinutes
     Write-SandboxLog 'Step 4 of 4: result received.'
+    Complete-SandboxJob
     $Verdict = if ($Status.State -eq 'Succeeded') { 'Passed' } else { 'Failed' }
     Write-SandboxLog "Test lab result: $Verdict. $($Status.Message)" $(if ($Verdict -eq 'Passed') { 'Success' } else { 'Error' })
     [pscustomobject]@{ State = $Status.State; Verdict = $Verdict; Message = $Status.Message; Result = $Status.Result; JobPath = $Job }
@@ -760,7 +815,7 @@ function Start-PackTuneWin32Lab {
 
 #endregion
 
-Export-ModuleMember -Function Set-PackTuneSandboxLog, Set-PackTuneSandboxOption, Set-PackTuneSandboxLauncher, Get-PackTuneSandboxWorkspace, Test-PackTuneSandboxAvailable, Test-PackTuneSandboxRunning,
+Export-ModuleMember -Function Set-PackTuneSandboxLog, Set-PackTuneSandboxOption, Set-PackTuneSandboxLauncher, Get-PackTuneSandboxWorkspace, Test-PackTuneSandboxAvailable, Test-PackTuneSandboxRunning, Wait-PackTuneSandboxClosed,
     ConvertTo-PackTuneMsixVersion, ConvertTo-PackTuneMsixPackageName, Get-PackTuneNextMsixVersion,
     Get-PackTuneToolchain, Get-PackTuneToolchainState, Update-PackTuneToolchain,
     Get-PackTuneMsixInfo, Get-PackTuneMsixIdentity, New-PackTuneSigningCertificate, Remove-PackTuneSigningCertificate, Invoke-PackTuneSigning,

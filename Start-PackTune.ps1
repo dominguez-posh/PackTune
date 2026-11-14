@@ -177,6 +177,14 @@ function Write-UiLog([string]$Text, [string]$Level = 'Info') {
 Set-PackTuneSignInLog { param($Text, $Level) Write-UiLog $Text $(if ($Level) { $Level } else { 'Info' }) }
 
 $script:Toasts = New-Object System.Collections.ArrayList
+function Get-ToastText([string]$Text) {
+    # What fits in a toast: one line of text, long paths shortened to their last two folders, at most about three lines; the full text stays in the log (Details)
+    $one = ($Text -replace '\s+', ' ').Trim()
+    $one = [regex]::Replace($one, '(?<![A-Za-z0-9])[A-Za-z]:\\[^\s"''<>|]+', { param($m) $parts = $m.Value.TrimEnd('.', ',', ':', ';', ')').Split('\') ; if ($m.Value.Length -le 40 -or $parts.Count -lt 4) { $m.Value } else { '...\' + ($parts[-2..-1] -join '\') } })
+    if ($one.Length -gt 200) { $one = $one.Substring(0, 197).TrimEnd() + '...' }
+    $one
+}
+$script:ToastActions = @{}
 function Show-Toast([string]$Text, [string]$Kind = 'info', [string]$ActionLabel, [scriptblock]$Action) {
     <# Short message in the corner: what a job did, or what went wrong. Success and info vanish after 6 s, problems after 12 s. #>
     $pill = $script:PillColors[$Kind]; if (-not $pill) { $pill = @('#FFFFFF', '#1B1B1B') }
@@ -191,16 +199,17 @@ function Show-Toast([string]$Text, [string]$Kind = 'info', [string]$ActionLabel,
     $icon.Text = [string]$glyph; $icon.FontFamily = $window.FindResource('IconFont'); $icon.FontSize = 15; $icon.Margin = '0,1,10,0'; $icon.VerticalAlignment = 'Top'
     $icon.Foreground = ConvertTo-Brush $pill[1]
     $label = New-Object System.Windows.Controls.TextBlock
-    $label.Text = $Text; $label.TextWrapping = 'Wrap'; $label.Foreground = ConvertTo-Brush $(if ($Kind -eq 'info') { '#1B1B1B' } else { $pill[1] })
+    $label.Text = (Get-ToastText $Text); $label.ToolTip = $Text; $label.TextWrapping = 'Wrap'; $label.TextTrimming = 'CharacterEllipsis'; $label.MaxHeight = 66; $label.VerticalAlignment = 'Top'; $label.Foreground = ConvertTo-Brush $(if ($Kind -eq 'info') { '#1B1B1B' } else { $pill[1] })
     [System.Windows.Controls.Grid]::SetColumn($label, 1)
     [void]$grid.Children.Add($icon); [void]$grid.Children.Add($label)
     if ($ActionLabel -and $Action) {
         $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = [System.Windows.GridLength]::Auto; [void]$grid.ColumnDefinitions.Add($c)
         $link = New-Object System.Windows.Controls.Button
-        $link.Content = $ActionLabel; $link.Padding = '10,2'; $link.Margin = '10,0,0,0'; $link.MinHeight = 0; $link.VerticalAlignment = 'Top'
+        # Plain text button: the button style draws the Tag as an icon glyph, so the action must not be kept in Tag (it showed as boxes and made the text column narrow)
+        $link.Content = $ActionLabel; $link.Padding = '10,2'; $link.Margin = '10,0,0,0'; $link.MinHeight = 0; $link.VerticalAlignment = 'Top'; $link.Tag = $null
         [System.Windows.Controls.Grid]::SetColumn($link, 2)
-        $link.Add_Click({ param($b, $a) try { & $b.Tag } catch { } }.GetNewClosure())
-        $link.Tag = $Action
+        $script:ToastActions[$link] = $Action
+        $link.Add_Click({ param($b, $a) try { & $script:ToastActions[$b] } catch { } })
         [void]$grid.Children.Add($link)
     }
     $border.Child = $grid
@@ -219,13 +228,17 @@ function Get-FriendlyCause([string]$Raw) {
        The raw text stays in the log and behind Details. #>
     $text = [string]$Raw
     if (-not $text) { return 'Something went wrong.' }
+    if ($text -match '(?i)is not a custom application of this tool or does not exist') { return 'this app is not a custom application of PackTune or was already removed - nothing was removed.' }
+    if ($text -match '(?i)Close Windows Sandbox to continue') { return 'Close Windows Sandbox to continue, then press Retry.' }
+    if ($text -match '(?i)-2147024891|0x80070005|E_ACCESSDENIED|denied access to the package folder') { return 'Windows denied access to the package folder - close Windows Sandbox, wait a minute and try again (see Details).' }
     if ($text -match '(?i)Das Argument kann nicht|Cannot bind argument|cannot be bound|ParameterBinding|leere Zeichenfolge|empty string|empty collection|null or empty') { return 'An internal value was missing (for example no app selected). Nothing was changed; Details has the log.' }
     if ($text -match '(?i)\b403\b|forbidden|verboten|insufficient privileges|Authorization_RequestDenied|access is denied|zugriff verweigert') { return 'No permission: confirm the new permissions or check the license.' }
     if ($text -match '(?i)\b401\b|unauthorized|nicht autorisiert|token.*expired|InvalidAuthenticationToken') { return 'The sign-in expired or is not accepted: sign in again.' }
     if ($text -match '(?i)\b50[0234]\b|service unavailable|bad gateway|gateway time|internal server error|serverfehler') { return 'Microsoft Graph has a problem right now (server error). Try again in a moment.' }
     if ($text -match '(?i)\b40[04]\b|bad request|not found|nicht gefunden|ung(Ã¼|u|ue)ltige anforderung|BadRequest|ResourceNotFound') { return 'Not available in this tenant (Remediations need Windows Enterprise E3/E5 licensing).' }
     if ($text -match '(?i)remoteserver|remote server|remotename|could not be resolved|unable to connect|no such host|timed out|timeout|zeit(Ã¼|u|ue)berschreitung|network|netzwerk|connection (was )?(closed|refused|reset)|Verbindung|name or service not known|SSL|TLS') { return "Can't reach Microsoft Graph." }
-    $one = ($text -replace '\s+', ' ').Trim()
+    # Ids belong under Details (the log), not in the first line
+    $one = ([regex]::Replace($text, '(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b', '(id in Details)') -replace '\s+', ' ').Trim()
     if ($one.Length -gt 140) { $one = $one.Substring(0, 137) + '...' }
     $one
 }
@@ -1844,8 +1857,13 @@ function Get-CustomPackageIconFile {
         New-Item -Path $dir -ItemType Directory -Force | Out-Null
         if ($script:CustomKind -eq 'Msi') {
             if ($script:CustomInfo -and $script:CustomInfo.IconName) {
-                $f = Join-Path $dir 'msi-icon.ico'
-                if (Save-PackTuneMsiIcon -Path $script:CustomInfo.Path -IconName $script:CustomInfo.IconName -Destination $f) { return $f }
+                # The same converter as the upload (ConvertTo-PngBytes: largest frame of the ICO, PNG frames as they are, EXE icons), so preview and Company Portal match
+                $raw = Join-Path $dir 'msi-icon.bin'
+                if (Save-PackTuneMsiIcon -Path $script:CustomInfo.Path -IconName $script:CustomInfo.IconName -Destination $raw) {
+                    $f = Join-Path $dir 'msi-icon.png'
+                    [IO.File]::WriteAllBytes($f, (ConvertTo-PngBytes -Bytes ([IO.File]::ReadAllBytes($raw)) -WorkPath $dir))
+                    return $f
+                }
             }
             return $null
         }
@@ -1853,6 +1871,8 @@ function Get-CustomPackageIconFile {
         if ($entry -like '*.exe' -and $folder) {
             $exe = if ([IO.Path]::IsPathRooted($entry)) { $entry } else { Join-Path $folder $entry }
             if (Test-Path -LiteralPath $exe -PathType Leaf) {
+                $f = Join-Path $dir 'exe-icon.png'
+                try { [IO.File]::WriteAllBytes($f, (ConvertTo-PngBytes -Bytes ([IO.File]::ReadAllBytes($exe)) -WorkPath $dir)); return $f } catch { }
                 Add-Type -AssemblyName System.Drawing
                 $ico = [System.Drawing.Icon]::ExtractAssociatedIcon($exe)
                 if ($ico) { $f = Join-Path $dir 'exe-icon.png'; $bmp = $ico.ToBitmap(); $bmp.Save($f, [System.Drawing.Imaging.ImageFormat]::Png); $bmp.Dispose(); return $f }
@@ -4193,6 +4213,14 @@ function Show-TestMenu([ValidateSet('Detail', 'Tenant', 'Custom')][string]$Kind,
             }
         }
     }
+    [void]$menu.Items.Add((New-Object System.Windows.Controls.Separator))
+    $keep = New-Object System.Windows.Controls.MenuItem
+    $keep.Header = 'Keep the sandbox open after the test'
+    $keep.ToolTip = 'For manual checks. Off: PackTune closes the sandbox it started about 10 seconds after the result; close it yourself before you deploy when this is on.'
+    [System.Windows.Controls.ToolTipService]::SetIsEnabled($keep, $false)
+    $keep.IsCheckable = $true; $keep.IsChecked = ($env:PACKTUNE_SANDBOX_KEEPOPEN -eq '1')
+    $keep.Add_Click({ param($src) $env:PACKTUNE_SANDBOX_KEEPOPEN = $(if ($src.IsChecked) { '1' } else { '' }) })
+    [void]$menu.Items.Add($keep)
     Show-Flyout $menu $Target
 }
 Add-Click $ui.BtnDetailTestMenu { Show-TestMenu 'Detail' $ui.BtnDetailTestMenu }
