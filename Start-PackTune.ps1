@@ -281,6 +281,94 @@ function Step-GraphRetry {
 }
 $ui.BtnGraphRetry.Add_Click({ try { $script:GraphRetryDelay = 15; Invoke-GraphRetry; Show-Toast 'Trying again ...' 'info' } catch { Show-Error $_.Exception.Message } })
 
+# ---- one step-list control for every multi-step job: pending / spinner running / check done / error with cause, a determinate bar
+# A job reports "Step 3/7 running: text" lines (done, error, detail likewise); the model follows its log, the list shows it live.
+$script:StepBindings = New-Object System.Collections.ArrayList
+function New-StepModel([string[]]$Titles) {
+    @{ Steps = @($Titles | ForEach-Object { @{ Title = $_; State = 'pending'; Detail = ''; Started = $null } }); Seen = 0; Signature = ''; Elapsed = @{} }
+}
+function Set-StepState($Model, [int]$Number, [string]$State, [string]$Detail) {
+    if ($Number -lt 1 -or $Number -gt $Model.Steps.Count) { return }
+    $s = $Model.Steps[$Number - 1]
+    if ($State -eq 'detail') { $s.Detail = $Detail; return }
+    if ($State -eq 'running' -and $s.State -ne 'running') { $s.Started = Get-Date }
+    $s.State = $State; $s.Detail = $Detail
+}
+function Get-StepCause([string]$Raw) {
+    $friendly = Get-FriendlyCause $Raw
+    if ($friendly.EndsWith('...')) { $one = ($Raw -replace '\s+', ' ').Trim(); if ($one.Length -gt 300) { $one = $one.Substring(0, 297) + '...' }; return $one }
+    $friendly
+}
+function Sync-StepModel($Model, $Job) {
+    if (-not $Job) { return }
+    $entries = @($Job.Log.ToArray())
+    for ($i = $Model.Seen; $i -lt $entries.Count; $i++) {
+        if ([string]$entries[$i].Text -match '^Step (\d+)/(\d+) (running|done|error|detail): (.*)$') {
+            $detail = if ($Matches[3] -eq 'error') { Get-StepCause $Matches[4] } else { $Matches[4] }
+            Set-StepState $Model ([int]$Matches[1]) $Matches[3] $detail
+        }
+    }
+    $Model.Seen = $entries.Count
+}
+function Show-StepList($Model, $Panel, $Bar) {
+    $done = @($Model.Steps | Where-Object { $_.State -eq 'done' }).Count
+    $Bar.Maximum = $Model.Steps.Count; $Bar.Value = $done
+    $sig = (@($Model.Steps | ForEach-Object { "$($_.State)|$($_.Detail)" }) -join ';')
+    if ($sig -ne $Model.Signature -or $Panel.Children.Count -ne $Model.Steps.Count) {
+        $Model.Signature = $sig; $Model.Elapsed = @{}
+        $Panel.Children.Clear()
+        $n = 0
+        foreach ($s in $Model.Steps) {
+            $n++
+            $row = New-Object System.Windows.Controls.Grid
+            $row.Margin = '0,0,0,8'
+            foreach ($w in 26, 0) { $c = New-Object System.Windows.Controls.ColumnDefinition; $c.Width = if ($w) { [System.Windows.GridLength]::new($w) } else { [System.Windows.GridLength]::new(1, 'Star') }; [void]$row.ColumnDefinitions.Add($c) }
+            $icon = switch ($s.State) {
+                'running' { New-Spinner 14 (Get-Brush 'Primary') }
+                'done' { $g = New-Object System.Windows.Controls.TextBlock; $g.FontFamily = $window.FindResource('IconFont'); $g.Text = [string][char]0xE73E; $g.Foreground = Get-Brush 'Success'; $g.FontSize = 14; $g }
+                'error' { $g = New-Object System.Windows.Controls.TextBlock; $g.FontFamily = $window.FindResource('IconFont'); $g.Text = [string][char]0xEA39; $g.Foreground = ConvertTo-Brush '#A11D1D'; $g.FontSize = 14; $g }
+                default { $g = New-Object System.Windows.Controls.TextBlock; $g.FontFamily = $window.FindResource('IconFont'); $g.Text = [string][char]0xEA3A; $g.Foreground = Get-Brush 'MutedText'; $g.FontSize = 14; $g }
+            }
+            $icon.VerticalAlignment = 'Top'; $icon.Margin = '0,2,0,0'; $icon.HorizontalAlignment = 'Left'
+            [void]$row.Children.Add($icon)
+            $stack = New-Object System.Windows.Controls.StackPanel
+            [System.Windows.Controls.Grid]::SetColumn($stack, 1)
+            $title = New-Object System.Windows.Controls.TextBlock
+            $title.Text = "$n. $($s.Title)"; $title.TextWrapping = 'Wrap'
+            $title.FontWeight = if ($s.State -eq 'running') { 'SemiBold' } else { 'Normal' }
+            if ($s.State -eq 'pending') { $title.Foreground = Get-Brush 'MutedText' }
+            [void]$stack.Children.Add($title)
+            $detail = New-Object System.Windows.Controls.TextBlock
+            $detail.Style = $window.FindResource('Hint'); $detail.TextWrapping = 'Wrap'
+            $detail.Foreground = if ($s.State -eq 'error') { ConvertTo-Brush '#A11D1D' } else { Get-Brush 'MutedText' }
+            $detail.Text = [string]$s.Detail
+            $detail.Visibility = if ($s.Detail -or $s.State -eq 'running') { 'Visible' } else { 'Collapsed' }
+            [void]$stack.Children.Add($detail)
+            if ($s.State -eq 'running') { $Model.Elapsed[$n] = $detail }
+            [void]$row.Children.Add($stack)
+            [void]$Panel.Children.Add($row)
+        }
+    }
+    # a running step shows how long it has been going on
+    foreach ($key in @($Model.Elapsed.Keys)) {
+        $s = $Model.Steps[$key - 1]
+        if ($s.Started) { $span = (Get-Date) - $s.Started; $Model.Elapsed[$key].Text = ("{0}  {1}:{2:00}" -f $s.Detail, [int]$span.TotalMinutes, $span.Seconds).Trim(); $Model.Elapsed[$key].Visibility = 'Visible' }
+    }
+}
+function Add-StepBinding($Model, $Job, $Panel, $Bar) {
+    $Job = @($Job | Where-Object { $_ -is [hashtable] -and $_.ContainsKey('Log') -and $_.ContainsKey('Kind') }) | Select-Object -Last 1   # Start-UiTask may emit more than the job
+    foreach ($b in @($script:StepBindings | Where-Object { $_.Panel -eq $Panel })) { [void]$script:StepBindings.Remove($b) }
+    [void]$script:StepBindings.Add(@{ Model = $Model; Job = $Job; Panel = $Panel; Bar = $Bar })
+    Sync-StepModel $Model $Job; Show-StepList $Model $Panel $Bar
+}
+function Step-StepBindings {
+    foreach ($b in @($script:StepBindings)) {
+        Sync-StepModel $b.Model $b.Job
+        Show-StepList $b.Model $b.Panel $b.Bar
+        if ($b.Job -and $b.Job.Finished) { [void]$script:StepBindings.Remove($b) }
+    }
+}
+
 function Show-SignInCancelled {
     # A cancelled sign-in is no error: a quiet note, and the header shows Sign in again
     Write-UiLog 'Sign-in cancelled.'
@@ -300,7 +388,7 @@ $script:ConfirmFrame = $null
 $script:ConfirmAnswer = $false
 function Confirm-Action([string]$Message, [string]$Title = 'PackTune', [string]$YesLabel = 'Continue', [string]$NoLabel = 'Cancel') {
     # The app's own confirmation (card above everything, Enter = yes, Esc = no). Returns the answer; the window keeps running meanwhile.
-    if ($env:PACKTUNE_SMOKE -and -not $script:ConfirmDialogTest) { return $true }
+    if ($env:PACKTUNE_SMOKE -and -not $script:ConfirmDialogTest) { if (-not $script:ConfirmAsked) { $script:ConfirmAsked = New-Object System.Collections.ArrayList }; [void]$script:ConfirmAsked.Add(@($Title, $Message)); return ($null -eq $script:ConfirmSmokeAnswer -or [bool]$script:ConfirmSmokeAnswer) }
     if ($script:ConfirmFrame) { return $false }
     $ui.ConfirmTitle.Text = $Title
     $ui.ConfirmText.Text = $Message
@@ -557,6 +645,7 @@ $timer.Add_Tick({
         }
         Update-Toasts
         if ($script:Tick % 8 -eq 0) { Step-GraphRetry }
+        if ($script:Tick % 4 -eq 0) { Step-StepBindings }
         # App cards fill up while the feed lookups run
         if ($script:Refreshing -and $script:Tick % 4 -eq 0) { Update-RefreshButton }
         if ($script:Refreshing -and $script:Tick % 8 -eq 0 -and $script:CurrentPage -eq 'Apps') { Update-AppList -Reload }
@@ -568,7 +657,7 @@ $timer.Add_Tick({
         }
         if ($script:Tick % 240 -eq 0 -and $script:Shared.Auth) { Update-ConnectionStatus }
     }
-    catch { Write-UiLog $_.Exception.Message 'Error' }
+    catch { Write-UiLog ($_.Exception.Message) 'Error' }
 })
 
 # ---------------------------------------------------------------- package infos (feed cache, 24 hours)
@@ -823,7 +912,7 @@ $script:DialogWidths = @{}
 function Update-DialogWidths {
     # Dialogs have a design width, but never more than the room in the window (scaling makes the window narrower for the layout)
     $room = [Math]::Max(320, $ui.RootGrid.ActualWidth - 56)
-    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgHelp', 'DlgConfirm') {
+    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgSteps', 'DlgHelp', 'DlgConfirm') {
         $el = $ui[$d]
         if (-not $script:DialogWidths.ContainsKey($d)) { $script:DialogWidths[$d] = $el.Width }
         $el.Width = [Math]::Min($script:DialogWidths[$d], $room)
@@ -832,13 +921,13 @@ function Update-DialogWidths {
 $ui.RootGrid.Add_SizeChanged({ try { Update-DialogWidths } catch { } })
 function Show-Dialog([string]$Name) {
     Update-DialogWidths
-    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgHelp') { $ui[$d].Visibility = if ($d -eq $Name) { 'Visible' } else { 'Collapsed' } }
+    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgSteps', 'DlgHelp') { $ui[$d].Visibility = if ($d -eq $Name) { 'Visible' } else { 'Collapsed' } }
     $ui.DialogLayer.Visibility = 'Visible'
     $script:OpenDialog = $Name
 }
 function Close-Dialog {
     $ui.DialogLayer.Visibility = 'Collapsed'
-    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgHelp') { $ui[$d].Visibility = 'Collapsed' }
+    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgCustom', 'DlgStore', 'DlgSteps', 'DlgHelp') { $ui[$d].Visibility = 'Collapsed' }
     $script:OpenDialog = $null
 }
 $script:OpenDialog = $null
@@ -993,7 +1082,7 @@ function Get-ReadinessItems {
                 elseif ($script:GraphDown -and -not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = "Can't check right now: $($script:GraphDown.Cause)" } }
                 elseif (-not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statuscheck'); Text = 'Checking ...' } }
                 elseif ($script:StatusScript.State -eq 'Present') { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'ok'; Optional = $true; Text = 'The status script is in Intune; devices report their update log hourly.' } }
-                elseif ($script:StatusScript.State -eq 'NotAvailable') { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = "Not available in this tenant. The install status still works; the device log needs Remediations. $(Get-FriendlyCause $script:StatusScript.Reason)" } }
+                elseif ($script:StatusScript.State -eq 'NotAvailable') { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statusscript'); Text = "Not available yet: $(Get-FriendlyCause $script:StatusScript.Reason) The install status still works. Set up checks the permission and the license confirmation for you."; Fix = 'Set up'; Action = { Start-StatusScriptSetup } } }
                 else { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statusscript')
                           Text = 'Devices report their update log to Intune, so failures show up with their cause. Needs Remediations (Windows Enterprise E3/E5).'
                           Fix = 'Set up'; Action = { Start-StatusScriptSetup } } })
@@ -1135,21 +1224,79 @@ function Start-DependencyDeploy {
     Update-Readiness
 }
 
+$script:StatusStepTitles = @('Check the permission', 'Check that Intune allows Remediations in this tenant', 'Create the status script', 'Assign it to all devices, every hour', 'Check the result')
+$script:StatusAdminUrl = 'https://intune.microsoft.com/#view/Microsoft_Intune_DeviceSettings/TenantAdminConnectorsMenu/~/windowsDataConnector'
+function Get-StatusMissingScopes {
+    # Scopes the status report functions need that the sign-in does not carry (Get-InsightRequiredScopes via Test-InsightReadiness)
+    if (-not $Global:AccessToken -or -not $Global:AccessToken.Scopes) { return @() }
+    @(Test-InsightReadiness -GrantedScopes @($Global:AccessToken.Scopes) | Where-Object { $_.Function -in 'Get-InsightStatusScriptState', 'Set-InsightStatusScript' -and -not $_.Ready } | ForEach-Object { $_.Missing } | Select-Object -Unique)
+}
+function Set-StatusDialogButtons([bool]$Running, [bool]$Failed, [bool]$License) {
+    $ui.BtnStepsAgain.Visibility = ConvertTo-Vis ($Failed -and -not $Running)
+    $ui.BtnStepsOpen.Visibility = ConvertTo-Vis ($License -and -not $Running)
+}
 function Start-StatusScriptSetup {
-    if (Test-TaskRunning 'statusscript') { return }
+    # Walks through: the permission (consent in the normal sign-in), Remediations in the tenant (the license confirmation), the script, its assignment, a check
+    if (Test-TaskRunning 'statusscript') { Show-Dialog 'DlgSteps'; return }
+    if (-not (Test-SignedIn)) { throw 'Sign in to Intune first (Sign in, top right).' }
+    $model = New-StepModel $script:StatusStepTitles
+    $script:StatusSteps = $model
+    $ui.TxtStepsTitle.Text = 'Set up the status report'
+    $ui.TxtStepsSub.Text = 'Devices report their update log to Intune, so failures show up with their cause. PackTune checks what is needed and sets it up step by step.'
+    $ui.BoxStepsNote.Visibility = 'Collapsed'
+    Set-StatusDialogButtons $true $false $false
+    Show-Dialog 'DlgSteps'
+    Add-StepBinding $model $null $ui.ListSteps $ui.BarSteps
+    # 1 permission: confirmed in the normal sign-in (same session and method), never a second kind of sign-in
+    $missing = @(Get-StatusMissingScopes)
+    if ($missing.Count) {
+        Set-StepState $model 1 'running' "Confirming $($missing -join ', ') in your sign-in ..."
+        Show-StepList $model $ui.ListSteps $ui.BarSteps
+        try { Connect-Intune -Consent } catch { if (-not (Test-AdminConsentRefusal $_)) { Write-UiLog $_.Exception.Message 'Warning' } }
+        $missing = @(Get-StatusMissingScopes)
+        if ($missing.Count) {
+            Set-StepState $model 1 'error' 'An administrator must confirm these permissions (or the sign-in was cancelled).'
+            Show-StepList $model $ui.ListSteps $ui.BarSteps
+            Set-StatusDialogButtons $false $true $false
+            return
+        }
+    }
+    Set-StepState $model 1 'done' 'The sign-in carries the permission'
+    Show-StepList $model $ui.ListSteps $ui.BarSteps
     Update-UiToken
-    $work = 'param($Fake) $Ctx = if ($Fake) { New-InsightGraphContext -Invoke ([scriptblock]::Create($Fake)) } else { New-InsightGraphContext }; Set-InsightStatusScript -Context $Ctx'
-    [void](Start-UiTask -Kind 'statusscript' -Title 'Setting up the status script (Remediations) in Intune' -Display 'Status report' -NeedsAuth -Arguments @{ Fake = $script:InsightFake } -Work $work -OnDone {
+    $work = 'param($Fake) $Ctx = if ($Fake) { New-InsightGraphContext -Invoke ([scriptblock]::Create($Fake)) } else { New-InsightGraphContext }; Initialize-InsightStatusReport -Context $Ctx'
+    $job = Start-UiTask -Kind 'statusscript' -Title 'Setting up the status report (Remediations) in Intune' -Display 'Status report' -NeedsAuth -Arguments @{ Fake = $script:InsightFake } -Work $work -OnDone {
         param($Result, $Job)
         $r = @($Result | Where-Object { $_ -and $null -ne $_.Created }) | Select-Object -First 1
-        if ($r -and $r.Created) { Show-Toast "Status report: $($r.Message)." 'ok' } elseif ($r) { Write-UiLog "Status report: $($r.Message)" 'Warning'; Show-Toast (Get-FriendlyCause $r.Message) 'warn' 'Details' { Show-Page 'Activity' } }
+        $m = $script:StatusSteps
+        Sync-StepModel $m $Job
+        if ($r -and $r.Created) {
+            foreach ($i in 1..$m.Steps.Count) { if ($m.Steps[$i - 1].State -ne 'done') { Set-StepState $m $i 'done' '' } }
+            Show-Toast "Status report: $($r.Message)." 'ok'
+            Set-StatusDialogButtons $false $false $false
+            $ui.TxtStepsNote.Text = 'Done. Devices start reporting within the hour; failures then show up with their cause under In tenant.'
+            $ui.BoxStepsNote.Visibility = 'Visible'
+        }
+        else {
+            $license = $r -and $r.LicenseLikely
+            if ($license) {
+                $ui.TxtStepsNote.Text = "Most likely the license confirmation is missing: in the Intune admin center open Tenant administration > Connectors and tokens > Windows data and switch on 'I confirm that my tenant owns one of these licenses' (Windows Enterprise E3/E5 or equivalent). Then click Check again."
+                $ui.BoxStepsNote.Visibility = 'Visible'
+            }
+            if ($r) { Write-UiLog "Status report: $($r.Message)" 'Warning' }
+            Set-StatusDialogButtons $false $true $license
+        }
+        Show-StepList $m $ui.ListSteps $ui.BarSteps
         $script:StatusScript = $null
         Start-StatusCheck
         Update-Readiness
-    })
+    }
+    Add-StepBinding $model $job $ui.ListSteps $ui.BarSteps
     Update-Readiness
 }
-
+Add-Click $ui.BtnStepsAgain { Start-StatusScriptSetup }
+Add-Click $ui.BtnStepsOpen { Start-Process $script:StatusAdminUrl }
+Add-Click $ui.BtnStepsClose { Close-Dialog }
 function Start-StatusCheck {
     # Is the status script there, and does the tenant allow it (hidden)
     if (-not (Test-SignedIn) -or (Test-TaskRunning 'statuscheck') -or $script:StatusScript) { return }
@@ -2145,7 +2292,7 @@ function Update-StoreDialog {
     $ui.TxtStoreStatus.Foreground = if ($script:StoreState -and $script:StoreState.State -eq 'Ready') { $script:PillColors['ok'][1] } else { [System.Windows.Media.Brushes]::Black }
     $ui.BtnStoreCreate.IsEnabled = ($script:StoreState -and $script:StoreState.State -eq 'NoLibrary')
     $ui.BtnStoreGrant.IsEnabled = (Test-SignedIn)
-    $ui.BtnStoreSetup.IsEnabled = (Test-SignedIn)
+    $ui.BtnStoreSetup.IsEnabled = (Test-SignedIn) -and -not (Test-TaskRunning 'store')
     $ui.ExpStoreAdvanced.IsExpanded = [bool]$script:Settings.StoreSiteUrl -and $script:StoreState -and $script:StoreState.State -ne 'Ready'
 }
 function Show-StoreDialog {
@@ -2177,16 +2324,23 @@ function Start-StoreSetup([string]$SiteName) {
     # The one-time setup: the administrator's sign-in, then the site, library and access in the background; a conflict asks for the fallback name
     if (-not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permissions Sites.FullControl.All and Group.ReadWrite.All. PackTune uses them for this setup only and never for daily work.`n`nIt creates (when missing) the private Microsoft 365 group and site 'PackTune', the library '$($script:Settings.StoreLibrary)', and gives PackTune's app registration write access to that one site.`n`n$($script:StoreGrantConsentNote)`n`nContinue?" 'Set up the PackTune site' 'Continue' 'Cancel')) { return }
     $token = $null
+    $script:StoreSteps = New-StepModel @('Sign in (administrator)', 'Create the Microsoft 365 group PackTune', 'Wait for the SharePoint site', 'Add members', 'Create the library', 'Grant PackTune access to the site', 'Check')
+    Set-StepState $script:StoreSteps 1 'running' 'Waiting for the administrator sign-in ...'
+    $ui.PanelStoreSteps.Visibility = 'Visible'; Show-StepList $script:StoreSteps $ui.ListStoreSteps $ui.BarStoreSteps
     try { $token = Get-EmbeddedToken -TenantID $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'organizations' }) -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Sites.FullControl.All', 'Group.ReadWrite.All', 'User.Read') -Hint 'Sign in with an administrator account: it sets up the PackTune site once.' }
-    catch { if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Show-SignInCancelled }; return }
+    catch { $ui.PanelStoreSteps.Visibility = 'Collapsed'; if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Show-SignInCancelled }; return }
     $access = if ($token) { [string]$token.access_token } else { '' }
-    if (-not $access) { Show-Error 'The browser sign-in cannot be used for the setup: use the sign-in window of PackTune.'; return }
+    if (-not $access) { $ui.PanelStoreSteps.Visibility = 'Collapsed'; Show-Error 'The browser sign-in cannot be used for the setup: use the sign-in window of PackTune.'; return }
     $script:StoreSetupToken = $access
     $group = $ui.TxtStoreAdminGroup.Text.Trim()
-    [void](Start-UiTask -Kind 'store' -Title 'Setting up the PackTune site (this can take a few minutes while Microsoft 365 makes the site)' -Display 'Package store' -Pool $script:UserPool -Arguments @{ Token = $access; Client = $script:Settings.ClientID; Name = $SiteName; Group = $group; Library = $script:Settings.StoreLibrary } `
+    $script:StoreSteps = New-StepModel @('Sign in (administrator)', 'Create the Microsoft 365 group PackTune', 'Wait for the SharePoint site', 'Add members', 'Create the library', 'Grant PackTune access to the site', 'Check')
+    $ui.PanelStoreSteps.Visibility = 'Visible'
+    Set-ButtonBusy $ui.BtnStoreSetup $true 'Setting up ...'; $ui.BtnStoreSetup.IsEnabled = $false
+    $setupJob = (Start-UiTask -Kind 'store' -Title 'Setting up the PackTune site (this can take a few minutes while Microsoft 365 makes the site)' -Display 'Package store' -Pool $script:UserPool -Arguments @{ Token = $access; Client = $script:Settings.ClientID; Name = $SiteName; Group = $group; Library = $script:Settings.StoreLibrary } `
         -Work 'param($Token, $Client, $Name, $Group, $Library) $p = @{ Token = $Token; ClientID = $Client; Library = $Library }; if ($Name) { $p.SiteName = $Name }; if ($Group) { $p.AdminGroup = $Group }; $r = Initialize-PackTuneStoreSite @p; foreach ($s in $r.Steps) { Write-Host $s }; foreach ($w in $r.Warnings) { Write-Warning $w }; $r | Select-Object State, SiteUrl, SiteName, FallbackName, Message' -OnDone {
         param($Result, $Job)
         $script:StoreSetupToken = $null
+        Set-ButtonBusy $ui.BtnStoreSetup $false ''; Update-StoreDialog
         $r = @($Result | Where-Object { $_ -and $_.State }) | Select-Object -First 1
         if ($Job.Status -ne 'succeeded' -or -not $r) { Show-Toast 'The PackTune site could not be set up, see Activity.' 'bad'; $script:StoreState = $null; Start-StoreCheck; return }
         if ($r.State -eq 'Conflict') {
@@ -2202,6 +2356,9 @@ function Start-StoreSetup([string]$SiteName) {
         Show-Toast 'The PackTune site is set up.' 'ok'
         $script:StoreState = $null; Start-StoreCheck
     })
+    Add-StepBinding $script:StoreSteps $setupJob $ui.ListStoreSteps $ui.BarStoreSteps
+    Set-StepState $script:StoreSteps 1 'done' 'Signed in as administrator'
+    Show-StepList $script:StoreSteps $ui.ListStoreSteps $ui.BarStoreSteps
 }
 Add-Click $ui.BtnStoreSetup { Start-StoreSetup '' }
 Add-Click $ui.BtnStoreGrant {
@@ -3072,28 +3229,52 @@ Get-PackTuneTenantApps | ForEach-Object {
 }
 Add-Click $ui.BtnTenantRefresh { $script:TenantApps = $script:TenantApps; Start-TenantRefresh }
 
+$script:CountsCacheSeconds = 120
+function Get-ShortCountError([string]$Raw) {
+    $c = Get-FriendlyCause $Raw
+    if ($c -like 'No permission*') { 'No permission' } elseif ($c -like 'Not available*') { 'Not available' } elseif ($c -like "Can't reach*") { "Can't reach Graph" } elseif ($c -like 'The sign-in expired*') { 'Sign in again' } else { "Can't read" }
+}
 function Start-CountsTask {
-    $ids = @($script:TenantApps | Where-Object { -not $_.IsChocolatey -and $_.Package } | ForEach-Object { $_.Id })
+    # Intune's install summary per app (one small call each, DeviceManagementApps.Read.All), a short cache so the list does not hammer Graph
+    $ids = @($script:TenantApps | Where-Object { -not $_.IsChocolatey -and $_.Package } | ForEach-Object { $_.Id } | Where-Object {
+        $c = $script:DeviceCounts[$_]; -not $c -or $c.Error -or -not $c.Fetched -or ((Get-Date) - [datetime]$c.Fetched).TotalSeconds -gt $script:CountsCacheSeconds })
     if ($ids.Count -eq 0 -or (Test-TaskRunning 'counts')) { return }
-    $work = @'
+    $work = '
 param($Ids, $Fake)
 $Ctx = if ($Fake) { New-InsightGraphContext -Invoke ([scriptblock]::Create($Fake)) } else { New-InsightGraphContext }
 foreach ($Id in $Ids) {
-    try { $S = Get-InsightAppInstallStatus -Context $Ctx -AppId $Id; [pscustomobject]@{ Id = $Id; Installed = $S.Installed; Failed = $S.Failed; Pending = $S.Pending; Stale = $S.NotReported7Days } }
-    catch { [pscustomobject]@{ Id = $Id; Error = $_.Exception.Message } }
+    try { $S = Get-InsightAppInstallSummary -Context $Ctx -AppId $Id; [pscustomobject]@{ Id = $Id; Installed = $S.Installed; Failed = $S.Failed; Pending = $S.Pending; NotInstalled = $S.NotInstalled; NotApplicable = $S.NotApplicable; Fetched = $S.Fetched } }
+    catch { [pscustomobject]@{ Id = $Id; Error = $_.Exception.Message; Fetched = (Get-Date) } }
 }
-'@
+'
     [void](Start-UiTask -Kind 'counts' -Title 'Reading the install counts' -Hidden -NeedsAuth -Arguments @{ Ids = $ids; Fake = $script:InsightFake } -Work $work -OnDone {
         param($Result, $Job)
-        foreach ($r in @($Result | Where-Object { $_ -and $_.Id })) { $script:DeviceCounts[$r.Id] = $r }
+        foreach ($r in @($Result | Where-Object { $_ -and $_.Id })) {
+            if ($r.Error) { Write-UiLog "Install counts of $($r.Id): $($r.Error)" 'Warning' }
+            $script:DeviceCounts[$r.Id] = $r
+        }
         Update-TenantRows
+        try { Update-TenantButtons } catch { }
     })
 }
+function Update-TenantSummary($App) {
+    $isDep = $App.IsChocolatey -or $App.IsDependency
+    $ui.BoxTenantSummary.Visibility = ConvertTo-Vis (-not $isDep)
+    if ($isDep) { return }
+    $c = $script:DeviceCounts[$App.Id]
+    foreach ($n in 'Installed', 'Failed', 'Pending', 'NotInstalled') { $ui["TxtSum$n"].Text = '-'; $ui["TxtSum$n"].Foreground = [System.Windows.Media.Brushes]::Black }
+    if (-not $c) { $ui.TxtSumInfo.Text = 'Reading the install counts from Intune ...'; return }
+    if ($c.Error) { $ui.TxtSumInfo.Text = "Could not read the counts: $(Get-FriendlyCause $c.Error)"; return }
+    $ui.TxtSumInstalled.Text = [string]$c.Installed; $ui.TxtSumFailed.Text = [string]$c.Failed; $ui.TxtSumPending.Text = [string]$c.Pending; $ui.TxtSumNotInstalled.Text = [string]$c.NotInstalled
+    if ($c.Failed) { $ui.TxtSumFailed.Foreground = ConvertTo-Brush '#A11D1D' }
+    $ui.TxtSumInfo.Text = "From Intune's install summary, read $(([datetime]$c.Fetched).ToString('HH:mm'))$(if ($c.NotApplicable) { ", $($c.NotApplicable) not applicable" })."
+}
+Add-Click $ui.BtnSumStatus { $app = Get-SelectedTenantApp; if ($app) { Show-Page 'Status' } }
 
 function Get-IntentText($App) {
     if ($App.IsChocolatey -or $App.IsDependency) { return 'Automatic' }
     $i = @([string]$App.Intents -split ',' | Where-Object { $_ })
-    if ($i -contains 'required') { 'Required' } elseif ($i -contains 'available') { 'Available' } else { 'None' }
+    if ($i -contains 'required') { 'Required' } elseif ($i -contains 'available') { 'Available' } elseif ($i -contains 'uninstall') { 'Uninstall' } else { 'None' }
 }
 
 function Update-TenantRows {
@@ -3136,8 +3317,9 @@ function Update-TenantRows {
         $title = if ($app.IsOld) { "$($app.DisplayName) (old)" } elseif ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
         $sub = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($app.IsDependency) { 'Dependency of all apps: Chocolatey and winget for SYSTEM' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" }
         if ($app.JustCreated) { $sub = "$sub $([char]0x00B7) just created, confirming in Intune ..." }
-        $ok = if ($count -and -not $count.Error) { "$($count.Installed) installed" } elseif ($isDep) { '' } else { '-' }
-        $bad = if ($count -and -not $count.Error) { @($(if ($count.Failed) { "$($count.Failed) failed" }), $(if ($count.Pending) { "$($count.Pending) pending" })) | Where-Object { $_ } | Select-Object -First 1 } else { '' }
+        $ok = if ($count -and -not $count.Error) { "$($count.Installed) installed" } elseif ($count -and $count.Error) { Get-ShortCountError $count.Error } elseif ($isDep) { '' } else { '...' }
+        $bad = if ($count -and -not $count.Error) { @($(if ($count.Failed) { "$($count.Failed) failed" }), $(if ($count.Pending) { "$($count.Pending) pending" })) | Where-Object { $_ } | Select-Object -First 2 } else { '' }
+        $bad = (@($bad) -join " $([char]0x00B7) ").Trim()
         $updates = if ($isDep) { 'Updated daily' } elseif ($app.UpdateMode -eq 'Custom') { "Ask user, $(if ($app.GraceHours % 24 -eq 0) { "$($app.GraceHours / 24) days" } else { "$($app.GraceHours) h" })" } elseif ($app.UpdateMode -eq 'Off') { 'Off' } else { if ($app.Schedule.TriggerStart -and -not $app.Schedule.TriggerWindow) { 'At startup' } else { 'Automatic' } }
         $icon = Get-TenantAppIcon $app
         New-Row (@{
@@ -3326,6 +3508,85 @@ function Show-TenantPolicy($App) {
         })
 }
 
+# ---- assignment for all users: one click, applied as a job with the step list; group assignments stay
+$script:AssignInfo = @{}            # app id -> @{ Intent; Groups; AllIntents }
+$script:AssignUpdating = $false
+$script:AssignStepTitles = @('Read the current assignments', 'Remove the old all-users assignment', 'Assign to all users', 'Check the result')
+function Get-AssignRadio([string]$Intent) { switch ($Intent) { 'required' { $ui.RbAsgRequired } 'available' { $ui.RbAsgAvailable } 'uninstall' { $ui.RbAsgUninstall } default { $ui.RbAsgNone } } }
+function Set-AssignRadios($Intent, [bool]$Enabled) {
+    $script:AssignUpdating = $true
+    try { (Get-AssignRadio $Intent).IsChecked = $true }
+    finally { $script:AssignUpdating = $false }
+    foreach ($r in $ui.RbAsgRequired, $ui.RbAsgAvailable, $ui.RbAsgUninstall, $ui.RbAsgNone) { $r.IsEnabled = $Enabled }
+}
+function Update-TenantAssign($App) {
+    $isDep = $App.IsChocolatey -or $App.IsDependency
+    $ui.GbTenantAssign.Visibility = ConvertTo-Vis (-not $isDep)
+    if ($isDep) { return }
+    $info = $script:AssignInfo[$App.Id]
+    $busy = Test-TaskRunning 'assign'
+    if (-not $info) {
+        Set-AssignRadios 'none' $false
+        $ui.TxtAsgInfo.Text = 'Reading the assignments ...'
+        Start-AssignRead $App
+        return
+    }
+    Set-AssignRadios $(if ($info.Intent) { $info.Intent } else { 'none' }) ((Test-SignedIn) -and -not $busy)
+    $ui.TxtAsgInfo.Text = "$(if ($info.Groups) { "Groups: $($info.Groups) (read only, kept as they are). " })Only the all-users assignment of PackTune is changed here."
+}
+function Start-AssignRead($App) {
+    if (Test-TaskRunning 'assignread') { return }
+    $work = 'param($Id, $Fake) $Ctx = if ($Fake) { New-InsightGraphContext -Invoke ([scriptblock]::Create($Fake)) } else { New-InsightGraphContext }; $a = Get-InsightAllUsersAssignment -Context $Ctx -AppId $Id; [pscustomobject]@{ Id = $Id; Intent = $a.Intent; Groups = $a.Groups; AllIntents = @($a.AllIntents) }'
+    [void](Start-UiTask -Kind 'assignread' -Title 'Reading the assignments of an app' -Hidden -NeedsAuth -Arguments @{ Id = $App.Id; Fake = $script:InsightFake } -Work $work -OnDone {
+        param($Result, $Job)
+        $r = @($Result | Where-Object { $_ -and $_.Id }) | Select-Object -First 1
+        if ($Job.Status -eq 'succeeded' -and $r) { $script:AssignInfo[$r.Id] = @{ Intent = $r.Intent; Groups = $r.Groups; AllIntents = @($r.AllIntents) } }
+        else { $ui.TxtAsgInfo.Text = "Could not read the assignments: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" }
+        $cur = Get-SelectedTenantApp
+        if ($cur -and $script:AssignInfo[$cur.Id]) { Update-TenantAssign $cur }
+    })
+}
+function Start-AssignChange([string]$Intent, $App) {
+    # Intent: Required | Available | Uninstall | None
+    if (-not $App) { $App = Get-SelectedTenantApp }
+    if (-not $App -or (Test-TaskRunning 'assign')) { return }
+    $word = @{ Required = 'Install'; Available = 'Show in Company Portal'; Uninstall = 'Uninstall'; None = 'None' }[$Intent]
+    if ($Intent -eq 'Uninstall' -and -not (Confirm-Action "Removes the app from all users' devices.`n`n'$($App.DisplayName)' gets the assignment Uninstall for all users: devices that have it uninstall it. Group assignments stay as they are." 'Uninstall for all users' 'Uninstall' 'Cancel')) {
+        $info = $script:AssignInfo[$App.Id]; Set-AssignRadios $(if ($info -and $info.Intent) { $info.Intent } else { 'none' }) $true
+        return
+    }
+    Update-UiToken
+    $model = New-StepModel $script:AssignStepTitles
+    $ui.PanelAsgSteps.Visibility = 'Visible'
+    Set-AssignRadios $Intent $false
+    $work = 'param($Id, $Intent, $Fake) $Ctx = if ($Fake) { New-InsightGraphContext -Invoke ([scriptblock]::Create($Fake)) } else { New-InsightGraphContext }; $r = Set-InsightAllUsersAssignment -Context $Ctx -AppId $Id -Intent $Intent; $a = Get-InsightAllUsersAssignment -Context $Ctx -AppId $Id; [pscustomobject]@{ Id = $Id; Intent = $Intent; Changed = $r.Changed; Groups = $a.Groups; AllIntents = @($a.AllIntents) }'
+    $appId = [string]$App.Id
+    $job = @(Start-UiTask -Kind 'assign' -Title "Assignment of $($App.DisplayName) for all users: $word" -Display "$($App.DisplayName): $word" -NeedsAuth -Arguments @{ Id = $appId; Intent = $Intent; Fake = $script:InsightFake } -Work $work -OnDone {
+        param($Result, $Job)
+        $r = @($Result | Where-Object { $_ -and $_.Id }) | Select-Object -First 1
+        $m = $script:AssignModel
+        Sync-StepModel $m $Job
+        if ($Job.Status -eq 'succeeded' -and $r) {
+            $script:AssignInfo[$r.Id] = @{ Intent = $(if ($r.Intent -eq 'None') { $null } else { $r.Intent.ToLower() }); Groups = $r.Groups; AllIntents = @($r.AllIntents) }
+            $row = @($script:TenantApps | Where-Object { $_.Id -eq $r.Id }) | Select-Object -First 1
+            if ($row) { $row.Intents = (@($r.AllIntents) -join ',') }
+            $path = if (@($r.AllIntents) -contains 'available' -and @($r.AllIntents) -notcontains 'required') { 'supersedence (Available apps)' } else { 'in place (Required or unassigned apps)' }
+            Write-UiLog "[$($Job.Display)] done. A new version is now released through $path." 'Success'
+            Show-Toast "Assignment for all users: $($script:AssignWord)." 'ok'
+        }
+        else { Show-Toast "The assignment could not be changed: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" 'bad' 'Details' { Show-Page 'Activity' } }
+        Update-TenantRows
+        $cur = Get-SelectedTenantApp
+        if ($cur) { Update-TenantAssign $cur }
+    }) | Select-Object -Last 1
+    $script:AssignModel = $model; $script:AssignWord = $word
+    Add-StepBinding $model $job $ui.ListAsgSteps $ui.BarAsgSteps
+}
+foreach ($pair in @(@('RbAsgRequired', 'Required'), @('RbAsgAvailable', 'Available'), @('RbAsgUninstall', 'Uninstall'), @('RbAsgNone', 'None'))) {
+    $ui[$pair[0]].Tag = $pair[1]
+    $ui[$pair[0]].Add_Checked({ param($s) if (-not $script:AssignUpdating) { try { Start-AssignChange ([string]$s.Tag) } catch { Show-Error $_.Exception.Message } } })
+}
+
 function Update-TenantButtons {
     $app = Get-SelectedTenantApp
     $on = [bool]$app
@@ -3338,6 +3599,8 @@ function Update-TenantButtons {
     $tenantIcon = Get-TenantAppIcon $app; $ui.ImgTenant.Source = ConvertTo-ImageSource $tenantIcon; $ui.TxtTenantMono.Visibility = ConvertTo-Vis (-not $tenantIcon)
     $ui.TxtTenantAppTitle.Text = if ($app.IsOld) { "$($app.DisplayName) (old)" } elseif ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
     $ui.TxtTenantAppSub.Text = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($isDep) { 'Dependency of every app, updated daily' } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source) $([char]0x00B7) $(Get-IntentText $app)" }
+    Update-TenantSummary $app
+    Update-TenantAssign $app
     $busy = Test-TaskRunning 'policy'
     $reading = (Test-TaskRunning 'tenant')
     $ui.BtnTenantOpen.IsEnabled = -not $reading
@@ -3493,7 +3756,7 @@ function Update-StatusBanner {
     $ui.BoxStatusScript.Visibility = ConvertTo-Vis ([bool]$show)
     if (-not $show) { return }
     if ($st.State -eq 'Missing') { $ui.TxtStatusScript.Text = 'The status script is not set up. Without it you see the Intune install status, but not the log the device reports. It runs as a Remediations detection script on all devices, once an hour.'; $ui.BtnStatusScript.Visibility = 'Visible' }
-    else { $ui.TxtStatusScript.Text = "The device log is not available in this tenant: Remediations need a Windows Enterprise E3/E5 (or A3/A5, VDA) license. The install status above still works. $(Get-FriendlyCause $st.Reason)"; $ui.BtnStatusScript.Visibility = 'Collapsed' }
+    else { $ui.TxtStatusScript.Text = "The device log is not available in this tenant: Remediations need a Windows Enterprise E3/E5 (or A3/A5, VDA) license. The install status above still works. $(Get-FriendlyCause $st.Reason)"; $ui.BtnStatusScript.Visibility = 'Visible' }
 }
 Add-Click $ui.BtnStatusScript { Start-StatusScriptSetup }
 Add-Click $ui.BtnStatusBack { Show-Page 'Tenant' }

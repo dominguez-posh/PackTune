@@ -471,7 +471,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'subtitle counts apps and dependency apps' ($ui.TxtTenantCount.Text -like '2 apps and 1 dependency app*contoso*') $ui.TxtTenantCount.Text
         $zip = $rows | Where-Object { $_['Title'] -eq '7-Zip' }
         Test-Smoke 'row shows package, source, version and assignment' ($zip['Sub'] -like '7zip.install*Chocolatey' -and $zip['Assigned'] -eq 'Available' -and $zip['Version'] -eq 'Always newest') ($zip['Sub'] + '|' + $zip['Assigned'] + '|' + $zip['Version'])
-        Test-Smoke 'device counts linked from the install status' ($zip['Ok'] -eq '2 installed' -and $zip['Bad'] -eq '1 failed') ($zip['Ok'] + '|' + $zip['Bad'])
+        Test-Smoke 'On devices column from Intune''s install summary: 12 installed, 1 failed - 3 pending' ($zip['Ok'] -eq '12 installed' -and $zip['Bad'] -eq "1 failed $([char]0x00B7) 3 pending") ($zip['Ok'] + '|' + $zip['Bad'])
         Test-Smoke 'nav badge shows the devices with problems' ($ui.BadgeTenant.Visibility -eq 'Visible' -and $ui.TxtBadgeTenant.Text -like '*problem*') $ui.TxtBadgeTenant.Text
         $ui.LstTenant.SelectedItem = $zip
         Test-Smoke 'panel shows the selected app with version and update mode' ($ui.ScrollTenantApp.Visibility -eq 'Visible' -and $ui.TxtTenantAppTitle.Text -eq '7-Zip' -and $ui.RbTenantStartup.IsChecked -and $ui.CmbTenantVersion.SelectedIndex -eq 0)
@@ -1178,15 +1178,56 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Start-StatusCheck
         return $true
         return $false } }
-    @{ Name = 'status without Remediations license'; Do = {
+    @{ Name = 'status report setup in steps'; Phase = 0; Do = {
+        param($s)
+        $flag = Join-Path $env:LOCALAPPDATA 'fake-nolicense.txt'
         if (-not (Test-Idle)) { return $false }
-        Test-Smoke 'no license: marked not available, degrade message' ($script:StatusScript.State -eq 'NotAvailable' -and $ui.BoxStatusScript.Visibility -eq 'Visible' -and $ui.BtnStatusScript.Visibility -eq 'Collapsed' -and $ui.TxtStatusScript.Text -like '*Remediations*') $ui.TxtStatusScript.Text
-        $item = Get-ReadinessItems | Where-Object Key -eq 'status'
-        Test-Smoke 'start page: optional item says it is not available' ($item.Text -like 'Not available*' -and -not $item.Fix) $item.Text
-        Save-SmokeShot '12-status-degraded'
-        Remove-Item (Join-Path $env:LOCALAPPDATA 'fake-nolicense.txt')
-        $script:StatusScript = $null; Start-StatusCheck
-        $true } }
+        switch ($s.Phase) {
+            0 {
+                Test-Smoke 'no license: marked not available, banner offers Set up' ($script:StatusScript.State -eq 'NotAvailable' -and $ui.BoxStatusScript.Visibility -eq 'Visible' -and $ui.BtnStatusScript.Visibility -eq 'Visible' -and $ui.TxtStatusScript.Text -like '*Remediations*') $ui.TxtStatusScript.Text
+                $item = Get-ReadinessItems | Where-Object Key -eq 'status'
+                Test-Smoke 'start page: optional item says why and has a Set up button' ($item.Text -like 'Not available yet*' -and $item.Fix -eq 'Set up' -and $item.Action) $item.Text
+                Save-SmokeShot '12-status-degraded'
+                # Missing scope: the setup runs the normal consent sign-in first (prompt=consent), then the 403 license case
+                $claims = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"name":"Consent Admin","upn":"admin@contoso.onmicrosoft.com","tid":"t-1"}')).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+                $script:ConsentCalls = New-Object System.Collections.ArrayList
+                $script:EmbeddedAvailableOverride = $true
+                $script:EmbeddedSignInOverride = { param($t, $c, $sc, $h, $pr, $folder) [void]$script:ConsentCalls.Add("$pr|$c"); [pscustomobject]@{ token_type = 'Bearer'; expires_in = 3600; access_token = "x.$claims.y"; refresh_token = 'r'; scope = 'https://graph.microsoft.com/DeviceManagementApps.ReadWrite.All https://graph.microsoft.com/DeviceManagementConfiguration.ReadWrite.All https://graph.microsoft.com/DeviceManagementManagedDevices.Read.All' } }
+                $Global:AccessToken.Scopes = @('DeviceManagementApps.ReadWrite.All')
+                Test-Smoke 'status setup: missing scope is detected' (@(Get-StatusMissingScopes) -contains 'DeviceManagementConfiguration.ReadWrite.All') (@(Get-StatusMissingScopes) -join ',')
+                Start-StatusScriptSetup
+                $s.Phase = 1; return $false
+            }
+            1 {
+                $script:EmbeddedSignInOverride = $null
+                Test-Smoke 'step 1: the permission was confirmed in the normal sign-in (prompt=consent, the PackTune registration), not a setup window' ($script:ConsentCalls.Count -eq 1 -and $script:ConsentCalls[0] -eq "consent|$($script:Settings.ClientID)" -and $script:StatusSteps.Steps[0].State -eq 'done') (($script:ConsentCalls -join ',') + ' / ' + $script:StatusSteps.Steps[0].State)
+                $st = @($script:StatusSteps.Steps | ForEach-Object { $_.State })
+                Test-Smoke '403 license: step 2 is an error with a plain cause, later steps stay pending' ($st[1] -eq 'error' -and $st[2] -eq 'pending' -and $script:StatusSteps.Steps[1].Detail -like 'No permission*') (($st -join ',') + ' / ' + $script:StatusSteps.Steps[1].Detail)
+                Test-Smoke 'license hint with the admin center path, Open and Check again offered' ($ui.BoxStepsNote.Visibility -eq 'Visible' -and $ui.TxtStepsNote.Text -like '*Windows data*I confirm that my tenant owns one of these licenses*' -and $ui.BtnStepsOpen.Visibility -eq 'Visible' -and $ui.BtnStepsAgain.Visibility -eq 'Visible' -and $script:StatusAdminUrl -like 'https://intune.microsoft.com/*') $ui.TxtStepsNote.Text
+                Test-Smoke 'step list rows: error icon and cause shown, progress bar determinate' ($ui.ListSteps.Children.Count -eq 5 -and $ui.BarSteps.Maximum -eq 5 -and $ui.BarSteps.Value -eq 1)
+                Save-SmokeShot '12b-status-setup-license'
+                Remove-Item $flag -Force
+                $ui.BtnStepsAgain.RaiseEvent((New-Object System.Windows.RoutedEventArgs ([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent)))
+                $s.Phase = 2; return $false
+            }
+            2 {
+                $st = @($script:StatusSteps.Steps | ForEach-Object { $_.State })
+                Test-Smoke 'success: all five steps done, bar full, script created in the fake tenant' (($st -join ',') -eq 'done,done,done,done,done' -and $ui.BarSteps.Value -eq 5 -and (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-health.json'))) ($st -join ',')
+                Test-Smoke 'running step showed a spinner and elapsed time while it ran (model keeps start times)' (@($script:StatusSteps.Steps | Where-Object { $_.Started }).Count -ge 3)
+                Test-Smoke 'item turns green after the setup' ($script:StatusScript.State -eq 'Present' -and (Get-ReadinessItems | Where-Object Key -eq 'status').State -eq 'ok') ($script:StatusScript | ConvertTo-Json -Compress)
+                Close-Dialog
+                # Package store: the same step list inside the store dialog; steps follow the job log
+                $m = New-StepModel @('A', 'B', 'C')
+                $fakeJob = @{ Log = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList)) }
+                foreach ($l in 'Step 1/3 done: ok', 'Step 2/3 running: working', 'Step 2/3 detail: SharePoint is still preparing the site ...') { [void]$fakeJob.Log.Add(@{ Level = 'Info'; Text = $l }) }
+                Sync-StepModel $m $fakeJob; Show-StepList $m $ui.ListStoreSteps $ui.BarStoreSteps
+                Test-Smoke 'store steps: done / running with detail / pending, bar = done of total' ($m.Steps[0].State -eq 'done' -and $m.Steps[1].State -eq 'running' -and $m.Steps[1].Detail -like 'SharePoint is still preparing*' -and $m.Steps[2].State -eq 'pending' -and $ui.BarStoreSteps.Value -eq 1 -and $ui.BarStoreSteps.Maximum -eq 3)
+                [void]$fakeJob.Log.Add(@{ Level = 'Info'; Text = 'Step 2/3 error: Der Remoteserver hat einen Fehler zurueckgegeben: (403) Verboten.' })
+                Sync-StepModel $m $fakeJob
+                Test-Smoke 'store steps: an error shows the plain cause' ($m.Steps[1].State -eq 'error' -and $m.Steps[1].Detail -like 'No permission*')
+                $true
+            }
+        } } }
     @{ Name = 'import dialog'; Phase = 0; Do = {
         param($s)
         switch ($s.Phase) {
@@ -1405,6 +1446,78 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Switch-Tenant 'contoso.onmicrosoft.com' '11111111-2222-3333-4444-555555555555'
         $script:TenantGuidLookup = $null
         $true } }
+    @{ Name = 'install summary card and assignment for all users'; Phase = 0; Do = {
+        param($s)
+        $dir = $env:LOCALAPPDATA
+        switch ($s.Phase) {
+            0 {
+                if (-not (Test-Idle)) { return $false }
+                Show-Page 'Tenant'
+                $row = @($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0]
+                $ui.LstTenant.SelectedItem = $row
+                Test-Smoke 'summary card: installed / failed / pending / not installed from the install summary, with time and a link to the Status page' ($ui.BoxTenantSummary.Visibility -eq 'Visible' -and $ui.TxtSumInstalled.Text -eq '12' -and $ui.TxtSumFailed.Text -eq '1' -and $ui.TxtSumPending.Text -eq '3' -and $ui.TxtSumNotInstalled.Text -eq '4' -and $ui.TxtSumInfo.Text -like 'From Intune*read*' -and $ui.BtnSumStatus.IsEnabled) "$($ui.TxtSumInstalled.Text)/$($ui.TxtSumFailed.Text)/$($ui.TxtSumPending.Text)/$($ui.TxtSumNotInstalled.Text) $($ui.TxtSumInfo.Text)"
+                # a failing call shows the mapped cause, not "-"
+                Set-Content (Join-Path $dir 'fake-summary-down.txt') 'x'
+                $script:DeviceCounts.Clear(); $script:CountsCacheSeconds = 0
+                Start-CountsTask
+                $s.Phase = 1; return $false
+            }
+            1 {
+                if (-not (Test-Idle)) { return $false }
+                Remove-Item (Join-Path $dir 'fake-summary-down.txt') -Force
+                $row = @($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0]
+                Test-Smoke 'summary failure: column shows the short cause, the card the mapped cause (no raw text, no "-")' ($row['Ok'] -eq 'No permission' -and $ui.TxtSumInfo.Text -like 'Could not read the counts: No permission*' -and $ui.TxtSumInfo.Text -notmatch 'Graph GET') "$($row['Ok']) / $($ui.TxtSumInfo.Text)"
+                $script:CountsCacheSeconds = 120
+                Start-CountsTask
+                $s.Phase = 2; return $false
+            }
+            2 {
+                if (-not (Test-Idle)) { return $false }
+                $app = Get-SelectedTenantApp
+                # the current state is read from the app's assignments (here: the fake has the all-users assignment of the deployment)
+                $script:AssignInfo.Remove($app.Id); Update-TenantAssign $app
+                $s.Phase = 3; return $false
+            }
+            3 {
+                if (-not (Test-Idle)) { return $false }
+                $app = Get-SelectedTenantApp
+                Test-Smoke 'assignment section shows the current state (none yet in the fake Graph), groups info present' ($ui.GbTenantAssign.Visibility -eq 'Visible' -and $ui.RbAsgNone.IsChecked -and $ui.TxtAsgInfo.Text -like '*all-users assignment*') $ui.TxtAsgInfo.Text
+                $script:AsgSeq = @('Required', 'Available', 'Uninstall', 'None'); $script:AsgIdx = 0; $script:AsgResults = @()
+                $script:ConfirmAsked = New-Object System.Collections.ArrayList
+                $ui.RbAsgRequired.IsChecked = $true
+                $s.Phase = 4; return $false
+            }
+            4 {
+                if (-not (Test-Idle)) { return $false }
+                $app = Get-SelectedTenantApp
+                $want = $script:AsgSeq[$script:AsgIdx]
+                $intent = @{ Required = 'required'; Available = 'available'; Uninstall = 'uninstall'; None = '' }[$want]
+                $row = @($script:TenantRowList | Where-Object { $_.Data.Id -eq $app.Id })[0]
+                $assigned = @{ Required = 'Required'; Available = 'Available'; Uninstall = 'Uninstall'; None = 'None' }[$want]
+                $info = $script:AssignInfo[$app.Id]
+                $steps = @($script:AssignModel.Steps | ForEach-Object { $_.State }) -join ','
+                $ok = ((-not $info.Intent -and $want -eq 'None') -or $info.Intent -eq $intent) -and $row['Assigned'] -eq $assigned -and $steps -eq 'done,done,done,done'
+                Test-Smoke "assignment $want for all users: applied through the job with its step list, Assigned column and panel updated at once" $ok "$($info.Intent) / $($row['Assigned']) / $steps"
+                if ($want -eq 'Uninstall') { Test-Smoke 'Uninstall asked for a confirmation: removes the app from all users'' devices' (@($script:ConfirmAsked | Where-Object { $_[0] -eq 'Uninstall for all users' -and $_[1] -like '*Removes the app from all users'' devices*' }).Count -eq 1) }
+                $script:AsgIdx++
+                if ($script:AsgIdx -lt $script:AsgSeq.Count) { (Get-AssignRadio ($script:AsgSeq[$script:AsgIdx]).ToLower()).IsChecked = $true; return $false }
+                # declined uninstall: nothing changes, the selection goes back
+                $script:ConfirmSmokeAnswer = $false
+                $ui.RbAsgRequired.IsChecked = $true
+                $s.Phase = 5; return $false
+            }
+            5 {
+                if (-not (Test-Idle)) { return $false }
+                $app = Get-SelectedTenantApp
+                $script:ConfirmAsked.Clear()
+                $ui.RbAsgUninstall.IsChecked = $true
+                Test-Smoke 'Uninstall declined: nothing applied, the control goes back to the real state' ($script:AssignInfo[$app.Id].Intent -eq 'required' -and $ui.RbAsgRequired.IsChecked -and @($script:ConfirmAsked).Count -eq 1 -and -not (Test-TaskRunning 'assign')) "$($script:AssignInfo[$app.Id].Intent)"
+                $script:ConfirmSmokeAnswer = $null
+                # release path follows the assignment: Available -> supersedence, Required -> in place (the log says which)
+                Test-Smoke 'a release path note is logged after a change' ((Get-SmokeLog) -match 'released through supersedence|released through in place')
+                $true
+            }
+        } } }
     @{ Name = 'buttons are not clipped (100%, 125%, 150%)'; Do = {
         function Find-Clipped($e, $list) {
             if ($e -is [System.Windows.Controls.Primitives.ButtonBase] -and $e.IsVisible -and $e.ActualWidth -gt 0 -and ((($e.ActualHeight + 0.5) -lt ($e.DesiredSize.Height - $e.Margin.Top - $e.Margin.Bottom)) -or (($e.ActualWidth + 0.5) -lt ($e.DesiredSize.Width - $e.Margin.Left - $e.Margin.Right)))) { [void]$list.Add("$($e.Name)|$($e.Content)|$([int]$e.ActualWidth)<$([int]$e.DesiredSize.Width)") }
@@ -1742,6 +1855,7 @@ $script:SmokeTimer.Add_Tick({
             return
         }
         $step = $script:SmokeSteps[0]
+        try { Set-Content (Join-Path $script:SmokeOut 'current-step.txt') "$($step.Name) phase=$($step.Phase)" } catch { }
         try { $done = & $step.Do $step }
         catch { Test-Smoke "step '$($step.Name)'" $false "$($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber)"; $done = $true }
         if ($done) { $script:SmokeSteps.RemoveAt(0) }

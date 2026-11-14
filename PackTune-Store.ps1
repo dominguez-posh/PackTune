@@ -78,7 +78,31 @@ function Get-PackTuneStoreSiteUrl {
     return "https://$HostName/sites/$Name"
 }
 
+$script:StoreSetupStepTitles = @('Sign in (administrator)', 'Create the Microsoft 365 group PackTune', 'Wait for the SharePoint site', 'Add members', 'Create the library', 'Grant PackTune access to the site', 'Check')
+$script:StoreStepNow = 0
+function Write-PackTuneStep {
+    <# One event of a multi-step job, as a readable log line: "Step 3/7 running: Wait for the SharePoint site". The interface turns these
+       lines into its step list (state running / done / error / detail); the activity log shows them as they are. #>
+    param([int]$Number, [int]$Total, [ValidateSet('running', 'done', 'error', 'detail')][string]$State, [string]$Text)
+    if ($State -in 'running') { $script:StoreStepNow = $Number }
+    Write-Host "Step $Number/$Total ${State}: $Text"
+}
 function Initialize-PackTuneStoreSite {
+    param(
+        [Parameter(Mandatory = $true)][string]$Token, [string]$ClientID = $script:Settings.ClientID, [string]$SiteName,
+        [string]$AdminGroup, [string]$Library = $script:Settings.StoreLibrary, [int]$PollMinutes = 6
+    )
+    # The steps are reported as they happen; an error is attached to the step that was running
+    $script:StoreStepNow = 1
+    Write-PackTuneStep 1 7 done 'Signed in as administrator'
+    try { Invoke-PackTuneStoreSiteSetup @PSBoundParameters }
+    catch {
+        $Cause = ($_.Exception.Message -replace '\s+', ' ').Trim()
+        Write-PackTuneStep ([Math]::Max(2, $script:StoreStepNow)) 7 error $Cause
+        throw
+    }
+}
+function Invoke-PackTuneStoreSiteSetup {
     <#
         One-time setup by an administrator (-Token: the setup sign-in with Sites.FullControl.All and Group.ReadWrite.All; the daily
         sign-in never has them): makes the standard site when it is missing, then the library, then gives PackTune's app registration
@@ -103,11 +127,16 @@ function Initialize-PackTuneStoreSite {
     $Url = "https://$HostName/sites/$SiteName"
     $Site = $null
     try { $Site = Invoke-PackTuneAdminGraph -Token $Token -Path "/sites/${HostName}:/sites/${SiteName}?`$select=id,webUrl,displayName" } catch { if ($_.Exception.Message -notmatch '404|not found|itemNotFound|ResourceNotFound') { throw } }
-    if ($Site.id) { [void]$Steps.Add("The site $Url exists already, it is used as it is") }
+    if ($Site.id) {
+        [void]$Steps.Add("The site $Url exists already, it is used as it is")
+        foreach ($N in 2, 3, 4) { Write-PackTuneStep $N 7 done "$($script:StoreSetupStepTitles[$N - 1]): not needed, the site exists already" }
+    }
     else {
+        Write-PackTuneStep 2 7 running $script:StoreSetupStepTitles[1]
         $Nick = $SiteName.ToLower()
         $Existing = @((Invoke-PackTuneAdminGraph -Token $Token -Path "/groups?`$filter=mailNickname eq '$Nick'&`$select=id,displayName,description").value) | Select-Object -First 1
         if ($Existing -and ([string]$Existing.description -notlike "*$($script:StoreGroupMarker)*")) {
+            Write-PackTuneStep 2 7 error "A group named '$($Existing.displayName)' exists in this tenant and was not made by PackTune."
             return [pscustomobject]@{ State = "Conflict"; SiteUrl = $Url; SiteName = $SiteName; FallbackName = $(if ($SiteName -ne $script:StoreFallbackName) { $script:StoreFallbackName } else { $null })
                 Steps = @($Steps); Warnings = @($Warnings); Message = "A group named '$($Existing.displayName)' (mail nickname $Nick) exists in this tenant and was not made by PackTune." }
         }
@@ -126,15 +155,20 @@ function Initialize-PackTuneStoreSite {
             try { [void](Invoke-PackTuneAdminGraph -Token $Token -Method PATCH -Path "/groups/$GroupId" -Body @{ hideFromAddressLists = $true; hideFromOutlookClients = $true }) }
             catch { [void]$Warnings.Add("The group could not be hidden from the address lists: $($_.Exception.Message)") }
         }
+        Write-PackTuneStep 2 7 done "Group ready"
+        Write-PackTuneStep 3 7 running "$($script:StoreSetupStepTitles[2]) (can take a few minutes)"
         # the site of the group is made in the background: poll with a growing pause
         $Deadline = (Get-Date).AddMinutes($PollMinutes); $Pause = 2
         while ($true) {
             try { $Site = Invoke-PackTuneAdminGraph -Token $Token -Path "/groups/$GroupId/sites/root?`$select=id,webUrl,displayName"; if ($Site.id) { break } } catch { }
             if ((Get-Date) -gt $Deadline) { throw "The site of the group was not ready after $PollMinutes minutes. Run Set up again in a few minutes; the group exists and is used." }
+            Write-PackTuneStep 3 7 detail "SharePoint is still preparing the site ..."
             Wait-PackTuneStore $Pause; $Pause = [Math]::Min(20, $Pause * 2)
         }
         if ($Site.webUrl) { $Url = ([string]$Site.webUrl).TrimEnd('/') }
         [void]$Steps.Add("The site is ready: $Url")
+        Write-PackTuneStep 3 7 done "The site is ready"
+        Write-PackTuneStep 4 7 running $script:StoreSetupStepTitles[3]
         if ($AdminGroup) {
             try {
                 $Other = if ($AdminGroup -match '^[0-9a-fA-F-]{36}$') { [pscustomobject]@{ id = $AdminGroup } } else { @((Invoke-PackTuneAdminGraph -Token $Token -Path "/groups?`$filter=displayName eq '$($AdminGroup.Replace("'", "''"))'&`$select=id,displayName").value) | Select-Object -First 1 }
@@ -145,16 +179,26 @@ function Initialize-PackTuneStoreSite {
             catch { [void]$Warnings.Add("The group '$AdminGroup' could not be added: $($_.Exception.Message) Add it in Microsoft 365 / Entra by hand.") }
         }
     }
+    if ($Site.id -and $Steps.Count -and $Steps[-1] -notlike "*Group '*") { }
+    Write-PackTuneStep 4 7 done "Members: you (owner)$(if ($AdminGroup) { " and the group '$AdminGroup'" })"
     # the library, then the access of the app registration
+    Write-PackTuneStep 5 7 running $script:StoreSetupStepTitles[4]
     $Drives = @((Invoke-PackTuneAdminGraph -Token $Token -Path "/sites/$($Site.id)/drives?`$select=id,name").value)
     if (-not (@($Drives | Where-Object { $_.name -eq $Library }))) {
         [void](Invoke-PackTuneAdminGraph -Token $Token -Method POST -Path "/sites/$($Site.id)/lists" -Body @{ displayName = $Library; list = @{ template = "documentLibrary" } })
         [void]$Steps.Add("Library '$Library' created")
     }
     else { [void]$Steps.Add("Library '$Library' exists already") }
+    Write-PackTuneStep 5 7 done "Library '$Library' is there"
+    Write-PackTuneStep 6 7 running $script:StoreSetupStepTitles[5]
     if ($ClientID -notmatch '^[0-9a-fA-F-]{36}$') { throw "The client ID of the app registration is not valid." }
     [void](Invoke-PackTuneAdminGraph -Token $Token -Method POST -Path "/sites/$($Site.id)/permissions" -Body @{ roles = @("write"); grantedToIdentities = @(@{ application = @{ id = $ClientID; displayName = "PackTune" } }) })
     [void]$Steps.Add("PackTune (app registration $ClientID) has write access to this one site")
+    Write-PackTuneStep 6 7 done "PackTune has write access to this one site"
+    Write-PackTuneStep 7 7 running $script:StoreSetupStepTitles[6]
+    $Check = @((Invoke-PackTuneAdminGraph -Token $Token -Path "/sites/$($Site.id)/drives?`$select=id,name").value | Where-Object { $_.name -eq $Library })
+    if (-not $Check.Count) { throw "The library '$Library' was not found after the setup." }
+    Write-PackTuneStep 7 7 done "Site, library and access checked"
     [pscustomobject]@{ State = "Ready"; SiteUrl = $Url; SiteName = $SiteName; FallbackName = $null; Steps = @($Steps); Warnings = @($Warnings); Message = "The package store is set up on $Url." }
 }#Creates the standard site, the library and the access (administrator, once)
 

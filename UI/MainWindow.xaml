@@ -626,6 +626,35 @@
                                                     <TextBlock x:Name="TxtTenantAppSub" Style="{StaticResource Hint}"/>
                                                 </StackPanel>
                                             </StackPanel>
+                                            <Border x:Name="BoxTenantSummary" Background="#F7F7F7" CornerRadius="8" Padding="14,10" Margin="0,16,0,0">
+                                                <StackPanel>
+                                                    <TextBlock Text="On devices" Style="{StaticResource FieldLabel}"/>
+                                                    <UniformGrid Columns="4" Margin="0,2,0,0">
+                                                        <StackPanel><TextBlock x:Name="TxtSumInstalled" FontSize="20" FontWeight="SemiBold" Text="-"/><TextBlock Text="installed" Style="{StaticResource Hint}"/></StackPanel>
+                                                        <StackPanel><TextBlock x:Name="TxtSumFailed" FontSize="20" FontWeight="SemiBold" Text="-"/><TextBlock Text="failed" Style="{StaticResource Hint}"/></StackPanel>
+                                                        <StackPanel><TextBlock x:Name="TxtSumPending" FontSize="20" FontWeight="SemiBold" Text="-"/><TextBlock Text="pending" Style="{StaticResource Hint}"/></StackPanel>
+                                                        <StackPanel><TextBlock x:Name="TxtSumNotInstalled" FontSize="20" FontWeight="SemiBold" Text="-"/><TextBlock Text="not installed" Style="{StaticResource Hint}" TextWrapping="Wrap"/></StackPanel>
+                                                    </UniformGrid>
+                                                    <TextBlock x:Name="TxtSumInfo" Style="{StaticResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                                                    <Button x:Name="BtnSumStatus" Content="Per device details ..." HorizontalAlignment="Left" Margin="0,8,0,0" Padding="14,5"/>
+                                                </StackPanel>
+                                            </Border>
+                                            <StackPanel x:Name="GbTenantAssign" Margin="0,18,0,0">
+                                                <TextBlock Text="Assignment (all users)" Style="{StaticResource FieldLabel}"/>
+                                                <Border x:Name="BoxAssignSeg" Style="{StaticResource Segmented}" HorizontalAlignment="Left" AutomationProperties.Name="Assignment for all users">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <RadioButton x:Name="RbAsgRequired" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="Install" ToolTip="Required: installed on all users' devices"/>
+                                                        <RadioButton x:Name="RbAsgAvailable" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="Company Portal" ToolTip="Available: users install it themselves from the Company Portal"/>
+                                                        <RadioButton x:Name="RbAsgUninstall" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="Uninstall" ToolTip="Removes the app from all users' devices"/>
+                                                        <RadioButton x:Name="RbAsgNone" GroupName="TenantAssign" Style="{StaticResource SegmentItem}" Content="None" ToolTip="Removes the all-users assignment"/>
+                                                    </StackPanel>
+                                                </Border>
+                                                <TextBlock x:Name="TxtAsgInfo" Style="{StaticResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                                                <StackPanel x:Name="PanelAsgSteps" Visibility="Collapsed" Margin="0,8,0,0">
+                                                    <ProgressBar x:Name="BarAsgSteps" Height="6" Minimum="0" Maximum="4" Value="0"/>
+                                                    <StackPanel x:Name="ListAsgSteps" Margin="0,10,0,0"/>
+                                                </StackPanel>
+                                            </StackPanel>
                                             <StackPanel x:Name="GbTenantPolicy" Margin="0,18,0,0">
                                                 <TextBlock Text="Version on devices" Style="{StaticResource FieldLabel}"/>
                                                 <ComboBox x:Name="CmbTenantVersion" HorizontalAlignment="Stretch" AutomationProperties.Name="Version on devices"/>
@@ -1140,6 +1169,33 @@
                 </Grid>
             </Border>
 
+            <!-- Steps of a longer setup (status report): one step-list control for every multi-step job -->
+            <Border x:Name="DlgSteps" Style="{StaticResource Dialog}" Width="640" Visibility="Collapsed">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                    <StackPanel Margin="28,22,28,10">
+                        <TextBlock x:Name="TxtStepsTitle" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                        <TextBlock x:Name="TxtStepsSub" Style="{StaticResource Subtitle}" TextWrapping="Wrap"/>
+                    </StackPanel>
+                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="420">
+                        <StackPanel Margin="28,0,28,8">
+                            <ProgressBar x:Name="BarSteps" Height="6" Minimum="0" Maximum="5" Value="0"/>
+                            <StackPanel x:Name="ListSteps" Margin="0,12,0,0"/>
+                            <Border x:Name="BoxStepsNote" Visibility="Collapsed" Background="{StaticResource WarningBg}" CornerRadius="8" Padding="12,10" Margin="0,12,0,0">
+                                <TextBlock x:Name="TxtStepsNote" TextWrapping="Wrap" Foreground="{StaticResource Warning}" FontSize="13"/>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+                    <Border Grid.Row="2" Style="{StaticResource DialogFooter}" Padding="28,14">
+                        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                            <Button x:Name="BtnStepsOpen" Content="Open the admin center page" Visibility="Collapsed" Margin="0,0,8,0" Padding="16,8"/>
+                            <Button x:Name="BtnStepsAgain" Content="Check again" Visibility="Collapsed" Margin="0,0,8,0" Padding="16,8" Style="{StaticResource PrimaryButton}"/>
+                            <Button x:Name="BtnStepsClose" Content="Close" Padding="16,8"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
+
             <!-- Package store -->
             <Border x:Name="DlgStore" Style="{StaticResource Dialog}" Width="720" Visibility="Collapsed">
                 <Grid>
@@ -1159,6 +1215,11 @@
                             <WrapPanel Margin="0,8,0,0">
                                 <Button x:Name="BtnStoreSetup" Content="Set up the PackTune site (administrator) ..." Margin="0,0,8,6"/>
                             </WrapPanel>
+                            <StackPanel x:Name="PanelStoreSteps" Visibility="Collapsed" Margin="0,8,0,0">
+                                <ProgressBar x:Name="BarStoreSteps" Height="6" Minimum="0" Maximum="7" Value="0"/>
+                                <StackPanel x:Name="ListStoreSteps" Margin="0,10,0,0"/>
+                                <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="You can close this window: the setup continues in Activity with the same steps."/>
+                            </StackPanel>
                             <Expander Header="Advanced" Margin="0,10,0,0" x:Name="ExpStoreAdvanced">
                                 <StackPanel Margin="0,8,0,0">
                                     <TextBlock Text="Address of another site (leave empty for the standard site)" Style="{StaticResource FieldLabel}" Margin="0,0,0,4"/>
