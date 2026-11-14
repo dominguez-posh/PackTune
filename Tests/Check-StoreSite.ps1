@@ -201,6 +201,20 @@ Test-Check 'check: a network error is its own short cause' ((Get-PackTuneStoreSt
 $script:GraphError = 'The operation has timed out.'
 Test-Check 'check: a timeout is its own short cause' ((Get-PackTuneStoreState).Message -like '*did not answer in time*')
 
+
+# --- the token for the store: the cause of a failure decides the text (no network is no missing grant)
+$Global:AccessToken = [pscustomobject]@{ access_token = 'x.e30.y'; RefreshToken = 'r'; ClientID = '11111111-2222-3333-4444-555555555555'; ExpiresOn = (Get-Date).AddHours(1).ToUniversalTime() }
+$Global:AccessTokenTenantID = 'contoso.onmicrosoft.com'
+function Assert-PackTuneConnection { }
+function Update-PackTuneToken { }
+$script:StoreToken = $null
+function Invoke-PackTuneTokenRequest { throw "Der Remotename konnte nicht aufgel$([char]0xF6)st werden: 'login.microsoftonline.com'" }
+$m = ''; try { [void](Get-PackTuneStoreToken) } catch { $m = $_.Exception.Message }
+Test-Check 'store token: a DNS failure says no connection (network), not a missing grant' ($m -like 'No connection to Microsoft (network)*' -and $m -notlike '*does not hold Sites.Selected*') $m
+function Invoke-PackTuneTokenRequest { throw 'Response status code does not indicate success: 403 (Forbidden). AADSTS65001: consent' }
+$m = ''; try { [void](Get-PackTuneStoreToken) } catch { $m = $_.Exception.Message }
+Test-Check 'store token: 403 / missing consent says the grant is missing' ($m -like 'No access to the package store*Sites.Selected*') $m
+Remove-Item function:Invoke-PackTuneTokenRequest
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed) { "$script:Failed check(s) failed."; exit 1 }
 'All checks passed.'
