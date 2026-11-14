@@ -29,11 +29,11 @@ foreach ($bad in 'a/b', '..', 'a b', '-x', 'x;y') { $threw = $false; try { $null
 Test-Check 'store path: names are encoded and joined' ((ConvertTo-PackTuneStorePath @('app-1', '1.0.0', 'package.msix')) -eq 'app-1/1.0.0/package.msix')
 
 # --- state
-$empty = Get-PackTuneStoreState -SiteUrl ''
-Test-Check 'state: no address -> NotConfigured' ($empty.State -eq 'NotConfigured')
+$empty = Get-PackTuneStoreState -SiteUrl 'http://bad.example/x'
+Test-Check 'state: an invalid address -> NotConfigured' ($empty.State -eq 'NotConfigured')
 $script:SiteReachable = $false
 $denied = Get-PackTuneStoreState
-Test-Check 'state: site not readable (no access granted) -> NoAccess with the way out' (($denied.State -eq 'NoAccess') -and ($denied.Message -like '*Grant access*'))
+Test-Check 'state: site not readable (no access granted) -> NoAccess with the way out' (($denied.State -eq 'NoAccess') -and ($denied.Message -like '*ask an administrator to add you to the PackTune site*'))
 $script:SiteReachable = $true
 $noLib = Get-PackTuneStoreState
 Test-Check 'state: site fine, library missing -> NoLibrary' ($noLib.State -eq 'NoLibrary')

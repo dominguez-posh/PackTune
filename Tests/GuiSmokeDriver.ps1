@@ -783,14 +783,17 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             # package store dialog
             $script:ExportTarget = $null
             Show-StoreDialog
-            Test-Smoke 'package store dialog opens with the library name' ($ui.DlgStore.Visibility -eq 'Visible' -and $ui.TxtStoreLibrary.Text -eq 'PackTune Packages') ''
+            Test-Smoke 'package store dialog opens with the library name, the standard site explained, the site address under Advanced and empty' ($ui.DlgStore.Visibility -eq 'Visible' -and $ui.TxtStoreLibrary.Text -eq 'PackTune Packages' -and -not $ui.TxtStoreSite.Text -and $ui.ExpStoreAdvanced -and $ui.BtnStoreSetup.IsEnabled) ''
+            Start-StoreCheck; Update-StoreDialog
+            Test-Smoke 'standard site not found: status says an administrator sets it up once, nothing was typed' ($script:StoreState.State -eq 'Missing' -and $ui.TxtStoreStatus.Text -like '*sets it up once*' -and -not $script:Settings.StoreSiteUrl) ($script:StoreState | ConvertTo-Json -Compress)
+            Test-Smoke 'the setup is stated: Set up button, group of the store optional' ($ui.BtnStoreSetup.Content -like 'Set up the PackTune site*' -and $ui.TxtStoreAdminGroup)
             $ui.TxtStoreSite.Text = 'http://evil.example/x'
             try { & $script:ClickActions[$ui.BtnStoreSave] } catch { }
             Test-Smoke 'an invalid site address is not saved' (-not $script:Settings.StoreSiteUrl) $script:Settings.StoreSiteUrl
             $ui.TxtStoreSite.Text = 'https://contoso.sharepoint.com/sites/PackTune'
             & $script:ClickActions[$ui.BtnStoreSave]
             Test-Smoke 'a valid site address is saved' ($script:Settings.StoreSiteUrl -eq 'https://contoso.sharepoint.com/sites/PackTune' -and (Get-Content $script:SettingsPath -Raw) -match 'sharepoint.com/sites/PackTune') ''
-            Test-Smoke 'the store item on the Start page asks for access' ($script:StoreState -and $script:StoreState.State -ne 'Ready' -and $ui.BtnStoreGrant.IsEnabled) ($script:StoreState | ConvertTo-Json -Compress)
+            Test-Smoke 'the store item on the Start page offers the setup' ($script:StoreState -and $script:StoreState.State -ne 'Ready' -and $ui.BtnStoreGrant.IsEnabled) ($script:StoreState | ConvertTo-Json -Compress)
             Save-SmokeShot '39-package-store'
             & $script:ClickActions[$ui.BtnStoreClose]
             Show-Page 'Start'

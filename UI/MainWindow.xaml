@@ -1141,19 +1141,29 @@
                         <TextBlock Text="Package store" FontSize="20" FontWeight="SemiBold"/>
                         <TextBlock Style="{StaticResource Subtitle}" TextWrapping="Wrap" Text="Intune cannot give packages back, so every version of a custom application is kept in a document library of a private SharePoint site in your tenant: the package, the original installer files, the certificate and a manifest with the SHA256 of everything. That is what makes updating and editing from another PC possible."/>
                     </StackPanel>
-                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="400">
+                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="440">
                         <StackPanel Margin="28,0,28,8">
-                            <TextBlock Text="1. Create a private SharePoint site (team or communication site), members: only the administrators of Intune apps. Whoever can write there can replace an installer that becomes an app for all devices." Style="{StaticResource Hint}" TextWrapping="Wrap"/>
-                            <TextBlock Text="2. Address of the site" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
-                            <TextBox x:Name="TxtStoreSite" AutomationProperties.Name="SharePoint site address" ToolTip="https://contoso.sharepoint.com/sites/PackTune"/>
-                            <TextBlock Text="Document library" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
-                            <TextBox x:Name="TxtStoreLibrary" AutomationProperties.Name="Document library"/>
-                            <TextBlock Text="3. An administrator grants PackTune access to this one site (role write, or manage when the library has to be created). The sign-in needs Sites.FullControl.All and PackTune uses it for this call only; daily work uses Sites.Selected. The consent stays in the tenant (Enterprise applications, Microsoft Graph Command Line Tools, Permissions): revoke it there when it is not needed any more." Style="{StaticResource Hint}" TextWrapping="Wrap" Margin="0,12,0,0"/>
+                            <TextBlock x:Name="TxtStoreStatus" TextWrapping="Wrap" FontWeight="SemiBold"/>
+                            <TextBlock Text="Every tenant uses the same place, so other Intune administrators find the store by themselves: the private SharePoint site PackTune (https://&lt;tenant&gt;.sharepoint.com/sites/PackTune) with the library PackTune Packages. Whoever can write there can replace an installer that becomes an app for all devices, so only Intune administrators belong into the site." TextWrapping="Wrap" Margin="0,10,0,0" Foreground="{StaticResource Text2}"/>
+                            <TextBlock Text="Set up (once, an administrator)" Style="{StaticResource FieldLabel}" Margin="0,16,0,4"/>
+                            <TextBlock Text="Makes the site when it is missing: a private Microsoft 365 group PackTune (hidden in Outlook, no welcome mail, you as owner), its site, the library, and gives PackTune's app registration write access to that one site. The sign-in asks for Sites.FullControl.All and Group.ReadWrite.All through Microsoft's app 'Microsoft Graph Command Line Tools'; PackTune uses them for this setup only, never for daily work. The consent stays in the tenant afterwards (the README says how to remove it)." TextWrapping="Wrap" Foreground="{StaticResource Text2}"/>
+                            <TextBlock Text="Group that may use the store (optional: name or ID of an Entra group, for example your Intune administrators)" Style="{StaticResource FieldLabel}" Margin="0,10,0,4" TextWrapping="Wrap"/>
+                            <TextBox x:Name="TxtStoreAdminGroup" AutomationProperties.Name="Entra group of the store"/>
                             <WrapPanel Margin="0,8,0,0">
-                                <Button x:Name="BtnStoreGrant" Content="Grant access (administrator) ..." Margin="0,0,8,6"/>
-                                <Button x:Name="BtnStoreCreate" Content="Create library" Margin="0,0,8,6"/>
+                                <Button x:Name="BtnStoreSetup" Content="Set up the PackTune site (administrator) ..." Margin="0,0,8,6"/>
                             </WrapPanel>
-                            <TextBlock x:Name="TxtStoreStatus" TextWrapping="Wrap" Margin="0,8,0,0"/>
+                            <Expander Header="Advanced" Margin="0,10,0,0" x:Name="ExpStoreAdvanced">
+                                <StackPanel Margin="0,8,0,0">
+                                    <TextBlock Text="Address of another site (leave empty for the standard site)" Style="{StaticResource FieldLabel}" Margin="0,0,0,4"/>
+                                    <TextBox x:Name="TxtStoreSite" AutomationProperties.Name="SharePoint site address" ToolTip="https://contoso.sharepoint.com/sites/PackTune"/>
+                                    <TextBlock Text="Document library" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
+                                    <TextBox x:Name="TxtStoreLibrary" AutomationProperties.Name="Document library"/>
+                                    <WrapPanel Margin="0,8,0,0">
+                                        <Button x:Name="BtnStoreGrant" Content="Grant access only (administrator) ..." Margin="0,0,8,6"/>
+                                        <Button x:Name="BtnStoreCreate" Content="Create library" Margin="0,0,8,6"/>
+                                    </WrapPanel>
+                                </StackPanel>
+                            </Expander>
                         </StackPanel>
                     </ScrollViewer>
                     <Border Grid.Row="2" Style="{StaticResource DialogFooter}" Padding="28,14">

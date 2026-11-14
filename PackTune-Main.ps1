@@ -87,7 +87,10 @@ $script:DefaultSettings = [ordered]@{
     # New-ChocoSchedule, e.g. {"OnlyOnMains":true,"WindowFrom":"12:00"}; empty = the built-in defaults (like before)
     UpdateSchedule        = ""
     # Package store of custom applications: the private SharePoint site and its document library
+    # Advanced override of the package store site; empty = the standard site https://<tenant>.sharepoint.com/sites/<StoreSiteName>
     StoreSiteUrl          = ""
+    # Name of the standard site: PackTune, or PackTune-Packages after a conflict with something that exists already
+    StoreSiteName         = "PackTune"
     StoreLibrary          = "PackTune Packages"
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
@@ -154,6 +157,7 @@ function Save-PackTuneSettings {
     if ($Clean.MetadataFeed -notmatch '^https?://') { throw "The metadata feed must be an http(s) URL" }
     Assert-ChocoPackageSource $Clean.PackageSource
     if ($Clean.StoreSiteUrl -and -not (Test-PackTuneStoreSiteUrl $Clean.StoreSiteUrl)) { throw "The SharePoint site must look like https://<tenant>.sharepoint.com/sites/<name>" }
+    if ($Clean.StoreSiteName -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,40}$') { throw "The name of the site may contain letters, digits and hyphens" }
     if ($Clean.StoreLibrary -notmatch '^[A-Za-z0-9][A-Za-z0-9 ._-]{0,60}$') { throw "The name of the document library may contain letters, digits, spaces, . _ -" }
     # The current pair is remembered for later tenant switches
     $Map = ConvertFrom-TenantClients $Clean.TenantClients

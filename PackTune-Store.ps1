@@ -8,7 +8,7 @@
                                               signing.cer | documentation.zip | manifest.json (written last)
 
     Access: Microsoft Graph with the delegated scope Sites.Selected. It grants nothing alone: an administrator grants the
-    app registration access to that one site once (Grant-PackTuneStoreAccess, needs Sites.FullControl.All during that
+    app registration access to that one site once (Grant-PackTuneStoreAccess, needs Sites.FullControl.All and, for making the site, Group.ReadWrite.All during that
     setup only). Whoever can write to the library can replace an installer that becomes an app for all devices, so
     Intune is the trust anchor: the notes of every custom app carry the full SHA256 of the manifest, and an export or an
     update checks every file against the manifest and the manifest against the notes.
@@ -24,9 +24,141 @@ $script:StoreChunk = 327680 * 32
 $script:StoreSegment = '^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$'
 $script:StoreFileNames = "package.intunewin", "package.msix", "installer.zip", "recipe.json", "signing.cer", "documentation.zip"
 # Shown before and after the one-time site grant (interface, command line, README)
-$script:StoreGrantConsentNote = "The consent for Sites.FullControl.All that the grant sign-in gives Microsoft's app 'Microsoft Graph Command Line Tools' stays in the tenant afterwards; PackTune uses it for the grant only. Remove it when it is not needed any more: Entra admin center > Enterprise applications > Microsoft Graph Command Line Tools > Permissions (Admin consent and User consent) > Revoke, or with Microsoft Graph PowerShell remove its oauth2PermissionGrant (Remove-MgOauth2PermissionGrant) or take Sites.FullControl.All out of its scope (Update-MgOauth2PermissionGrant)."
+$script:StoreGrantConsentNote = "The consents for Sites.FullControl.All and Group.ReadWrite.All (the second one only for creating the site) that the setup sign-in gives Microsoft's app 'Microsoft Graph Command Line Tools' stays in the tenant afterwards; PackTune uses it for the grant only. Remove it when it is not needed any more: Entra admin center > Enterprise applications > Microsoft Graph Command Line Tools > Permissions (Admin consent and User consent) > Revoke, or with Microsoft Graph PowerShell remove its oauth2PermissionGrant (Remove-MgOauth2PermissionGrant) or take these two permissions out of its scope (Update-MgOauth2PermissionGrant)."
 
 #region settings and state
+
+#region the standard site (discovery and setup)
+
+$script:StoreStandardName = "PackTune"
+$script:StoreFallbackName = "PackTune-Packages"
+$script:StoreGroupMarker = "PackTune package store"
+$script:StoreHost = $null
+
+function Invoke-PackTuneAdminGraph {
+    <# One Graph request with the token of the administrator's setup sign-in (not the daily token). Replaceable: the checks use a fake. #>
+    param([Parameter(Mandatory = $true)][string]$Token, [string]$Method = "GET", [Parameter(Mandatory = $true)][string]$Path, $Body)
+    $Request = @{ Method = $Method; Uri = "$($script:StoreGraph)$Path"; Headers = @{ Authorization = "Bearer $Token" }; ErrorAction = "Stop" }
+    if ($null -ne $Body) { $Request.Body = ($Body | ConvertTo-Json -Depth 8 -Compress); $Request.ContentType = "application/json" }
+    try { return (Invoke-RestMethod @Request) }
+    catch {
+        $Code = 0; try { $Code = [int]$_.Exception.Response.StatusCode } catch { }
+        $Detail = $null; try { $Detail = ($_.ErrorDetails.Message | ConvertFrom-Json).error.message } catch { }
+        throw "Graph $Method $Path failed$(if ($Code) { " ($Code)" }): $(if ($Detail) { $Detail } else { $_.Exception.Message })"
+    }
+}
+
+function Wait-PackTuneStore([int]$Seconds) { Start-Sleep -Seconds $Seconds }
+
+function Get-PackTuneStoreHost {
+    <#
+        The SharePoint host of the tenant (<initial domain>.sharepoint.com): from the tenant setting when it is the initial domain,
+        else from the verified domains of the organization (the one marked initial). $null when it cannot be found.
+    #>
+    if ($script:StoreHost) { return $script:StoreHost }
+    $Tenant = [string]$script:Settings.TenantID
+    if ($Tenant -match '^([A-Za-z0-9-]+)\.onmicrosoft\.com$') { $script:StoreHost = "$($Matches[1].ToLower()).sharepoint.com"; return $script:StoreHost }
+    try {
+        Assert-PackTuneConnection
+        $Org = Invoke-RestMethod -Uri "$($script:StoreGraph)/organization?`$select=verifiedDomains" -Headers @{ Authorization = "Bearer $($Global:AccessToken.access_token)" } -ErrorAction Stop
+        $Initial = @(@($Org.value).verifiedDomains | Where-Object { $_.isInitial }) | Select-Object -First 1
+        if ($Initial.name -match '^([A-Za-z0-9-]+)\.onmicrosoft\.com$') { $script:StoreHost = "$($Matches[1].ToLower()).sharepoint.com" }
+    }
+    catch { }
+    return $script:StoreHost
+}
+
+function Get-PackTuneStoreSiteUrl {
+    # The site of the store: the address from the advanced settings when there is one, else the standard site of the tenant
+    # (https://<tenant>.sharepoint.com/sites/PackTune, or the fallback name that was chosen after a conflict). $null when the host is unknown.
+    if ($script:Settings.StoreSiteUrl) { return [string]$script:Settings.StoreSiteUrl }
+    $Name = if ($script:Settings.StoreSiteName) { [string]$script:Settings.StoreSiteName } else { $script:StoreStandardName }
+    $HostName = Get-PackTuneStoreHost
+    if (-not $HostName) { return $null }
+    return "https://$HostName/sites/$Name"
+}
+
+function Initialize-PackTuneStoreSite {
+    <#
+        One-time setup by an administrator (-Token: the setup sign-in with Sites.FullControl.All and Group.ReadWrite.All; the daily
+        sign-in never has them): makes the standard site when it is missing, then the library, then gives PackTune's app registration
+        write access to that one site.
+          1. the site https://<tenant>.sharepoint.com/sites/<name> exists: it is used as it is
+          2. otherwise a private Microsoft 365 group "PackTune" (hidden in Outlook, no welcome mail, hidden from address lists when the
+             tenant allows it) with the signing administrator as owner and, optionally, an Entra group as member; its site is awaited
+             (polled with a growing pause)
+          3. the library, 4. the grant (role write)
+        A group with that mail nickname that PackTune did not create is a conflict: nothing is changed, State is Conflict and
+        FallbackName says which name to ask for (PackTune-Packages). Returns State (Ready, Conflict), SiteUrl, SiteName, Steps and Warnings.
+    #>
+    param(
+        [Parameter(Mandatory = $true)][string]$Token, [string]$ClientID = $script:Settings.ClientID, [string]$SiteName,
+        [string]$AdminGroup, [string]$Library = $script:Settings.StoreLibrary, [int]$PollMinutes = 6
+    )
+    if (-not $SiteName) { $SiteName = if ($script:Settings.StoreSiteName) { [string]$script:Settings.StoreSiteName } else { $script:StoreStandardName } }
+    if ($SiteName -notmatch '^[A-Za-z0-9][A-Za-z0-9-]{0,40}$') { throw "The site name '$SiteName' is not valid (letters, digits, hyphen)." }
+    $HostName = Get-PackTuneStoreHost
+    if (-not $HostName) { throw "The SharePoint address of the tenant could not be found. Enter the address of the site under Advanced instead." }
+    $Steps = New-Object System.Collections.ArrayList; $Warnings = New-Object System.Collections.ArrayList
+    $Url = "https://$HostName/sites/$SiteName"
+    $Site = $null
+    try { $Site = Invoke-PackTuneAdminGraph -Token $Token -Path "/sites/${HostName}:/sites/${SiteName}?`$select=id,webUrl,displayName" } catch { if ($_.Exception.Message -notmatch '404|not found|itemNotFound|ResourceNotFound') { throw } }
+    if ($Site.id) { [void]$Steps.Add("The site $Url exists already, it is used as it is") }
+    else {
+        $Nick = $SiteName.ToLower()
+        $Existing = @((Invoke-PackTuneAdminGraph -Token $Token -Path "/groups?`$filter=mailNickname eq '$Nick'&`$select=id,displayName,description").value) | Select-Object -First 1
+        if ($Existing -and ([string]$Existing.description -notlike "*$($script:StoreGroupMarker)*")) {
+            return [pscustomobject]@{ State = "Conflict"; SiteUrl = $Url; SiteName = $SiteName; FallbackName = $(if ($SiteName -ne $script:StoreFallbackName) { $script:StoreFallbackName } else { $null })
+                Steps = @($Steps); Warnings = @($Warnings); Message = "A group named '$($Existing.displayName)' (mail nickname $Nick) exists in this tenant and was not made by PackTune." }
+        }
+        $GroupId = $null
+        if ($Existing) { $GroupId = [string]$Existing.id; [void]$Steps.Add("The PackTune group exists already (no site yet), it is used") }
+        else {
+            $Me = Invoke-PackTuneAdminGraph -Token $Token -Path "/me?`$select=id,displayName"
+            $Group = Invoke-PackTuneAdminGraph -Token $Token -Method POST -Path "/groups" -Body @{
+                displayName = $(if ($SiteName -eq $script:StoreStandardName) { "PackTune" } else { $SiteName.Replace("-", " ") }); description = "$($script:StoreGroupMarker): packages of the custom applications. Only Intune administrators belong here."
+                mailNickname = $Nick; mailEnabled = $true; securityEnabled = $false; groupTypes = @("Unified"); visibility = "Private"
+                resourceBehaviorOptions = @("HideGroupInOutlook", "WelcomeEmailDisabled")
+                "owners@odata.bind" = @("$($script:StoreGraph)/users/$($Me.id)"); "members@odata.bind" = @("$($script:StoreGraph)/users/$($Me.id)")
+            }
+            $GroupId = [string]$Group.id
+            [void]$Steps.Add("Private Microsoft 365 group '$($Group.displayName)' created ($GroupId), owner: $($Me.displayName)")
+            try { [void](Invoke-PackTuneAdminGraph -Token $Token -Method PATCH -Path "/groups/$GroupId" -Body @{ hideFromAddressLists = $true; hideFromOutlookClients = $true }) }
+            catch { [void]$Warnings.Add("The group could not be hidden from the address lists: $($_.Exception.Message)") }
+        }
+        # the site of the group is made in the background: poll with a growing pause
+        $Deadline = (Get-Date).AddMinutes($PollMinutes); $Pause = 2
+        while ($true) {
+            try { $Site = Invoke-PackTuneAdminGraph -Token $Token -Path "/groups/$GroupId/sites/root?`$select=id,webUrl,displayName"; if ($Site.id) { break } } catch { }
+            if ((Get-Date) -gt $Deadline) { throw "The site of the group was not ready after $PollMinutes minutes. Run Set up again in a few minutes; the group exists and is used." }
+            Wait-PackTuneStore $Pause; $Pause = [Math]::Min(20, $Pause * 2)
+        }
+        if ($Site.webUrl) { $Url = ([string]$Site.webUrl).TrimEnd('/') }
+        [void]$Steps.Add("The site is ready: $Url")
+        if ($AdminGroup) {
+            try {
+                $Other = if ($AdminGroup -match '^[0-9a-fA-F-]{36}$') { [pscustomobject]@{ id = $AdminGroup } } else { @((Invoke-PackTuneAdminGraph -Token $Token -Path "/groups?`$filter=displayName eq '$($AdminGroup.Replace("'", "''"))'&`$select=id,displayName").value) | Select-Object -First 1 }
+                if (-not $Other.id) { throw "no group named '$AdminGroup'" }
+                [void](Invoke-PackTuneAdminGraph -Token $Token -Method POST -Path "/groups/$GroupId/members/`$ref" -Body @{ "@odata.id" = "$($script:StoreGraph)/groups/$($Other.id)" })
+                [void]$Steps.Add("Group '$AdminGroup' added as member")
+            }
+            catch { [void]$Warnings.Add("The group '$AdminGroup' could not be added: $($_.Exception.Message) Add it in Microsoft 365 / Entra by hand.") }
+        }
+    }
+    # the library, then the access of the app registration
+    $Drives = @((Invoke-PackTuneAdminGraph -Token $Token -Path "/sites/$($Site.id)/drives?`$select=id,name").value)
+    if (-not (@($Drives | Where-Object { $_.name -eq $Library }))) {
+        [void](Invoke-PackTuneAdminGraph -Token $Token -Method POST -Path "/sites/$($Site.id)/lists" -Body @{ displayName = $Library; list = @{ template = "documentLibrary" } })
+        [void]$Steps.Add("Library '$Library' created")
+    }
+    else { [void]$Steps.Add("Library '$Library' exists already") }
+    if ($ClientID -notmatch '^[0-9a-fA-F-]{36}$') { throw "The client ID of the app registration is not valid." }
+    [void](Invoke-PackTuneAdminGraph -Token $Token -Method POST -Path "/sites/$($Site.id)/permissions" -Body @{ roles = @("write"); grantedToIdentities = @(@{ application = @{ id = $ClientID; displayName = "PackTune" } }) })
+    [void]$Steps.Add("PackTune (app registration $ClientID) has write access to this one site")
+    [pscustomobject]@{ State = "Ready"; SiteUrl = $Url; SiteName = $SiteName; FallbackName = $null; Steps = @($Steps); Warnings = @($Warnings); Message = "The package store is set up on $Url." }
+}#Creates the standard site, the library and the access (administrator, once)
+
+#endregion
 
 function Test-PackTuneStoreSiteUrl {
     # https://<tenant>.sharepoint.com/sites/<name> (or /teams/<name>)
@@ -108,8 +240,8 @@ function Resolve-PackTuneStore {
         Site and library of the store: Site (id, name, url), Drive (id) or $null when the library does not exist.
         Throws with a clear message when the site cannot be reached (wrong address, no access granted yet).
     #>
-    param([string]$SiteUrl = $script:Settings.StoreSiteUrl, [string]$Library = $script:Settings.StoreLibrary)
-    if (-not (Test-PackTuneStoreSiteUrl $SiteUrl)) { throw "The address of the SharePoint site is not set or not valid (https://<tenant>.sharepoint.com/sites/<name>)." }
+    param([string]$SiteUrl = (Get-PackTuneStoreSiteUrl), [string]$Library = $script:Settings.StoreLibrary)
+    if (-not (Test-PackTuneStoreSiteUrl $SiteUrl)) { throw "The address of the SharePoint site is not known or not valid (https://<tenant>.sharepoint.com/sites/<name>)." }
     $Uri = [uri]$SiteUrl
     $Site = Invoke-PackTuneStoreGraph -Path "/sites/$($Uri.Host):$($Uri.AbsolutePath.TrimEnd('/'))?`$select=id,displayName,webUrl"
     if (-not $Site.id) { throw "The site $SiteUrl was not found." }
@@ -120,21 +252,27 @@ function Resolve-PackTuneStore {
 
 function Get-PackTuneStoreState {
     <#
-        What the readiness list shows: State is NotConfigured (no site address), NoAccess (the site cannot be read: access not
-        granted yet or wrong address), NoLibrary (site fine, library missing), Ready. Message says what to do.
+        What the readiness list shows, found without any input: the standard site https://<tenant>.sharepoint.com/sites/PackTune (or the
+        address from the advanced settings). State is NotConfigured (the SharePoint address of the tenant is unknown), Missing (no such
+        site: an administrator sets it up once), NoAccess (the site exists, this account or PackTune has no access: ask an administrator to
+        add you), NoLibrary (site fine, library missing), Ready. Message says what to do.
     #>
-    param([string]$SiteUrl = $script:Settings.StoreSiteUrl, [string]$Library = $script:Settings.StoreLibrary)
-    if (-not $SiteUrl) { return [pscustomobject]@{ State = "NotConfigured"; Message = "Enter the address of the SharePoint site that keeps the packages."; Store = $null } }
-    if (-not (Test-PackTuneStoreSiteUrl $SiteUrl)) { return [pscustomobject]@{ State = "NotConfigured"; Message = "The address must look like https://<tenant>.sharepoint.com/sites/<name>."; Store = $null } }
+    param([string]$SiteUrl, [string]$Library = $script:Settings.StoreLibrary)
+    if (-not $SiteUrl) { $SiteUrl = Get-PackTuneStoreSiteUrl }
+    if (-not $SiteUrl) { return [pscustomobject]@{ State = "NotConfigured"; Message = "The SharePoint address of the tenant could not be found. Enter the address of the site under Advanced."; Store = $null; SiteUrl = $null } }
+    if (-not (Test-PackTuneStoreSiteUrl $SiteUrl)) { return [pscustomobject]@{ State = "NotConfigured"; Message = "The address must look like https://<tenant>.sharepoint.com/sites/<name>."; Store = $null; SiteUrl = $SiteUrl } }
     try { $Store = Resolve-PackTuneStore -SiteUrl $SiteUrl -Library $Library }
-    catch { return [pscustomobject]@{ State = "NoAccess"; Message = "The site cannot be read: $($_.Exception.Message) An administrator grants PackTune access to this one site (Grant access)."; Store = $null } }
-    if (-not $Store.DriveId) { return [pscustomobject]@{ State = "NoLibrary"; Message = "The site is reachable, the library '$Library' does not exist yet."; Store = $Store } }
-    [pscustomobject]@{ State = "Ready"; Message = "The package store '$Library' on $($Store.SiteName) is ready."; Store = $Store }
-}#State of the package store
+    catch {
+        $Text = $_.Exception.Message
+        if ($Text -match '404|not found|itemNotFound|ResourceNotFound|was not found') { return [pscustomobject]@{ State = "Missing"; Message = "The PackTune site does not exist in this tenant yet. An administrator sets it up once (Set up)."; Store = $null; SiteUrl = $SiteUrl } }
+        return [pscustomobject]@{ State = "NoAccess"; Message = "The PackTune site exists, but you have no access: ask an administrator to add you to the PackTune site. ($Text)"; Store = $null; SiteUrl = $SiteUrl }
+    }
+    if (-not $Store.DriveId) { return [pscustomobject]@{ State = "NoLibrary"; Message = "The site is reachable, the library '$Library' does not exist yet."; Store = $Store; SiteUrl = $SiteUrl } }
+    [pscustomobject]@{ State = "Ready"; Message = "The package store '$Library' on $($Store.SiteName) is ready."; Store = $Store; SiteUrl = $SiteUrl }}#State of the package store
 
 function Initialize-PackTuneStore {
     # Creates the document library when it is missing (needs the role manage on the site, or write when the library exists)
-    param([string]$SiteUrl = $script:Settings.StoreSiteUrl, [string]$Library = $script:Settings.StoreLibrary)
+    param([string]$SiteUrl = (Get-PackTuneStoreSiteUrl), [string]$Library = $script:Settings.StoreLibrary)
     $Store = Resolve-PackTuneStore -SiteUrl $SiteUrl -Library $Library
     if ($Store.DriveId) { return $Store }
     $List = Invoke-PackTuneStoreGraph -Method POST -Path "/sites/$($Store.SiteId)/lists" -Body @{ displayName = $Library; list = @{ template = "documentLibrary" } }
@@ -165,9 +303,9 @@ function Grant-PackTuneStoreAccess {
     }
     $Uri = [uri]$SiteUrl
     $Headers = @{ Authorization = "Bearer $Token" }
-    $Site = Invoke-RestMethod -Uri "$($script:StoreGraph)/sites/$($Uri.Host):$($Uri.AbsolutePath.TrimEnd('/'))?`$select=id" -Headers $Headers -ErrorAction Stop
+    $Site = Invoke-PackTuneAdminGraph -Token $Token -Path "/sites/$($Uri.Host):$($Uri.AbsolutePath.TrimEnd('/'))?`$select=id"
     $Body = @{ roles = @($Role); grantedToIdentities = @(@{ application = @{ id = $ClientID; displayName = "PackTune" } }) } | ConvertTo-Json -Depth 6 -Compress
-    Invoke-RestMethod -Method Post -Uri "$($script:StoreGraph)/sites/$($Site.id)/permissions" -Headers $Headers -ContentType "application/json" -Body $Body -ErrorAction Stop | Out-Null
+    [void](Invoke-PackTuneAdminGraph -Token $Token -Method POST -Path "/sites/$($Site.id)/permissions" -Body ($Body | ConvertFrom-Json))
     Write-Warning $script:StoreGrantConsentNote
     return [pscustomobject]@{ SiteId = $Site.id; Role = $Role }
 }#Grants PackTune access to the one site (administrator, once)
