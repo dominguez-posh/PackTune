@@ -328,21 +328,86 @@ function Install-PackTuneRuntime {
             -InstallCommandLine "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1" `
             -UninstallCommandLine "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall" -DetectionRule $DetectionRule
     }
-    if ($null -eq $App -or -not $App.id) { throw "The $($script:RuntimeName) could not be created in Intune" }
-    Invoke-IntuneModule { Add-IntuneWin32AppAssignmentAllUsers -ID $App.id -Intent available -Notification hideAll } | Out-Null
-    Write-Host "$($script:RuntimeName) successfully deployed"
-    return $App.id
+    # The module may give up with only a warning and no object: that is a failure, never a success
+    $AppId = if ($App) { [string]@($App)[0].id } else { "" }
+    if ($AppId -notmatch '^[0-9a-fA-F-]{36}$') { throw "The $($script:RuntimeName) was not created in Intune: the IntuneWin32App module returned no app (see the warning above; often the sign-in lacks a permission or belongs to the wrong app)." }
+    # Read back by its id before it counts as created (the list of the tenant can lag behind for a while)
+    $Back = $null
+    for ($Try = 1; $Try -le 6 -and -not $Back; $Try++) {
+        $Back = @(Invoke-IntuneModule { Get-IntuneWin32App -ID $AppId } | Where-Object { $_ -and [string]$_.id -eq $AppId }) | Select-Object -First 1
+        if (-not $Back -and $Try -lt 6) { Start-Sleep -Seconds $script:RuntimeReadBackSeconds }
+    }
+    if (-not $Back) { throw "The $($script:RuntimeName) ($AppId) was reported as created but cannot be read back from Intune. Check Intune > Apps > Windows before you try again (no second app is created automatically)." }
+    Save-PackTuneRuntimeIdMemory -AppId $AppId
+    Invoke-IntuneModule { Add-IntuneWin32AppAssignmentAllUsers -ID $AppId -Intent available -Notification hideAll } | Out-Null
+    Write-Host "$($script:RuntimeName) successfully deployed (app id $AppId, read back from Intune)"
+    return $AppId
 }#Deploys the PackTune Runtime app to the tenant
 
+# Seconds between the read-back attempts after creating the runtime (tests set 0)
+$script:RuntimeReadBackSeconds = 5
+
+function Get-PackTuneRuntimeIdMemoryPath { Join-Path $script:WorkRoot "runtime-apps.json" }
+function Save-PackTuneRuntimeIdMemory {
+    # The id of a runtime this PackTune created, per tenant: found again even while the app list of the tenant lags behind
+    param([Parameter(Mandatory = $true)][string]$AppId)
+    $Path = Get-PackTuneRuntimeIdMemoryPath
+    $Map = @{}
+    try { if (Test-Path -LiteralPath $Path) { $J = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json; foreach ($P in $J.PSObject.Properties) { $Map[$P.Name] = @($P.Value) } } } catch { }
+    $Key = ([string]$script:Settings.TenantID).ToLower()
+    $Map[$Key] = @(@($Map[$Key]) + $AppId | Where-Object { $_ } | Select-Object -Unique)
+    try { ($Map | ConvertTo-Json -Depth 3) | Set-Content -LiteralPath $Path -Encoding UTF8 } catch { }
+}
+function Get-PackTuneRuntimeIdMemory {
+    $Path = Get-PackTuneRuntimeIdMemoryPath
+    try { if (Test-Path -LiteralPath $Path) { return @((Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json).(([string]$script:Settings.TenantID).ToLower()) | Where-Object { $_ }) } } catch { }
+    return @()
+}
+
+function Get-PackTuneRuntimeApps {
+    <#
+        Every PackTune Runtime app of the tenant, oldest first: from the full list of Win32 apps (notes marker or the exact name;
+        no display name filter of the module) and the ids this PackTune created, each read back by id (the list can lag behind).
+        More than one = duplicates: the interface lists them and offers to remove the extra ones (never automatically).
+    #>
+    $Found = @{}
+    foreach ($A in @(Invoke-IntuneModule { Get-IntuneWin32App } | Where-Object { $_ -and ([string]$_.notes -like "*$($script:RuntimeMarker)*" -or [string]$_.displayName -eq $script:RuntimeName) })) { $Found[[string]$A.id] = $A }
+    foreach ($Id in @(Get-PackTuneRuntimeIdMemory)) {
+        if ($Found.ContainsKey([string]$Id)) { continue }
+        $A = @(Invoke-IntuneModule { Get-IntuneWin32App -ID $Id } | Where-Object { $_ -and [string]$_.id -eq $Id }) | Select-Object -First 1
+        if ($A -and [string]$A.notes -like "*$($script:RuntimeMarker)*") { $Found[[string]$A.id] = $A }
+    }
+    @($Found.Values | Sort-Object { [string]$_.createdDateTime } | ForEach-Object { [pscustomobject]@{ Id = [string]$_.id; DisplayName = [string]$_.displayName; Created = [string]$_.createdDateTime } })
+}
+
 function Get-PackTuneRuntimeWin32ID {
-    # The runtime app of the tenant, created once when it does not exist
+    # The runtime app of the tenant (the oldest one when there are duplicates), created once when it does not exist
     param([switch]$NoCreate)
-    $App = @(Invoke-IntuneModule { Get-IntuneWin32App -DisplayName $script:RuntimeName } | Where-Object { $_.displayName -eq $script:RuntimeName -and [string]$_.notes -like "*$($script:RuntimeMarker)*" }) | Select-Object -First 1
-    if ($App) { return $App.id }
+    $Apps = @(Get-PackTuneRuntimeApps)
+    if ($Apps.Count -gt 1) { Write-Warning "$($Apps.Count) apps named $($script:RuntimeName) are in the tenant ($(@($Apps | ForEach-Object { "$($_.Id), created $($_.Created)" }) -join '; ')). The oldest one is used; remove the others on the start page (Clean up)." }
+    if ($Apps.Count -gt 0) { return $Apps[0].Id }
     if ($NoCreate) { return $null }
     Write-Host "$($script:RuntimeName) is not in Intune, it will be deployed now"
     return Install-PackTuneRuntime
 }#Returns the Intune ID of the PackTune Runtime app
+
+function Remove-PackTuneRuntimeDuplicates {
+    <#
+        Removes the extra PackTune Runtime apps (all but the oldest, or the ones in -AppId). Only on request (the interface asks
+        first); an app another app depends on is not removed (Remove-PackTuneIntuneApp refuses it). Returns one row per app.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'High')]
+    param([string[]]$AppId)
+    $Apps = @(Get-PackTuneRuntimeApps)
+    if ($Apps.Count -lt 2) { return @() }
+    $Extra = @($Apps | Select-Object -Skip 1)
+    if ($AppId) { $Extra = @($Extra | Where-Object { $_.Id -in $AppId }) }
+    foreach ($A in $Extra) {
+        if (-not $PSCmdlet.ShouldProcess("$($A.DisplayName) ($($A.Id))", "remove from Intune")) { continue }
+        try { Remove-PackTuneIntuneApp -Id $A.Id -Name $A.DisplayName | Out-Null; [pscustomobject]@{ Id = $A.Id; Removed = $true; Message = 'removed' } }
+        catch { [pscustomobject]@{ Id = $A.Id; Removed = $false; Message = $_.Exception.Message } }
+    }
+}#Removes duplicate runtime apps on request
 
 # Names the interface and older code know: both dependency apps are now the one runtime
 function get-ChocoWin32ID { Get-PackTuneRuntimeWin32ID }
@@ -491,7 +556,8 @@ function Get-PackTuneRuntimeState {
         (runtime there, but apps still depend on the old dependency apps or have no runtime dependency), "Ready".
         UnusedOld = old dependency apps nothing depends on (can be removed, see Remove-PackTuneUnusedDependencyApps).
     #>
-    $RuntimeId = Get-PackTuneRuntimeWin32ID -NoCreate
+    $RuntimeApps = @(Get-PackTuneRuntimeApps)
+    $RuntimeId = if ($RuntimeApps.Count) { $RuntimeApps[0].Id } else { $null }
     $Old = @(Get-PackTuneOldDependencyApps)
     $Apps = @(Get-PackTuneAppsWithRuntimeState -RuntimeId $RuntimeId -OldIds @($Old.Id))
     $OnOld = @($Apps | Where-Object { $_.OldDependencies.Count -gt 0 })
@@ -501,6 +567,8 @@ function Get-PackTuneRuntimeState {
     [pscustomobject]@{
         State = $State; RuntimePresent = [bool]$RuntimeId; RuntimeId = $RuntimeId
         OldDependencyApps = $Old; AppsOnOldDependencies = $OnOld; AppsWithoutRuntime = $Without; UnusedOld = $Unused
+        # More than one runtime app: the extra ones (all but the oldest), listed for a cleanup on request
+        RuntimeDuplicates = @($RuntimeApps | Select-Object -Skip 1)
     }
 }#Runtime present / old dependencies in use, for the readiness list
 

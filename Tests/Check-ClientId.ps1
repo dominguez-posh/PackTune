@@ -48,6 +48,39 @@ $gui = Get-Content (Join-Path $repo 'Start-PackTune.ps1') -Raw
 Test-Check 'app registration: a result with the setup client is never saved (function and the interface)' ($main -match 'if \(-not \$App\.appId -or \(Test-PackTuneSetupClient' -and $gui -match "PSObject\.Properties\['Account'\] -and -not \(Test-PackTuneSetupClient")
 Test-Check 'start page: red item "App registration needed" with Create after the repair' ($gui -match 'elseif \(\$script:SetupClientRepaired -and -not \$script:Settings\.ClientID\) \{ "App registration needed' -and $gui -match 'if \(\$script:SetupClientRepaired\) \{ Write-UiLog')
 
+# --- (2) PackTune Runtime: no success without an app, read back, duplicates found and listed
+$Global:AccessToken = [pscustomobject]@{ ExpiresOn = (Get-Date).AddHours(2).ToUniversalTime(); access_token = 'x.e30.y' }
+$Global:AuthenticationHeader = @{ Authorization = 'Bearer x'; ExpiresOn = $Global:AccessToken.ExpiresOn }
+$script:RuntimeReadBackSeconds = 0
+function Get-Store { @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_ }) }
+New-Item -ItemType File -Path (Join-Path $work 'fake-add-silent') -Force | Out-Null
+$threw = $false; $msg = ''; $log = ''
+try { $log = (Get-PackTuneRuntimeWin32ID 6>&1 | Out-String) } catch { $threw = $true; $msg = $_.Exception.Message }
+Test-Check 'module gives up (warning, no object): an error, never "successfully deployed"' ($threw -and $msg -like '*was not created*' -and $log -notmatch 'successfully deployed' -and @(Get-Store | Where-Object { $_.notes -like '*PackTuneRuntimeApp*' }).Count -eq 0) $msg
+Remove-Item (Join-Path $work 'fake-add-silent')
+$id1 = Get-PackTuneRuntimeWin32ID
+Test-Check 'deploy: the created app is read back by its id, its id is remembered for the tenant' ($id1 -match '^[0-9a-f-]{36}$' -and @(Get-Store | Where-Object id -eq $id1).Count -eq 1 -and (Get-PackTuneRuntimeIdMemory) -contains $id1)
+# The tenant list lags behind: the runtime is found by the remembered id, nothing is created a second time
+New-Item -ItemType File -Path (Join-Path $work 'fake-list-lag') -Force | Out-Null
+(Get-Item (Join-Path $work 'fake-list-lag')).LastWriteTime = (Get-Date).AddHours(-1)
+$id2 = Get-PackTuneRuntimeWin32ID
+Test-Check 'list lag: the runtime is found again by its remembered id, no second app' ($id2 -eq $id1 -and @(Get-Store | Where-Object { $_.notes -like '*PackTuneRuntimeApp*' }).Count -eq 1)
+Remove-Item (Join-Path $work 'fake-list-lag')
+# Duplicates from earlier runs (as in the tenant): found, the oldest is used, listed, removed only on request
+$apps = @(Get-Content (Join-Path $work 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_ })
+$first = $apps[0]
+$dupA = $first.PSObject.Copy(); $dupA.id = [guid]::NewGuid().ToString(); $dupA.createdDateTime = (Get-Date).AddMinutes(5).ToString('o')
+$dupB = $first.PSObject.Copy(); $dupB.id = [guid]::NewGuid().ToString(); $dupB.createdDateTime = (Get-Date).AddMinutes(6).ToString('o')
+ConvertTo-Json -InputObject @($apps + $dupA + $dupB) -Depth 6 | Set-Content (Join-Path $work 'fake-intune.json')
+$state = Get-PackTuneRuntimeState
+Test-Check 'duplicates: the oldest runtime is used, the two others are listed for a cleanup' ($state.RuntimeId -eq $id1 -and @($state.RuntimeDuplicates).Count -eq 2 -and (@($state.RuntimeDuplicates.Id) -contains $dupA.id) -and (@(Get-Store).Count -eq 3)) ($state | ConvertTo-Json -Depth 3 -Compress)
+$null = Remove-PackTuneRuntimeDuplicates -WhatIf
+Test-Check 'duplicates: nothing is removed without a confirmation (-WhatIf)' (@(Get-Store).Count -eq 3)
+$removed = @(Remove-PackTuneRuntimeDuplicates -Confirm:$false)
+Test-Check 'duplicates: on request the extra ones go, the oldest stays' (@($removed | Where-Object Removed).Count -eq 2 -and @(Get-Store).Count -eq 1 -and (Get-Store)[0].id -eq $id1) ($removed | ConvertTo-Json -Compress)
+$rt = Get-Content (Join-Path $repo 'PackTune-Runtime.ps1') -Raw
+Test-Check 'lookup: no display name filter of the module, the whole list plus the remembered ids' ($rt -notmatch 'Get-IntuneWin32App -DisplayName \$script:RuntimeName' -and $rt -match 'Invoke-IntuneModule \{ Get-IntuneWin32App \} \| Where-Object')
+
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed -gt 0) { "$script:Failed check(s) failed."; exit 1 }
 'All checks passed.'

@@ -1078,6 +1078,13 @@ function Get-ReadinessItems {
                        Text = "PackTune Runtime is in the tenant. $n app$(if ($n -ne 1) { 's' }) still use$(if ($n -eq 1) { 's' }) the old dependency apps (Chocolatey, winget runtime): switch them over, nothing is removed."
                        Fix = 'Switch'; Action = { Start-RuntimeSwitch } } }
                 else { @{ Key = 'deps'; Title = 'Dependency app (PackTune Runtime)'; State = 'ok'; Text = 'PackTune Runtime is in the tenant; every app depends on it.' } })
+    # More than one PackTune Runtime in the tenant: listed, removed only when the person confirms
+    if ((Test-SignedIn) -and $info -and @($info.RuntimeDuplicates).Count -gt 0) {
+        $dups = @($info.RuntimeDuplicates)
+        $items += @{ Key = 'depsdup'; Title = 'Duplicate PackTune Runtime apps'; State = 'warn'; Wait = (Test-TaskRunning 'depsdup')
+            Text = "$($dups.Count) more app$(if ($dups.Count -ne 1) { 's' }) named PackTune Runtime $(if ($dups.Count -ne 1) { 'are' } else { 'is' }) in the tenant: $(@($dups | ForEach-Object { "$($_.Id) (created $($_.Created))" }) -join ', '). The oldest one ($($info.RuntimeId)) is used."
+            Fix = 'Clean up'; Action = { Start-RuntimeDuplicateCleanup } }
+    }
     $items += $(if (-not (Test-SignedIn)) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = 'Devices report their update log to Intune, so failures show up under In tenant. Needs Remediations (Windows Enterprise E3/E5).' } }
                 elseif ($script:GraphDown -and -not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Text = "Can't check right now: $($script:GraphDown.Cause)" } }
                 elseif (-not $script:StatusScript) { @{ Key = 'status'; Title = 'Status report (optional)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'statuscheck'); Text = 'Checking ...' } }
@@ -1208,6 +1215,22 @@ New-PackTuneAppRegistration @Params
         else { $script:SignInAfterRegistration = $false; Update-ConnectionStatus; Complete-SetupStep $false 'creating the app registration' }
     })
     Update-SignInButton
+    Update-Readiness
+}
+
+function Start-RuntimeDuplicateCleanup {
+    $dups = @($script:RuntimeInfo.RuntimeDuplicates)
+    if ($dups.Count -eq 0 -or (Test-TaskRunning 'depsdup')) { return }
+    $list = @($dups | ForEach-Object { "$($_.DisplayName) $($_.Id), created $($_.Created)" }) -join "`n"
+    if (-not (Confirm-Action "Remove these extra PackTune Runtime apps from Intune?`n`n$list`n`nThe oldest one ($($script:RuntimeInfo.RuntimeId)) stays. An app that other apps depend on is kept." 'Clean up PackTune Runtime')) { return }
+    Update-UiToken
+    $ids = @($dups | ForEach-Object { $_.Id })
+    [void](Start-UiTask -Kind 'depsdup' -Title 'Removing the extra PackTune Runtime apps' -Display 'PackTune Runtime' -NeedsAuth -Arguments @{ Ids = $ids } -Work 'param($Ids) Remove-PackTuneRuntimeDuplicates -AppId $Ids -Confirm:$false' -OnDone {
+        param($Result, $Job)
+        foreach ($r in @($Result | Where-Object { $_ -and $_.PSObject.Properties['Removed'] })) { Write-UiLog "PackTune Runtime $($r.Id): $($r.Message)" $(if ($r.Removed) { 'Success' } else { 'Warning' }) }
+        $script:TenantApps = $null; $script:RuntimeId = $null; $script:RuntimeInfo = $null
+        Start-TenantRefresh
+    })
     Update-Readiness
 }
 
