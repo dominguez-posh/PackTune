@@ -417,7 +417,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $zip = $script:DeployCombos | Where-Object { $_.Key -eq '7zip.install' }
             Test-Smoke 'per app source dropdown lists both sources, wide enough' ($zip.Combo.Items.Count -eq 2 -and $zip.Combo.Width -ge 280 -and $zip.Combo.SelectedItem) (@($zip.Combo.Items) -join ' | ')
             Test-Smoke 'recommended source is labelled when versions differ' ((@($zip.Combo.Items) -join '|') -match 'recommended' -or -not $zip.Src.RecommendedMarked) (@($zip.Combo.Items) -join ' | ')
-            Test-Smoke 'dialog starts with the settings defaults' ($ui.CmbDeployAssign.SelectedIndex -eq 1 -and $ui.CmbDeployVersion.SelectedIndex -eq 0 -and $ui.PanelDeployGrace.Visibility -ne 'Visible')
+            Test-Smoke 'dialog starts with the settings defaults (Ask the user, 2 days)' ($ui.CmbDeployAssign.SelectedIndex -eq 1 -and $ui.CmbDeployVersion.SelectedIndex -eq 0 -and $ui.PanelDeployGrace.Visibility -eq 'Visible')
             Test-Smoke 'dependency hint shown' ($ui.TxtDeployDependency.Inlines.Count -ge 2)
             $tiles = @($script:DeployCombos | ForEach-Object { $want = Get-AppIconUrl $_.Src; $row = $ui.PanelDeployRows.Children[$script:DeployCombos.IndexOf($_)]; $img = Find-Visual $row ([System.Windows.Controls.Image]); if ($want) { [bool]($img -and $img.Source) } else { -not $img } })
             Test-Smoke 'deploy dialog rows show the same app icon as the cards (letter tile only without an icon)' ($tiles.Count -eq 2 -and $tiles -notcontains $false) ($tiles -join ',')
@@ -901,7 +901,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         }
         if (-not (Test-Idle)) { return $false }
         $apps = Get-StoreApps
-        $vlc = $apps | Where-Object { $_.notes -like 'PoweredByPackTune;from=Winget;package=VideoLAN.VLC;version=latest;update=Startup;grace=48;source=;delay=*' }
+        $vlc = $apps | Where-Object { $_.notes -like 'PoweredByPackTune;from=Winget;package=VideoLAN.VLC;version=latest;update=Custom;grace=48;source=;delay=*' }
         Test-Smoke 'winget VLC created with the catalog name' ($vlc.displayName -eq 'VLC media player' -and $vlc.assignment -eq 'available') (($apps | ForEach-Object { "$($_.displayName)|$($_.notes)" }) -join '; ')
         $vlcLog = (@($script:JobRows | Where-Object { $_['Title'] -eq 'VLC media player' } | ForEach-Object { $_.Data.Log } | ForEach-Object { $_.Text } | Where-Object { $_ -match 'ependenc' }) -join ' | ')
         Test-Smoke 'winget app has the PackTune Runtime dependency, no Chocolatey dependency' (($vlcLog -match 'Adding dependency for the PackTune Runtime') -and ($vlcLog -notmatch 'dependency for chocolatey')) $vlcLog
@@ -1285,7 +1285,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         switch ($s.Phase) {
             0 {
                 Show-Page 'Settings'
-                Test-Smoke 'settings show the update defaults' ($ui.CmbDefaultUpdate.SelectedIndex -eq 1 -and $ui.CmbDefaultVersion.SelectedIndex -eq 0)
+                Test-Smoke 'settings show the update defaults (Ask the user, then install)' ($ui.CmbDefaultUpdate.SelectedIndex -eq 2 -and $ui.CmbDefaultVersion.SelectedIndex -eq 0)
                 Test-Smoke 'the old Sandbox Studio setting is gone from the settings' (-not (Get-PackTuneSettings).PSObject.Properties['SandboxStudioPath'] -and -not $ui.ContainsKey('TxtSandboxStudioPath'))
                 Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Title 'PuTTY' -Version 'latest' -Policy @{ UpdateMode = 'Custom'; GraceHours = 24 }
                 Test-Smoke 'sandbox test started: toast says Windows Sandbox opens in a moment' (@($script:Toasts | Where-Object { $_.Text -like 'Sandbox test started*Windows Sandbox opens in a moment' }).Count -eq 1)

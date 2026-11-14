@@ -858,7 +858,7 @@ $script:HelpTexts = @{
         @('License notes', 'Apps whose license restricts business use carry a Check license note. They are deployed only after a confirmation; the license is still yours to clear.'))
     Tenant   = @(
         @('In tenant', 'The apps this tool created in the tenant, from both sources, with the dependency app PackTune Runtime (and the two older dependency apps until you remove them). Everything is read from Intune; there is no local database.'),
-        @('Update settings', 'Select an app: the panel on the right sets the version and how devices update (off, automatic per schedule, ask the user). Apply in Intune rebuilds the package and changes the app.'),
+        @('Update settings', 'Select an app: the panel on the right sets the version and how devices update (off, automatic per schedule, ask the user; asking is the default and shows the update in the PackTune Updates tray popup on the device). Apply in Intune rebuilds the package and changes the app.'),
         @('Release an update', 'A pinned app whose package has a newer version shows a banner. Release moves devices to it. Apps that are only Available are updated through a new app that supersedes the old one; Required apps are changed in place.'),
         @('On devices', 'Click the counts to see the install status per device, with the cause of a failure and the log the device reports through the status script (Remediations).'))
     Activity = @(

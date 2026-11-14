@@ -18,7 +18,7 @@ $script:RuntimeMarker = "PackTuneRuntimeApp"
 $script:OldWingetRuntimeName = "winget runtime"
 $script:OldWingetRuntimeMarker = "WingetRuntimeApp"
 # Raised when the install, update or detection script of the runtime app changes (part of its detection)
-$script:RuntimeRevision = 3
+$script:RuntimeRevision = 4
 
 #region scripts
 
@@ -64,6 +64,7 @@ $RuntimeRoot = Join-Path $ToolRoot "Runtime"
 $TaskPath = "\PackTune\Runtime\"
 $OldTaskPath = "\Intune-Winget-Updates\"   # before the rename
 $TaskName = "Update PackTune Runtime"
+$TrayTaskName = "PackTune Updates tray"
 # The task of the earlier "winget runtime" app does the same job: replaced by this one
 $OldTaskName = "Update winget runtime"
 
@@ -81,6 +82,7 @@ __GETWINGET__
 if ($Uninstall) {
     # Chocolatey and App Installer belong to the device: only the task and the marker of this tool go (detection fails again)
     Unregister-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $TrayTaskName -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $TaskName -TaskPath $OldTaskPath -Confirm:$false -ErrorAction SilentlyContinue
     Remove-OldTaskFolder $OldTaskPath
     Remove-OldToolFolder "Runtime"
@@ -185,6 +187,14 @@ finally { Exit-DeploymentLock }
 try {
     Remove-Item -LiteralPath (Join-Path $RuntimeRoot "update.ps1") -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "update.ps1") -Destination $RuntimeRoot -Force -ErrorAction Stop
+    # The tray agent "PackTune Updates": a script in the protected folder (users read it, they cannot change it), started by a task of the Users group at every logon
+    Remove-Item -LiteralPath (Join-Path $RuntimeRoot "tray.ps1") -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot "tray.ps1") -Destination $RuntimeRoot -Force -ErrorAction Stop
+    $TrayPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
+    $TrayAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$TrayPowerShell`" -STA -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $RuntimeRoot 'tray.ps1')`""
+    $TrayUsers = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
+    $TraySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+    Register-ScheduledTask -TaskName $TrayTaskName -TaskPath $TaskPath -Action $TrayAction -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Principal $TrayUsers -Settings $TraySettings -Force -ErrorAction Stop | Out-Null
     foreach ($Name in $OldTaskName, $TaskName) { Unregister-ScheduledTask -TaskName $Name -TaskPath $OldTaskPath -Confirm:$false -ErrorAction SilentlyContinue }
     Remove-OldTaskFolder $OldTaskPath
     $PowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
@@ -283,6 +293,7 @@ exit 0
     return [pscustomobject]@{
         Install   = $Install.Replace("__COMMON__", $Common).Replace("__GETWINGET__", $GetWinget).Replace("__REVISION__", $Revision).Replace("__DOWNLOADURL__", (& $Quote $script:Settings.ChocolateyDownloadUrl))
         Detection = $Detection.Replace("__GETWINGET__", $GetWinget).Replace("__REVISION__", $Revision)
+        Tray      = Get-UpdateTrayScript
         Update    = $UpdateScript.Replace("__COMMON__", $Common).Replace("__GETWINGET__", $GetWinget).Replace("__PACKAGESOURCE__", (& $Quote $script:Settings.PackageSource))
     }
 }#Scripts of the PackTune Runtime app
@@ -302,6 +313,7 @@ function Install-PackTuneRuntime {
     $Scripts = Get-PackTuneRuntimeScripts
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $Scripts.Install -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "update.ps1") -Value $Scripts.Update -Encoding ASCII
+    Set-Content -Path (Join-Path $SourcePath "tray.ps1") -Value $Scripts.Tray -Encoding ASCII
     $DetectionFile = Join-Path $WorkPath "detection.ps1"
     Set-Content -Path $DetectionFile -Value $Scripts.Detection -Encoding ASCII
 
