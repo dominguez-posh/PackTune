@@ -273,11 +273,13 @@ function Update-Toasts {
     }
 }
 
+$script:StoreGrantAuto = $false
 function Get-FriendlyCause([string]$Raw) {
     <# A short English cause in plain words for what Graph, the network or .NET reported (often localized and technical).
        The raw text stays in the log and behind Details. #>
     $text = [string]$Raw
     if (-not $text) { return 'Something went wrong.' }
+    if ($text -match '(?i)^No connection to Microsoft \(network\)') { return 'No connection to Microsoft (network).' }
     if ($text -match '(?i)is not a custom application of this tool or does not exist') { return 'this app is not a custom application of PackTune or was already removed - nothing was removed.' }
     if ($text -match '(?i)Close Windows Sandbox to continue') { return 'Close Windows Sandbox to continue, then press Retry.' }
     if ($text -match '(?i)-2147024891|0x80070005|E_ACCESSDENIED|denied access to the package folder') { return 'Windows denied access to the package folder - close Windows Sandbox, wait a minute and try again (see Details).' }
@@ -642,6 +644,7 @@ function Update-JobRow($Job) {
 
 function Test-TaskRunning([string]$Kind) { @($script:Tasks | Where-Object { $_.Job.Kind -eq $Kind }).Count -gt 0 }
 
+$script:BackgroundCause = @{}
 function Complete-UiTask($Task) {
     $job = $Task.Job
     try { [void]$Task.PS.EndInvoke($Task.Handle) }
@@ -653,7 +656,16 @@ function Complete-UiTask($Task) {
     # The task may have renewed the token: the UI thread uses the same sign-in
     if ($script:Shared.Auth) { Set-PackTuneAuthState $script:Shared.Auth }
     $errors = @($job.Log.ToArray() | Where-Object Level -eq 'Error')
-    foreach ($entry in @($job.Log.ToArray())) { Write-UiLog ("[{0}] {1}" -f $job.Display, $entry.Text) $entry.Level }
+    # Background uploads/reads of the package store repeat with every action: one log line per cause until it changes or the task works again
+    if ($job.Kind -in 'protocolsync', 'protocolhistory') { if ($job.Status -eq 'succeeded') { $script:BackgroundCause.Remove([string]$job.Kind) } }
+    foreach ($entry in @($job.Log.ToArray())) {
+        if ($job.Kind -in 'protocolsync', 'protocolhistory' -and $entry.Level -eq 'Error') {
+            $cause = Get-FriendlyCause ([string]$entry.Text)
+            if ($script:BackgroundCause[[string]$job.Kind] -eq $cause) { continue }
+            $script:BackgroundCause[[string]$job.Kind] = $cause
+        }
+        Write-UiLog ("[{0}] {1}" -f $job.Display, $entry.Text) $entry.Level
+    }
     if ($job.Status -eq 'failed' -and $job.Kind -notin 'meta', 'icons', 'protocolsync', 'protocolhistory' -and -not ($job.Kind -in $script:GraphReadKinds -and @($errors | Where-Object { Test-GraphReadFailureText ([string]$_.Text) }).Count)) {
         Show-Toast ("{0}: {1}" -f $job.Display, (Get-FriendlyCause $(if ($errors.Count) { [string]$errors[-1].Text } else { 'failed' }))) 'bad' 'Details' { Show-Page 'Activity' }
     }
@@ -1298,6 +1310,8 @@ New-PackTuneAppRegistration @Params
             Update-ConnectionStatus
             # Signed in through the setup app: the session moves to the new registration (same account, no prompt)
             if ((Test-SignedIn) -and $Global:AccessToken.SetupClient) { Switch-SignInToRegistration ([string]$reg.ClientID) }
+            # A package store that exists already: check it with the new registration and grant it the site when it has no access yet
+            if (Test-SignedIn) { $script:StoreGrantAuto = $true; $script:StoreState = $null; Start-StoreCheck }
             Complete-SetupStep $true
             if ($script:SignInAfterRegistration) { $script:SignInAfterRegistration = $false; if (-not (Test-SignedIn)) { try { Connect-Intune } catch { Show-Error $_.Exception.Message } } }
         }
@@ -1890,9 +1904,11 @@ function Update-CustomRows {
     # Without a ready package store nothing new can be made: the page says so and offers the setup; existing applications stay (read only, removable)
     $ready = Test-StoreReady
     $ui.BoxCustomStore.Visibility = ConvertTo-Vis ((Test-SignedIn) -and -not $ready)
-    $ui.TxtCustomStoreBanner.Text = if ($script:StoreState -and $script:StoreState.Message -and $script:StoreState.State -ne 'Ready') { "Set up the package store first. $($script:StoreState.Message) Custom applications keep every version there, so New application, New version and Export need it. Existing applications are shown and can be removed." } else { 'Set up the package store first. Custom applications keep every version in the package store, so New application, New version and Export need it. Existing applications are shown and can be removed.' }
-    $ui.BtnCustomNew.IsEnabled = $ready
-    $ui.BtnCustomNew.ToolTip = if ($ready) { $null } else { 'Set up the package store first' }
+    $ui.TxtCustomStoreBanner.Text = if ($script:StoreState -and $script:StoreState.Message -and $script:StoreState.State -ne 'Ready') { "Set up the package store first. $($script:StoreState.Message) Custom applications keep every version there, so Deploy, New version and Export need it. New application and Test in sandbox work without it (local files). Existing applications are shown and can be removed." } else { 'Set up the package store first. Custom applications keep every version in the package store, so Deploy, New version and Export need it. New application and Test in sandbox work without it (local files). Existing applications are shown and can be removed.' }
+    # New application opens without the store: Test in sandbox works with local files; only Deploy needs the store (Update-CustomDeployGate)
+    $ui.BtnCustomNew.IsEnabled = $true
+    $ui.BtnCustomNew.ToolTip = $null
+    try { Update-CustomDeployGate } catch { }
     if ($script:CustomPendingSelect) {
         # coming from In tenant: select that app as soon as the list has it
         $pending = @($script:CustomRows | Where-Object { $_.Data.Id -eq $script:CustomPendingSelect }) | Select-Object -First 1
@@ -2054,8 +2070,9 @@ function Update-CustomDeployGate {
     if ($script:CustomTest -and $script:CustomTest.Key -ne (Get-CustomTestKey)) { $script:CustomTest = $null }   # any change resets the test
     $t = $script:CustomTest
     $ok = [bool]$script:CustomInfo -and $t -and ($t.Key -eq (Get-CustomTestKey)) -and ($script:CustomMode -ne 'Version' -or $t.UpdatePath)
-    $ui.BtnCustomDeploy.IsEnabled = [bool]$ok
-    $ui.BtnCustomDeploy.ToolTip = if ($ok) { $null } elseif ($t -and $t.Key -eq (Get-CustomTestKey) -and $script:CustomMode -eq 'Version') { 'Run the sandbox test first: it must include the update from the previous version' } else { 'Run the sandbox test first' }
+    $store = Test-StoreReady
+    $ui.BtnCustomDeploy.IsEnabled = [bool]$ok -and $store
+    $ui.BtnCustomDeploy.ToolTip = if ($ok -and -not $store) { 'Set up the package store first (Start page): the package is kept there. The sandbox test works without it.' } elseif ($ok) { $null } elseif ($t -and $t.Key -eq (Get-CustomTestKey) -and $script:CustomMode -eq 'Version') { 'Run the sandbox test first: it must include the update from the previous version' } else { 'Run the sandbox test first' }
 }
 [System.Windows.Controls.ToolTipService]::SetShowOnDisabled($ui.BtnCustomDeploy, $true)
 $ui.TxtCustomProps.Add_TextChanged({ try { Update-CustomDeployGate } catch { } })
@@ -2150,7 +2167,8 @@ function Update-OtherDeploy {
     $folderOk = $ui.TxtOtherFolder.Text.Trim() -and (Test-Path -LiteralPath $ui.TxtOtherFolder.Text.Trim() -PathType Container)
     if ($script:CustomMode -eq 'Update') { $ok = ($folderOk -or -not $ui.TxtOtherFolder.Text.Trim()) -and $ui.TxtOtherVersion.Text.Trim() }
     else { $ok = $folderOk -and [string]$ui.CmbOtherEntry.Text -and $ui.TxtOtherName.Text.Trim() -and $ui.TxtOtherVersion.Text.Trim() }
-    $ui.BtnCustomDeploy.IsEnabled = [bool]$ok
+    $ui.BtnCustomDeploy.IsEnabled = [bool]$ok -and (Test-StoreReady)
+    $ui.BtnCustomDeploy.ToolTip = if ($ok -and -not (Test-StoreReady)) { "Set up the package store first (Start page): the package is kept there." } else { $null }
 }
 function Set-CustomKind([string]$Kind) {
     $script:CustomKind = $Kind
@@ -2223,7 +2241,6 @@ function Show-CustomDialog([string]$Mode, $App) {
     Show-Dialog 'DlgCustom'
 }
 Add-Click $ui.BtnCustomNew {
-    if (-not (Test-StoreReady)) { Show-Toast 'Set up the package store first (Start page, Package store).' 'warn'; return }
     Show-CustomDialog 'New' $null
 }
 Add-Click $ui.BtnCustomNewVersion {
@@ -2447,6 +2464,11 @@ function Start-StoreCheck {
         param($Result, $Job)
         $r = @($Result | Where-Object { $_.State }) | Select-Object -First 1
         $script:StoreState = if ($r) { $r } else { [pscustomobject]@{ State = 'NoAccess'; Message = 'The package store could not be checked, see Activity.' } }
+        # Right after a registration was created or switched to: the site is there but the new registration has no grant yet: granted at once (read back, checked again)
+        if ($script:StoreGrantAuto) {
+            $script:StoreGrantAuto = $false
+            if ($script:StoreState.State -eq 'NoAccess' -and $script:StoreState.SiteUrl -and (Test-SignedIn)) { $script:StoreState = $null; Update-Readiness; Start-StoreGrant -AfterRegistration; return }
+        }
         # Found and usable: remembered, so the rest of the tool knows a store exists (the address of the standard site, nothing was typed)
         if ($script:StoreState.State -eq 'Ready' -and -not $script:Settings.StoreSiteUrl -and $script:StoreState.SiteUrl) { Save-StoreSiteUrl ([string]$script:StoreState.SiteUrl) }
         Update-Readiness
@@ -2546,13 +2568,16 @@ function Confirm-WrongGrantRemoval($SiteId, $Token) {
         if ($Job.Status -eq 'succeeded') { Write-UiLog '[Package store] the permission of the setup app was removed from the site.' 'Success' } else { Show-Toast 'The permission of the setup app could not be removed, see Activity.' 'bad' }
     })
 }
-function Start-StoreGrant {
-    # The administrator confirms PackTune's access to the site once: sign-in through the setup app, then the permission for PackTune's OWN app registration
-    if (-not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permission Sites.FullControl.All, which PackTune uses for this one grant only.`n`n$($script:StoreGrantConsentNote)`n`nContinue?" 'Grant access to the SharePoint site' 'Continue' 'Cancel')) { return }
+function Start-StoreGrant([switch]$AfterRegistration) {
+    # The administrator confirms PackTune's access to the site once: sign-in through the setup app, then the permission for PackTune's OWN app registration.
+    # -AfterRegistration: right after the app registration was created or switched to, in the same sign-in of the setup app, without the extra question
+    if (Test-TaskRunning 'store') { return }
+    if (-not $AfterRegistration -and -not (Confirm-Action "An administrator signs in with Microsoft's app 'Microsoft Graph Command Line Tools' and the permission Sites.FullControl.All, which PackTune uses for this one grant only.`n`n$($script:StoreGrantConsentNote)`n`nContinue?" 'Grant access to the SharePoint site' 'Continue' 'Cancel')) { return }
     $client = Get-PackTuneAppClientId
     $token = $null
     try { $token = Get-EmbeddedToken -TenantID $(if ($script:Settings.TenantID) { $script:Settings.TenantID } else { 'organizations' }) -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Sites.FullControl.All') -Hint 'Sign in with an administrator account: it grants PackTune access to this one SharePoint site.' }
     catch { if ($_.Exception.Message -ne 'Sign-in cancelled.') { Show-Error $_.Exception.Message } else { Show-SignInCancelled }; return }
+    if ($AfterRegistration) { Write-UiLog '[Package store] The PackTune site exists, PackTune''s new app registration gets its access to it now.' 'Info' }
     $role = if ($script:StoreState -and $script:StoreState.State -eq 'NoLibrary') { 'manage' } else { 'write' }
     $access = if ($token) { [string]$token.access_token } else { '' }
     $script:StoreSetupToken = $access
@@ -4810,6 +4835,7 @@ function Switch-SignInToRegistration([string]$ClientID) {
         Set-PackTuneToken -TokenResponse $token -TenantID $tenant -ClientID $ClientID
         $script:Shared.Auth = Get-PackTuneAuthState
         Complete-SignIn 'with the app registration of PackTune'
+        $script:StoreGrantAuto = $true; $script:StoreState = $null; Start-StoreCheck   # the store site may exist already: the new registration gets its access at once
     }
     catch { Write-UiLog "The sign-in could not switch to PackTune's app registration ($($_.Exception.Message)). Sign in again to use it." 'Warning'; Update-Readiness }
 }

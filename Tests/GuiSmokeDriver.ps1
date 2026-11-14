@@ -251,9 +251,10 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'store ready: New application on, no banner' ($ui.BtnCustomNew.IsEnabled -and $ui.BoxCustomStore.Visibility -eq 'Collapsed')
         $script:StoreState = [pscustomobject]@{ State = 'Missing'; Message = 'The PackTune site does not exist in this tenant yet.' }
         Update-CustomRows
-        Test-Smoke 'no store: banner "Set up the package store first" with Set up, New application off' ($ui.BoxCustomStore.Visibility -eq 'Visible' -and $ui.TxtCustomStoreBanner.Text -like 'Set up the package store first*' -and $ui.BtnCustomStoreSetup -and -not $ui.BtnCustomNew.IsEnabled)
+        Test-Smoke 'no store: banner "Set up the package store first" with Set up, New application stays on (local sandbox test)' ($ui.BoxCustomStore.Visibility -eq 'Visible' -and $ui.TxtCustomStoreBanner.Text -like 'Set up the package store first*' -and $ui.BtnCustomStoreSetup -and $ui.BtnCustomNew.IsEnabled)
         $n = $script:Toasts.Count; & $script:ClickActions[$ui.BtnCustomNew]
-        Test-Smoke 'no store: New application only says to set it up, no dialog' ($ui.DialogLayer.Visibility -eq 'Collapsed' -and $script:Toasts.Count -gt $n -and $script:Toasts[-1].Text -like 'Set up the package store first*')
+        Test-Smoke 'no store: New application opens the dialog (Test in sandbox needs no store), nothing is blocked by a toast' ($ui.DialogLayer.Visibility -eq 'Visible' -and $script:Toasts.Count -eq $n)
+        Close-Dialog
         $saved = $script:CustomApps
         $script:CustomApps = @([pscustomobject]@{ Id = 'c-1'; DisplayName = 'Old Tool'; Kind = 'msi'; AppId = 'old-tool-1'; Version = '1.0'; ProductCode = '{X}'; UpgradeCode = ''; Manifest = ('ab' * 32); Identity = ''; Thumbprint = ''; Publisher = 'P'; Created = (Get-Date).ToString('o'); Intents = 'available'; Source = 'Custom'; IsChocolatey = $false })
         Update-CustomRows; $ui.LstCustom.SelectedItem = $script:CustomRows[0]
@@ -315,6 +316,14 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'store item: named for what it is needed for, offers Grant access when PackTune has no access' ($item.Title -eq 'Package store (for custom applications)' -and $item.Fix -eq 'Grant access' -and $item.Text -like '*an administrator confirms it once*')
         $script:StoreState = [pscustomobject]@{ State = 'Missing'; Message = 'The PackTune site does not exist in this tenant yet.'; SiteUrl = $null }
         Test-Smoke 'store item: a site that is not there offers Set up' (@(Get-StoreReadinessItems)[0].Fix -eq 'Set up')
+        Update-CustomRows
+        Test-Smoke 'no store: New application stays available (Test in sandbox works with local files); Deploy waits for the store' ($ui.BtnCustomNew.IsEnabled -and $ui.TxtCustomStoreBanner.Text -like '*New application and Test in sandbox work without it*')
+        $kindSaved = $script:CustomKind; $modeSaved = $script:CustomMode; $script:CustomKind = 'Other'; $script:CustomMode = 'New'
+        $ui.TxtOtherFolder.Text = $env:TEMP; $ui.CmbOtherEntry.Text = 'x.exe'; $ui.TxtOtherName.Text = 'N'; $ui.TxtOtherVersion.Text = '1'
+        Update-OtherDeploy
+        Test-Smoke 'no store: a complete deploy form still cannot publish, the tooltip says why' (-not $ui.BtnCustomDeploy.IsEnabled -and [string]$ui.BtnCustomDeploy.ToolTip -like '*package store*')
+        $script:CustomKind = $kindSaved; $script:CustomMode = $modeSaved
+        Test-Smoke 'a network failure of the store token is named as network, not as a missing grant' ((Get-FriendlyCause 'No connection to Microsoft (network): the package store is tried again. Remotename') -eq 'No connection to Microsoft (network).')
         $script:StoreState = $null
         $script:StoreCheckTimedOut = $false
         $script:Tasks.Add(@{ Job = [pscustomobject]@{ Kind = 'storecheck'; Started = (Get-Date).AddMinutes(-3) }; Hidden = $true; Handle = [pscustomobject]@{ IsCompleted = $false } }) | Out-Null

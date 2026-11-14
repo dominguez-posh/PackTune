@@ -296,7 +296,13 @@ function Get-PackTuneStoreToken {
     try {
         $Answer = Invoke-PackTuneTokenRequest -TenantID $Global:AccessTokenTenantID -ClientID $ClientID -Authority $Authority -Body @{ grant_type = "refresh_token"; refresh_token = $Current.RefreshToken; scope = "https://graph.microsoft.com/Sites.Selected offline_access" }
     }
-    catch { throw "No access to the package store: the app registration does not hold Sites.Selected yet (Start page: set up everything, or grant the new permissions), or the consent is missing. $($_.Exception.Message)" }
+    catch {
+        $Raw = $_.Exception.Message
+        # The cause decides the text: no network is no missing grant (it was reported as one before)
+        if ($Raw -match '(?i)remote name|remotename|remotenamen|could not be resolved|konnte nicht aufgel|unable to connect|no such host|network|netzwerk|connection (was )?(closed|refused|reset)|timed out|timeout|name or service') { throw "No connection to Microsoft (network): the package store is tried again with the next action. $Raw" }
+        if ($Raw -match '(?i)40[13]|AADSTS65001|AADSTS70000|invalid_grant|consent|unauthorized|forbidden|insufficient') { throw "No access to the package store: the app registration does not hold Sites.Selected yet (Start page: set up everything, or grant the new permissions), or the consent is missing. $Raw" }
+        throw "The package store token could not be requested: $Raw"
+    }
     $script:StoreToken = [string]$Answer.access_token
     $script:StoreTokenExpires = (Get-Date).AddSeconds([int]$Answer.expires_in)
     return $script:StoreToken
