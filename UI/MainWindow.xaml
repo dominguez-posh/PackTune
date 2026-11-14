@@ -852,11 +852,11 @@
                                     <Border Style="{StaticResource CardBox}" Padding="20,18" Margin="0,18,0,0">
                                         <StackPanel>
                                             <TextBlock Text="Tenant and app registration" Style="{StaticResource CardTitle}"/>
-                                            <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,12" Text="The tool signs in with an Entra ID app registration (redirect URI http://localhost). Create it on the start page, or enter an existing one."/>
+                                            <TextBlock Style="{StaticResource Hint}" Margin="0,4,0,12" Text="Optional (advanced): filled in automatically after sign-in. Sign in with any account; the tenant follows it, and PackTune's app registration there is found or created on the start page (Create)."/>
                                             <Grid>
                                                 <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                <StackPanel><TextBlock Text="Tenant (domain or ID)" Style="{StaticResource SmallLabel}"/><TextBox x:Name="TxtTenantId" AutomationProperties.Name="Tenant"/></StackPanel>
-                                                <StackPanel Grid.Column="2"><TextBlock Text="Application (client) ID" Style="{StaticResource SmallLabel}"/><TextBox x:Name="TxtClientId" AutomationProperties.Name="Client ID"/></StackPanel>
+                                                <StackPanel><TextBlock Text="Tenant (optional, filled after sign-in)" Style="{StaticResource SmallLabel}"/><TextBox x:Name="TxtTenantId" AutomationProperties.Name="Tenant"/></StackPanel>
+                                                <StackPanel Grid.Column="2"><TextBlock Text="Application (client) ID (optional, filled after sign-in)" Style="{StaticResource SmallLabel}"/><TextBox x:Name="TxtClientId" AutomationProperties.Name="Client ID"/></StackPanel>
                                             </Grid>
                                             <Button x:Name="BtnSettingsGrant" Content="Create or update app registration (grant new permissions)" Style="{StaticResource SmallButton}" HorizontalAlignment="Left" Margin="0,12,0,0"/>
                                         </StackPanel>
