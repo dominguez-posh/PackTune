@@ -65,7 +65,7 @@ function New-SpikeAssets([string]$Folder) {
 
 function New-SpikeMsix {
     # Builds, signs (own certificate, key deleted right after) and returns path, public .cer and thumbprint
-    param([string]$Version, [string]$Folder)
+    param([string]$Version, [string]$Folder, [string]$MinOs = '10.0.17763.0')
     $content = Join-Path $Folder 'content'
     New-Item -ItemType Directory -Path (Join-Path $content 'App') -Force | Out-Null
     New-SpikeAssets (Join-Path $content 'Assets')
@@ -82,7 +82,7 @@ function New-SpikeMsix {
     <Logo>Assets\Store.png</Logo>
   </Properties>
   <Dependencies>
-    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="$MinOs" MaxVersionTested="10.0.65535.0" />
   </Dependencies>
   <Resources><Resource Language="en-us" /></Resources>
   <Applications>
@@ -119,140 +119,11 @@ function New-SpikeMsix {
 }
 #endregion
 
-#region device scripts (PackTune style, "MSIX inside a Win32 app")
+#region device scripts: the production generator of PackTune-CustomMsix.ps1 ("MSIX inside a Win32 app")
 function Get-CustomMsixScripts {
     param([string]$AppId, [string]$Identity, [string]$Version, [string]$Thumbprint)
-    $Install = @'
-# Installs or removes a custom MSIX delivered as a Win32 app (runs as SYSTEM through Intune): the public certificate
-# of this version goes into LocalMachine\TrustedPeople, the package is provisioned for all users.
-param([switch]$Uninstall)
-
-# The Intune Management Extension starts 32-bit PowerShell; provisioning needs the 64-bit DISM cmdlets
-if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
-    $Arguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"")
-    if ($Uninstall) { $Arguments += "-Uninstall" }
-    & "$env:SystemRoot\Sysnative\WindowsPowerShell\v1.0\powershell.exe" @Arguments
-    exit $LASTEXITCODE
-}
-
-$AppId = '__APPID__'
-$Identity = '__IDENTITY__'
-$Version = '__VERSION__'
-$Thumbprint = '__THUMBPRINT__'
-$LogId = "custom-$AppId"
-$LogTag = if ($Uninstall) { "uninstall" } else { "install" }
-
-__COMMON__
-
-$CustomRoot = Join-Path $ToolRoot "Custom"
-$AppRoot = Join-Path $CustomRoot $AppId
-$Marker = Join-Path $AppRoot "version.txt"
-try {
-    Protect-Folder $ToolRoot
-    Protect-Folder $CustomRoot
-    Protect-Folder $AppRoot
-}
-catch { Write-Output "The folder $AppRoot could not be protected: $($_.Exception.Message)"; exit 1 }
-
-function Test-TrustedCert([string]$Thumb) {
-    $Store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPeople", "LocalMachine")
-    $Store.Open("ReadOnly")
-    try { return @($Store.Certificates | Where-Object { $_.Thumbprint -eq $Thumb }).Count -gt 0 } finally { $Store.Close() }
-}
-function Remove-TrustedCert([string]$Thumb) {
-    $Store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPeople", "LocalMachine")
-    $Store.Open("ReadWrite")
-    try { foreach ($Found in @($Store.Certificates | Where-Object { $_.Thumbprint -eq $Thumb })) { $Store.Remove($Found) } } finally { $Store.Close() }
-}
-function Get-CertReferences([string]$Thumb) {
-    # Other custom apps of this tool whose marker names the certificate (it stays while one still needs it)
-    $Count = 0
-    foreach ($Folder in @(Get-ChildItem -LiteralPath $CustomRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne $AppId })) {
-        $Other = Join-Path $Folder.FullName "version.txt"
-        if (Test-Path -LiteralPath $Other) { if ((Get-Content -LiteralPath $Other -Raw).Trim().Split("|")[2] -eq $Thumb) { $Count++ } }
-    }
-    return $Count
-}
-function Get-Provisioned { @(Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $Identity }) }
-
-if (-not (Enter-DeploymentLock)) { Write-Output "Another installation is still running"; Write-DeviceLog "another installation is still running, Intune tries again"; exit 1618 }
-try {
-    $OldThumb = $null
-    if (Test-Path -LiteralPath $Marker) { $OldThumb = (Get-Content -LiteralPath $Marker -Raw).Trim().Split("|")[2] }
-
-    if ($Uninstall) {
-        foreach ($Package in @(Get-Provisioned)) { Remove-AppxProvisionedPackage -Online -PackageName $Package.PackageName -ErrorAction Stop | Out-Null }
-        foreach ($Package in @(Get-AppxPackage -AllUsers -Name $Identity -ErrorAction SilentlyContinue)) { Remove-AppxPackage -Package $Package.PackageFullName -AllUsers -ErrorAction SilentlyContinue }
-        if (@(Get-Provisioned).Count -gt 0) { Write-DeviceLog "uninstall: package is still provisioned"; exit 1 }
-        # Only this version's certificate, and only when no other custom app of the tool still needs it
-        $Own = if ($OldThumb) { $OldThumb } else { $Thumbprint }
-        if ((Get-CertReferences $Own) -eq 0) { Remove-TrustedCert $Own; Write-DeviceLog "certificate $Own removed" } else { Write-DeviceLog "certificate $Own is still used by another app, kept" }
-        Remove-Item -LiteralPath $Marker -Force -ErrorAction SilentlyContinue
-        Write-DeviceLog "uninstalled $Identity"
-        exit 0
-    }
-
-    # Copy next to the protected folder first: the Intune cache folder is not ours
-    $Staging = Join-Path $AppRoot "staging"
-    Protect-Folder $Staging
-    foreach ($Name in "package.msix", "signing.cer") { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $Name) -Destination $Staging -Force }
-    $Msix = Join-Path $Staging "package.msix"
-    $Cer = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 -ArgumentList (Join-Path $Staging "signing.cer")
-    if ($Cer.Thumbprint -ne $Thumbprint) { Write-Output "signing.cer is not the certificate of this version"; Write-DeviceLog "certificate file does not match the version, nothing installed"; exit 1 }
-    $Signature = Get-AuthenticodeSignature -LiteralPath $Msix
-    if (-not $Signature.SignerCertificate -or $Signature.SignerCertificate.Thumbprint -ne $Thumbprint -or [string]$Signature.Status -in "HashMismatch", "NotSigned") {
-        Write-Output "The package is not signed by the certificate of this version (status $($Signature.Status))"
-        Write-DeviceLog "package signature does not match the version certificate, nothing installed"
-        exit 1
-    }
-
-    $Had = Test-TrustedCert $Thumbprint
-    if (-not $Had) {
-        $Store = New-Object System.Security.Cryptography.X509Certificates.X509Store("TrustedPeople", "LocalMachine")
-        $Store.Open("ReadWrite"); $Store.Add($Cer); $Store.Close()
-        Write-DeviceLog "certificate $Thumbprint added to TrustedPeople"
-    }
-    try {
-        try { Add-AppxProvisionedPackage -Online -PackagePath $Msix -SkipLicense -ErrorAction Stop | Out-Null }
-        catch {
-            # A lower version may have to go first
-            Write-DeviceLog "provisioning failed ($($_.Exception.Message)), removing the provisioned version and trying again"
-            foreach ($Package in @(Get-Provisioned)) { Remove-AppxProvisionedPackage -Online -PackageName $Package.PackageName -ErrorAction Stop | Out-Null }
-            Add-AppxProvisionedPackage -Online -PackagePath $Msix -SkipLicense -ErrorAction Stop | Out-Null
-            Write-Output "NEEDED-REMOVE-FIRST"
-        }
-    }
-    catch {
-        Write-Output "Provisioning failed: $($_.Exception.Message)"
-        Write-DeviceLog "provisioning failed: $($_.Exception.Message)"
-        if (-not $Had -and (Get-CertReferences $Thumbprint) -eq 0 -and $OldThumb -ne $Thumbprint) { Remove-TrustedCert $Thumbprint }
-        exit 1
-    }
-    Write-ProtectedFile $Marker "$Identity|$Version|$Thumbprint"
-    # An update leaves the earlier version's certificate behind: remove it when nothing needs it any more
-    if ($OldThumb -and $OldThumb -ne $Thumbprint -and (Get-CertReferences $OldThumb) -eq 0) { Remove-TrustedCert $OldThumb; Write-DeviceLog "certificate $OldThumb of the earlier version removed" }
-    Remove-Item -LiteralPath $Staging -Recurse -Force -ErrorAction SilentlyContinue
-    Write-DeviceLog "installed $Identity $Version"
-    exit 0
-}
-finally { Exit-DeploymentLock }
-'@
-    $Detect = @'
-# Detection: the package is provisioned with this version or newer (no time dependency)
-if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
-    & "$env:SystemRoot\Sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "$PSCommandPath"
-    exit $LASTEXITCODE
-}
-$Identity = '__IDENTITY__'
-$Version = '__VERSION__'
-$Found = @(Get-AppxProvisionedPackage -Online | Where-Object { $_.DisplayName -eq $Identity }) | Select-Object -First 1
-if (-not $Found) { exit 1 }
-try { if ([version]$Found.Version -ge [version]$Version) { Write-Output "$Identity $($Found.Version) is provisioned"; exit 0 } } catch { }
-exit 1
-'@
-    $Common = Get-DeviceScriptCommon
-    $Fill = { param($Text) $Text.Replace('__COMMON__', $Common).Replace('__APPID__', $AppId).Replace('__IDENTITY__', $Identity).Replace('__VERSION__', $Version).Replace('__THUMBPRINT__', $Thumbprint) }
-    [pscustomobject]@{ Install = (& $Fill $Install); Detect = (& $Fill $Detect) }
+    $s = Get-PackTuneCustomMsixScripts -AppId $AppId -PackageName $Identity -Version $Version -Thumbprint $Thumbprint
+    [pscustomobject]@{ Install = $s.Install; Detect = $s.Detection }
 }
 #endregion
 
@@ -313,6 +184,16 @@ try {
     Add-Result 'detect v1 after install (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Output)"
     $Info.AfterV1_AllUsers = @(Get-AppxPackage -AllUsers -Name $Plan.Identity -ErrorAction SilentlyContinue | ForEach-Object { "$($_.PackageFullName) status=$($_.Status)" })
     $Info.AfterV1_Users = @(Get-AppxPackage -AllUsers -Name $Plan.Identity -ErrorAction SilentlyContinue | ForEach-Object { $_.PackageUserInformation | ForEach-Object { "$($_.UserSecurityId.Sid) $($_.InstallState)" } })
+
+    # A failed update (version 3 cannot be provisioned): the install script puts version 1 back and keeps its certificate
+    $C = $Plan.V3.Thumbprint
+    $r = Invoke-Device 'v3' 'install.ps1'
+    Add-Result 'failed update: the install script reports the failure (exit not 0)' ($r.Code -ne 0) "exit=$($r.Code) $($r.Output)"
+    Add-Result 'failed update: version 1.0.0.0 is provisioned again' ((Get-ProvVersion) -eq '1.0.0.0') "version=$(Get-ProvVersion)"
+    Add-Result 'failed update: certificate A of version 1 kept, the certificate of the failed version removed' ((Get-Certs) -contains $A -and -not ((Get-Certs) -contains $C)) "certs=$((Get-Certs) -join ',')"
+    $r = Invoke-Device 'v1' 'detect.ps1'
+    Add-Result 'failed update: version 1 is detected (exit 0)' ($r.Code -eq 0) "exit=$($r.Code) $($r.Output)"
+    $Info.AfterFailedUpdate = @(Get-AppxPackage -AllUsers -Name $Plan.Identity -ErrorAction SilentlyContinue | ForEach-Object { "$($_.PackageFullName) status=$($_.Status)" })
 
     # N3 update without its certificate must fail, v1 stays
     $ok = Try-Add (Join-Path $Work 'v2\package.msix')
@@ -380,8 +261,10 @@ try {
     Write-Host 'Building the two test packages (own certificate each, keys deleted after signing) ...'
     $v1 = New-SpikeMsix -Version '1.0.0.0' -Folder (Join-Path $in 'v1')
     $v2 = New-SpikeMsix -Version '1.0.1.0' -Folder (Join-Path $in 'v2')
+    # A version that cannot be provisioned (it needs a Windows build that does not exist): the failed update
+    $v3 = New-SpikeMsix -Version '1.0.2.0' -Folder (Join-Path $in 'v3') -MinOs '10.0.65535.0'
     if ($v1.Thumbprint -eq $v2.Thumbprint) { throw 'Both versions got the same certificate' }
-    foreach ($v in $v1, $v2) {
+    foreach ($v in $v1, $v2, $v3) {
         $scripts = Get-CustomMsixScripts -AppId $AppId -Identity $Identity -Version $v.Version -Thumbprint $v.Thumbprint
         $folder = Split-Path $v.Msix -Parent
         Set-Content -Path (Join-Path $folder 'install.ps1') -Value $scripts.Install -Encoding ASCII
@@ -393,7 +276,7 @@ try {
             if ($errors.Count -gt 0 -or $text -match '[^\x00-\x7F]' -or $text -match '__[A-Z]+__') { throw "Generated $name of $($v.Version) is invalid (parse errors: $($errors.Count))" }
         }
     }
-    @{ Subject = $Subject; Identity = $Identity; V1 = @{ Thumbprint = $v1.Thumbprint }; V2 = @{ Thumbprint = $v2.Thumbprint } } | ConvertTo-Json | Set-Content (Join-Path $in 'plan.json') -Encoding ASCII
+    @{ Subject = $Subject; Identity = $Identity; V1 = @{ Thumbprint = $v1.Thumbprint }; V2 = @{ Thumbprint = $v2.Thumbprint }; V3 = @{ Thumbprint = $v3.Thumbprint } } | ConvertTo-Json | Set-Content (Join-Path $in 'plan.json') -Encoding ASCII
     Set-Content -Path (Join-Path $in 'inner.ps1') -Value $Inner -Encoding ASCII
     Set-Content -Path (Join-Path $in 'bootstrap.ps1') -Value $Bootstrap -Encoding ASCII
     $esc = { param($s) [Security.SecurityElement]::Escape($s) }
