@@ -243,7 +243,7 @@ $script:WorkPool = [runspacefactory]::CreateRunspacePool(1, 1)
 $script:WorkPool.Open()
 $script:UserPool = [runspacefactory]::CreateRunspacePool(1, 3)
 $script:UserPool.Open()
-$script:MetaPool = [runspacefactory]::CreateRunspacePool(1, 3)
+$script:MetaPool = [runspacefactory]::CreateRunspacePool(1, 4)
 $script:MetaPool.Open()
 # A sandbox test waits until you report its result (Windows Sandbox runs one at a time): it must not hold up anything else
 $script:TestPool = [runspacefactory]::CreateRunspacePool(1, 1)
@@ -447,6 +447,8 @@ $timer.Add_Tick({
         }
         Update-Toasts
         # App cards fill up while the feed lookups run
+        if ($script:Refreshing -and $script:Tick % 4 -eq 0) { Update-RefreshButton }
+        if ($script:Refreshing -and $script:Tick % 8 -eq 0 -and $script:CurrentPage -eq 'Apps') { Update-CatalogRows; Update-AppList }
         if ($script:MetaRefreshPending -and $script:Tick % 4 -eq 0) {
             $script:MetaRefreshPending = $false
             if ($script:CurrentPage -eq 'Apps') { Update-AppList }
@@ -585,8 +587,8 @@ function Start-MetaPrefetch {
     if ($missing.Count -eq 0) { return }
     $script:MetaDirty = $true
     foreach ($item in $missing) { $script:MetaInFlight[(Get-MetaKey $item.Id $item.Source)] = $true }
-    for ($i = 0; $i -lt 3; $i++) {
-        $chunk = @(for ($j = $i; $j -lt $missing.Count; $j += 3) { @{ Source = $missing[$j].Source; Id = $missing[$j].Id } })
+    for ($i = 0; $i -lt 4; $i++) {
+        $chunk = @(for ($j = $i; $j -lt $missing.Count; $j += 4) { @{ Source = $missing[$j].Source; Id = $missing[$j].Id } })
         if ($chunk.Count -gt 0) {
             [void](Start-UiTask -Kind 'meta' -Title 'Reading package infos' -Work $script:MetaWork -Arguments @{ Items = $chunk } -Pool $script:MetaPool -Hidden -OnDone {
                 param($Result, $Job)
@@ -606,6 +608,8 @@ function Complete-MetaPrefetch {
     Update-DetailIcon
     Start-AppIconTask
     Save-MetaCache
+    # The interface started while lookups were still running: the automatic refresh follows now
+    if ($script:AutoRefreshPending -and -not (Test-TaskRunning 'popular')) { $script:AutoRefreshPending = $false; Start-AppsRefresh -Auto }
     Update-RefreshButton
     $failed = @($script:Shared.Meta.Values | Where-Object { -not $_.Found -and -not $_.NotFound })
     if ($failed.Count -gt 0 -and -not $script:MetaWarned) {
@@ -694,13 +698,13 @@ foreach ($p in 'Start', 'Apps', 'Tenant', 'Activity', 'Settings') {
 }
 
 function Show-Dialog([string]$Name) {
-    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgHelp') { $ui[$d].Visibility = if ($d -eq $Name) { 'Visible' } else { 'Collapsed' } }
+    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgHelp') { $ui[$d].Visibility = if ($d -eq $Name) { 'Visible' } else { 'Collapsed' } }
     $ui.DialogLayer.Visibility = 'Visible'
     $script:OpenDialog = $Name
 }
 function Close-Dialog {
     $ui.DialogLayer.Visibility = 'Collapsed'
-    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgHelp') { $ui[$d].Visibility = 'Collapsed' }
+    foreach ($d in 'DlgDeploy', 'DlgSchedule', 'DlgImport', 'DlgAddApp', 'DlgHelp') { $ui[$d].Visibility = 'Collapsed' }
     $script:OpenDialog = $null
 }
 $script:OpenDialog = $null
@@ -1047,6 +1051,7 @@ $script:Selected = [ordered]@{}      # app key -> source row (Get-PackTuneSource
 $script:SourceChoice = @{}           # app key -> 'Chocolatey' | 'Winget' chosen in the deploy dialog
 $script:CustomIcons = @{}            # app key -> PNG/JPEG base64
 $script:SourceRows = @()             # the curated catalog
+$script:MyRows = @()                 # apps the user added (my-apps.json)
 $script:PopularRows = @()            # the top Chocolatey packages by downloads that the catalog does not have
 $script:PopularLoaded = $false
 $script:PopularCachePath = Join-Path $script:WorkRoot 'popular.json'
@@ -1079,7 +1084,10 @@ function Get-AppMeta($Row, [string]$Source) {
 }
 function Get-SourceLabel([string]$Source) { if ($Source -eq 'Winget') { 'winget' } else { 'Chocolatey' } }
 
-function Update-CatalogRows { $script:SourceRows = @(Get-PackTuneSourceApps -Cache $script:Shared.Meta -NoFetch) }
+function Update-CatalogRows {
+    $script:SourceRows = @(Get-PackTuneSourceApps -Cache $script:Shared.Meta -NoFetch)
+    $script:MyRows = @(Get-PackTuneMyAppRows -Cache $script:Shared.Meta -NoFetch)
+}
 
 function New-TagRow([string]$Text, [string]$Kind) {
     switch ($Kind) {
@@ -1123,7 +1131,7 @@ function Set-CardRow($Card, $Src) {
 function Update-AppList {
     $rows = New-Object System.Collections.ArrayList
     $seen = @{}
-    foreach ($r in @($script:SourceRows) + @($script:PopularRows) + @($script:SearchRows)) { $k = Get-AppKey $r; if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; [void]$rows.Add($r) } }
+    foreach ($r in @($script:SourceRows) + @($script:MyRows) + @($script:PopularRows) + @($script:SearchRows)) { $k = Get-AppKey $r; if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; [void]$rows.Add($r) } }
     $rows = @(Select-PackTuneSourceApps -Apps @($rows) -Filter $script:SourceFilter)
     $text = $ui.TxtFilter.Text.Trim()
     $searching = $script:SearchTerm -and $script:SearchTerm -eq $text
@@ -1134,6 +1142,7 @@ function Update-AppList {
     })
     Update-Chips $rows
     if ($script:Category -eq 'Popular') { $rows = @($rows | Where-Object { $_.Popular }) }
+    elseif ($script:Category -eq 'My apps') { $rows = @($rows | Where-Object { $_.Mine }) }
     elseif ($script:Category -ne 'All') { $rows = @($rows | Where-Object { $_.Category -eq $script:Category }) }
     if ($script:SortMode -eq 'Downloads') { $rows = @($rows | Sort-Object -Property @{ Expression = { Get-AppDownloads $_ }; Descending = $true }, @{ Expression = { $_.Name } }) }
     $cards = foreach ($r in $rows) {
@@ -1149,7 +1158,7 @@ function Update-AppList {
         foreach ($c in $cards) { $script:CardCollection.Add($c) }
     }
     $loading = @($script:Shared.Meta.Count -lt 2 -and (Test-TaskRunning 'meta')).Count
-    $ui.TxtAppsCount.Text = "$($cards.Count) shown" + $(if (Test-TaskRunning 'popular') { ', popular apps loading' } elseif (Test-TaskRunning 'meta') { ', versions still loading' } elseif ($searching) { ", $(@($script:SearchRows).Count) from the repositories" } else { '' })
+    $ui.TxtAppsCount.Text = "$($cards.Count) shown" + $(if (Get-RefreshProgress) { ', ' + (Get-RefreshProgress) } elseif (Test-TaskRunning 'popular') { ', popular apps loading' } elseif (Test-TaskRunning 'meta') { ', versions still loading' } elseif ($searching) { ", $(@($script:SearchRows).Count) from the repositories" } else { '' })
     $curated = $script:SourceRows.Count
     $ui.TxtAppsSubtitle.Text = "$curated curated apps$(if (@($script:PopularRows).Count) { " and the $(@($script:PopularRows).Count) most popular Chocolatey packages" }) from winget and Chocolatey in one list. Type to filter, or search both repositories."
     if ($script:DetailRow) { Show-AppDetails $script:DetailRow -Keep }
@@ -1160,7 +1169,7 @@ $script:Chips = @{}
 function Update-Chips($Rows) {
     # Category chips with the number of apps each one has in the current view; built once, counted on every change
     $cats = @($script:Catalog | ForEach-Object { $_.Category } | Where-Object { $_ } | Sort-Object -Unique)
-    $cats = @('Popular') + $cats + @('Other')
+    $cats = @('Popular', 'My apps') + $cats + @('Other')
     if ($script:Chips.Count -eq 0) {
         foreach ($cat in @('All') + $cats) {
             $chip = New-Object System.Windows.Controls.RadioButton
@@ -1172,38 +1181,74 @@ function Update-Chips($Rows) {
         }
     }
     foreach ($cat in $script:Chips.Keys) {
-        $count = if ($cat -eq 'All') { @($Rows).Count } elseif ($cat -eq 'Popular') { @($Rows | Where-Object { $_.Popular }).Count } else { @($Rows | Where-Object { $_.Category -eq $cat }).Count }
+        $count = if ($cat -eq 'All') { @($Rows).Count } elseif ($cat -eq 'Popular') { @($Rows | Where-Object { $_.Popular }).Count } elseif ($cat -eq 'My apps') { @($Rows | Where-Object { $_.Mine }).Count } else { @($Rows | Where-Object { $_.Category -eq $cat }).Count }
         $script:Chips[$cat].Content = "$cat  $count"
     }
 }
 
+function Get-RefreshItems {
+    # Every listed app that needs a package lookup: the curated catalog and my apps (the popular list brings its own
+    # versions with the one feed query, no lookup per package). -OlderThan leaves out infos read just now.
+    param($OlderThan)
+    $items = New-Object System.Collections.ArrayList
+    foreach ($e in $script:Catalog) {
+        if ($e.Id) { [void]$items.Add(@{ Source = 'Chocolatey'; Id = $e.Id }) }
+        if ($e.WingetId) { [void]$items.Add(@{ Source = 'Winget'; Id = $e.WingetId }) }
+    }
+    foreach ($a in @(Get-PackTuneMyApps)) {
+        if ($a.ChocoId) { [void]$items.Add(@{ Source = 'Chocolatey'; Id = $a.ChocoId }) }
+        if ($a.WingetId) { [void]$items.Add(@{ Source = 'Winget'; Id = $a.WingetId }) }
+    }
+    $list = @($items | Where-Object { $_.Source -ne 'Winget' -or $script:ModuleState.Winget })
+    if ($null -ne $OlderThan) {
+        $list = @($list | Where-Object { $m = $script:Shared.Meta[(Get-MetaKey $_.Id $_.Source)]; -not ($m -and $m.Fetched -and ([datetime]$m.Fetched) -ge $OlderThan) })
+    }
+    if ($script:RefreshItemLimit -gt 0) { $list = @($list | Select-Object -First $script:RefreshItemLimit) }   # tests only
+    return $list
+}
+$script:RefreshItemLimit = 0
 function Start-CatalogPrefetch {
     param([switch]$Force)
-    $items = foreach ($e in $script:Catalog) {
-        if ($e.Id) { @{ Source = 'Chocolatey'; Id = $e.Id } }
-        if ($e.WingetId) { @{ Source = 'Winget'; Id = $e.WingetId } }
-    }
-    Start-MetaPrefetch -Items @($items) -Force:$Force
+    Start-MetaPrefetch -Items @(Get-RefreshItems) -Force:$Force
 }
 $script:PopularWork = @'
-param($Force, $Path, $Fixture)
-$Params = @{ CachePath = $Path; Cache = $Shared.Meta; Force = [bool]$Force }
+param($Force, $Stale, $Path, $Fixture)
+$Params = @{ CachePath = $Path; Cache = $Shared.Meta; Force = [bool]$Force; AllowStale = [bool]$Stale }
 # Test hook: a file with feed packages instead of the community feed
 if ($Fixture -and (Test-Path -LiteralPath $Fixture)) { $Params.FeedPackages = @(Get-Content -LiteralPath $Fixture -Raw | ConvertFrom-Json) }
 Get-PackTunePopularApps @Params
 '@
+$script:Refreshing = $false
+$script:RefreshStart = $null
+$script:RefreshKeys = @()
+$script:AutoRefreshPending = $false
+function Get-RefreshProgress {
+    # "Updating versions 120/290" while a refresh runs (infos read since it started, plus the popular list when it is in)
+    if (-not $script:Refreshing) { return $null }
+    $done = 0
+    foreach ($k in $script:RefreshKeys) { $m = $script:Shared.Meta[$k]; if ($m -and $m.Fetched -and ([datetime]$m.Fetched) -ge $script:RefreshStart) { $done++ } }
+    $pop = @($script:PopularRows).Count
+    if (-not (Test-TaskRunning 'popular')) { $done += $pop }
+    "Updating versions $done/$($script:RefreshKeys.Count + $pop)"
+}
 function Update-RefreshButton {
     $busy = (Test-TaskRunning 'popular') -or (Test-TaskRunning 'meta')
     $ui.BtnRefreshApps.IsEnabled = -not $busy
     $ui.BtnRefreshApps.Content = if ($busy -and $script:Refreshing) { 'Refreshing ...' } else { 'Refresh versions' }
-    if (-not $busy) { $script:Refreshing = $false }
+    if (-not $busy -and $script:Refreshing) {
+        # A full refresh is done: the next automatic one waits an hour (the Chocolatey feed limits the requests)
+        $script:Refreshing = $false
+        try { Set-PackTuneRefreshStamp } catch { }
+        Update-CatalogRows
+        Update-AppList
+    }
 }
 function Start-PopularLoad {
-    # The top Chocolatey packages by downloads (24 hour cache; -Force reads the feed now), merged into the app list
-    param([switch]$Force)
+    # The top Chocolatey packages by downloads (24 hour cache; -AllowStale shows an older cache at once; -Force reads the
+    # feed now), merged into the app list
+    param([switch]$Force, [switch]$AllowStale)
     if (Test-TaskRunning 'popular') { return }
-    Update-RefreshButton
-    [void](Start-UiTask -Kind 'popular' -Title 'Reading the popular apps' -Display 'Popular apps' -Pool $script:UserPool -Hidden -Arguments @{ Force = [bool]$Force; Path = $script:PopularCachePath; Fixture = $env:PACKTUNE_POPULAR_FIXTURE } -Work $script:PopularWork -OnDone {
+    [void](Start-UiTask -Kind 'popular' -Title 'Reading the popular apps' -Display 'Popular apps' -Pool $script:UserPool -Hidden -Arguments @{ Force = [bool]$Force; Stale = [bool]$AllowStale; Path = $script:PopularCachePath; Fixture = $env:PACKTUNE_POPULAR_FIXTURE } -Work $script:PopularWork -OnDone {
         param($Result, $Job)
         if ($Job.Status -eq 'failed') { Write-UiLog 'The popular apps could not be read, the curated list stays (see Activity).' 'Warning' }
         else {
@@ -1213,23 +1258,29 @@ function Start-PopularLoad {
         }
         $script:MetaDirty = $true
         Update-AppList
-        Update-RefreshButton
         Start-AppIconTask
         Save-MetaCache
         Start-IconRender
+        # Start of the interface: the list is on screen from the cache, now the versions are refreshed in the background
+        if ($script:AutoRefreshPending -and -not (Test-TaskRunning 'meta')) { $script:AutoRefreshPending = $false; Start-AppsRefresh -Auto }
+        Update-RefreshButton
     })
     Update-AppList
 }
-$script:Refreshing = $false
 function Start-AppsRefresh {
-    # Refresh versions: the package infos of the curated apps and the popular list, read again now (no cache). The
-    # feed retries with a wait when it limits the requests.
+    # Refresh versions: the package infos of all listed apps and the popular list, read again now (no cache). With -Auto
+    # (start of the interface) what was read a moment ago is left out. The feed retries with a wait when it limits the requests.
+    param([switch]$Auto)
     if ((Test-TaskRunning 'popular') -or (Test-TaskRunning 'meta')) { return }
     $script:Refreshing = $true
+    $script:RefreshStart = Get-Date
     $script:MetaWarned = $false
-    Write-UiLog 'Refreshing the package infos and the popular apps, ignoring the cache ...'
-    Start-PopularLoad -Force
-    Start-CatalogPrefetch -Force
+    $items = @(Get-RefreshItems -OlderThan $(if ($Auto) { (Get-Date).AddMinutes(-2) }))
+    $script:RefreshKeys = @($items | ForEach-Object { Get-MetaKey $_.Id $_.Source })
+    Write-UiLog $(if ($Auto) { 'Updating the versions of the listed apps in the background ...' } else { 'Refreshing the package infos and the popular apps, ignoring the cache ...' })
+    $fresh = $Auto -and (Test-Path -LiteralPath $script:PopularCachePath) -and ((Get-Item -LiteralPath $script:PopularCachePath).LastWriteTime -gt (Get-Date).AddMinutes(-2))
+    if (-not $fresh) { Start-PopularLoad -Force }
+    Start-MetaPrefetch -Items $items -Force
     Update-RefreshButton
 }
 Add-Click $ui.BtnRefreshApps { try { Start-AppsRefresh } catch { Show-Error $_.Exception.Message } }
@@ -1299,6 +1350,109 @@ function Start-AppSearch {
 }
 Add-Click $ui.BtnSearchRepos { Start-AppSearch }
 
+# ---------------------------------------------------------------- add application: live search in both repositories
+$script:AddRows = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+$ui.LstAddResults.ItemsSource = $script:AddRows
+$script:AddResultRows = @()
+$script:AddPending = $null
+$script:AddTimer = New-Object System.Windows.Threading.DispatcherTimer
+$script:AddTimer.Interval = [TimeSpan]::FromMilliseconds(450)
+
+function Test-AppListed($Row) {
+    # Is this app in the list already (curated, mine or popular)?
+    foreach ($l in @($script:SourceRows) + @($script:MyRows) + @($script:PopularRows)) {
+        if (($Row.ChocoId -and $l.ChocoId -and $l.ChocoId -ieq $Row.ChocoId) -or ($Row.WingetId -and $l.WingetId -and $l.WingetId -ieq $Row.WingetId)) { return $true }
+    }
+    return $false
+}
+function Set-AddRow($Card, $Src) {
+    $tags = New-Object System.Collections.ArrayList
+    foreach ($source in 'Winget', 'Chocolatey') {
+        if ($Src.Sources -notcontains $source) { continue }
+        $version = if ($source -eq 'Winget') { $Src.WingetVersion } else { $Src.ChocoVersion }
+        $label = if ($source -eq 'Winget') { 'winget' } else { 'Choco' }
+        $rec = $Src.RecommendedMarked -and $Src.Recommended -eq $source
+        [void]$tags.Add((New-TagRow ("$label $version").Trim() $(if ($rec) { 'recsrc' } else { 'plain' })))
+        if ($rec) { [void]$tags.Add((New-TagRow 'Recommended' 'rec')) }
+    }
+    $listed = Test-AppListed $Src
+    $icon = if ($Src.IconUrl) { Get-IconPreview ([string]$Src.IconUrl) }
+    $sub = @($(if ($Src.Downloads -gt 0) { '{0:N0} downloads' -f $Src.Downloads } elseif ($Src.Sources -contains 'Winget' -and $Src.Sources.Count -eq 1) { 'winget only' }), $Src.Category) | Where-Object { $_ }
+    Set-Row $Card (@{
+        Data = $Src; Title = $Src.Name; Items = $tags.ToArray(); Sub = ($sub -join "  $([char]0x00B7)  ")
+        Icon = $icon; MonoVis = (ConvertTo-Vis (-not $icon)); AddText = $(if ($listed) { 'In list' } else { 'Add' }); CanAdd = [string](-not $listed)
+    } + (Get-TileStyle $Src.Name))
+}
+function Update-AddRows {
+    $script:AddRows.Clear()
+    foreach ($r in @($script:AddResultRows)) { $card = New-Object PackTune.Row; Set-AddRow $card $r; $script:AddRows.Add($card) }
+    $n = @($script:AddResultRows).Count
+    $ui.TxtAddEmpty.Text = if ($n -eq 0 -and $ui.TxtAddSearch.Text.Trim().Length -ge 2 -and -not (Test-TaskRunning 'addsearch')) { 'Nothing found.' } elseif ($n -eq 0) { 'Type at least two characters.' } else { '' }
+    $ui.TxtAddStatus.Text = if (Test-TaskRunning 'addsearch') { 'Searching ...' } elseif ($n) { "$n result(s), most downloaded first" } else { '' }
+}
+function Start-AddSearch([string]$Term) {
+    # One request set at a time (rate limit); typing meanwhile only remembers the latest text, older answers are dropped
+    if ($Term.Length -lt 2) { $script:AddResultRows = @(); Update-AddRows; return }
+    if (Test-TaskRunning 'addsearch') { $script:AddPending = $Term; return }
+    $ui.TxtAddStatus.Text = 'Searching ...'
+    [void](Start-UiTask -Kind 'addsearch' -Title "Searching for '$Term'" -Display "Add application: $Term" -Pool $script:UserPool -Hidden -Arguments @{ Term = $Term } -Work 'param($Term) Search-PackTuneApps -SearchPattern $Term -Top 25 -Cache $Shared.Meta' -OnDone {
+        param($Result, $Job)
+        $term = [string]$Job.Spec.Arguments.Term
+        $pending = $script:AddPending; $script:AddPending = $null
+        if ($pending -and $pending -ne $term) { Start-AddSearch $pending; return }   # stale: the text changed meanwhile
+        if ($script:OpenDialog -ne 'DlgAddApp') { return }
+        $script:AddResultRows = @($Result | Where-Object { $_ -and $_.Name })
+        $script:MetaDirty = $true
+        Update-AddRows
+        if ($Job.Status -eq 'failed') { $ui.TxtAddStatus.Text = 'The search failed, see Activity' }
+    })
+}
+$script:AddTimer.Add_Tick({ $script:AddTimer.Stop(); try { Start-AddSearch $ui.TxtAddSearch.Text.Trim() } catch { Show-Error $_.Exception.Message } })
+$ui.TxtAddSearch.Add_TextChanged({
+    $ui.HintAddSearch.Visibility = ConvertTo-Vis (-not $ui.TxtAddSearch.Text)
+    $script:AddTimer.Stop(); $script:AddTimer.Start()   # debounce: search when typing has paused
+})
+$ui.TxtAddSearch.Add_KeyDown({ param($s, $e) if ($e.Key -eq 'Return') { $script:AddTimer.Stop(); try { Start-AddSearch $ui.TxtAddSearch.Text.Trim() } catch { Show-Error $_.Exception.Message } } })
+Add-Click $ui.BtnAddApp {
+    $script:AddResultRows = @(); $script:AddPending = $null
+    $ui.TxtAddSearch.Text = ''
+    Update-AddRows
+    Show-Dialog 'DlgAddApp'
+    [void]$ui.TxtAddSearch.Focus()
+}
+Add-Click $ui.BtnAddClose { $script:AddTimer.Stop(); Close-Dialog }
+$ui.LstAddResults.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler] {
+    param($s, $e)
+    try {
+        $b = $e.OriginalSource
+        if ($b -isnot [System.Windows.Controls.Button] -or $b.Uid -ne 'add' -or $b.DataContext -isnot [PackTune.Row]) { return }
+        $src = $b.DataContext.Data
+        $result = Add-PackTuneMyApp -Name $src.Name -ChocoId $src.ChocoId -WingetId $src.WingetId -Tags $src.Tags
+        if ($result.Added) {
+            Show-Toast "$($src.Name) is in My apps." 'ok'
+            Write-UiLog "Added $($src.Name) to my apps."
+        }
+        else { Show-Toast $result.Reason 'info' }
+        # In the list at once; its package infos are read in the background
+        Update-CatalogRows
+        Update-AppList
+        Start-CatalogPrefetch
+        Set-AddRow $b.DataContext $src
+    }
+    catch { Show-Error $_.Exception.Message }
+})
+Add-Click $ui.BtnDetailRemoveMine {
+    $src = $script:DetailRow
+    if (-not $src -or -not $src.Mine) { return }
+    [void](Remove-PackTuneMyApp -ChocoId $src.ChocoId -WingetId $src.WingetId)
+    Set-AppSelected $src $false
+    $script:DetailRow = $null
+    $ui.PanelDetails.Visibility = 'Collapsed'
+    Update-CatalogRows
+    Update-AppList
+    Show-Toast "$($src.Name) was taken off your list (Intune is unchanged)." 'info'
+}
+
 # ---------------------------------------------------------------- selection and details
 function Set-AppSelected($Src, [bool]$On) {
     $key = Get-AppKey $Src
@@ -1312,9 +1466,6 @@ function Clear-Selection {
     Update-SelectionBar
 }
 Add-Click $ui.BtnClearSelection { Clear-Selection }
-Add-Click $ui.BtnSelectShown {
-    foreach ($card in $script:CardCollection) { Set-AppSelected $card.Data $true }
-}
 $ui.CardList.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickEvent, [System.Windows.RoutedEventHandler] {
     param($s, $e)
     try {
@@ -1349,6 +1500,7 @@ function Show-AppDetails($Src, [switch]$Keep) {
     $meta = Get-AppMeta $Src $source
     $other = $Src.Sources | Where-Object { $_ -ne $source } | Select-Object -First 1
     $ui.TxtDetailTitle.Text = $Src.Name
+    $ui.BtnDetailRemoveMine.Visibility = ConvertTo-Vis ([bool]$Src.Mine)
     $parts = @(); if ($meta -and $meta.Found -and $meta.Authors) { $parts += $meta.Authors }; if ($meta -and $meta.Found -and $meta.License) { $parts += "license $($meta.License)" }
     $ui.TxtDetailMeta.Text = $parts -join "  $([char]0x00B7)  "
     $lines = foreach ($s in 'Winget', 'Chocolatey') {
@@ -3155,8 +3307,9 @@ Update-ConnectionStatus
 Show-Page 'Start'
 Update-TenantRows
 $timer.Start()
+$script:AutoRefreshPending = Test-PackTuneRefreshDue
 Start-CatalogPrefetch
-Start-PopularLoad
+Start-PopularLoad -AllowStale
 if (-not (Test-TaskRunning 'meta')) { Start-IconRender }   # all infos came from the cache
 # Test hook: PACKTUNE_SMOKE names a script that drives the window off-screen and renders every page.
 if ($env:PACKTUNE_SMOKE) { . $env:PACKTUNE_SMOKE }
