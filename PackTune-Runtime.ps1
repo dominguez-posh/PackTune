@@ -18,7 +18,7 @@ $script:RuntimeMarker = "PackTuneRuntimeApp"
 $script:OldWingetRuntimeName = "winget runtime"
 $script:OldWingetRuntimeMarker = "WingetRuntimeApp"
 # Raised when the install, update or detection script of the runtime app changes (part of its detection)
-$script:RuntimeRevision = 4
+$script:RuntimeRevision = 5
 
 #region scripts
 
@@ -187,13 +187,13 @@ finally { Exit-DeploymentLock }
 try {
     Remove-Item -LiteralPath (Join-Path $RuntimeRoot "update.ps1") -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "update.ps1") -Destination $RuntimeRoot -Force -ErrorAction Stop
-    # The tray agent "PackTune Updates": a script in the protected folder (users read it, they cannot change it), started by a task of the Users group at every logon
+    # The tray agent "PackTune Updates" (one per user session: the task runs in parallel for every user who signs in, e.g. on multi-session hosts; the agent's own Local\ mutex keeps it to one per session): a script in the protected folder (users read it, they cannot change it), started by a task of the Users group at every logon
     Remove-Item -LiteralPath (Join-Path $RuntimeRoot "tray.ps1") -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "tray.ps1") -Destination $RuntimeRoot -Force -ErrorAction Stop
     $TrayPowerShell = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\powershell.exe"
     $TrayAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\conhost.exe" -Argument "--headless `"$TrayPowerShell`" -STA -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $RuntimeRoot 'tray.ps1')`""
     $TrayUsers = New-ScheduledTaskPrincipal -GroupId "S-1-5-32-545" -RunLevel Limited
-    $TraySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew
+    $TraySettings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances Parallel
     Register-ScheduledTask -TaskName $TrayTaskName -TaskPath $TaskPath -Action $TrayAction -Trigger (New-ScheduledTaskTrigger -AtLogOn) -Principal $TrayUsers -Settings $TraySettings -Force -ErrorAction Stop | Out-Null
     foreach ($Name in $OldTaskName, $TaskName) { Unregister-ScheduledTask -TaskName $Name -TaskPath $OldTaskPath -Confirm:$false -ErrorAction SilentlyContinue }
     Remove-OldTaskFolder $OldTaskPath
@@ -446,7 +446,9 @@ function Invoke-PackTuneIntuneGraph {
     if (Get-Command Invoke-FakeIntuneGraph -ErrorAction SilentlyContinue) { return (Invoke-IntuneModule { Invoke-FakeIntuneGraph -Method $Method -Path $Path -Body $Body }) }
     Assert-PackTuneConnection
     Update-PackTuneToken
-    $Params = @{ Method = $Method; Uri = "https://graph.microsoft.com/beta/deviceAppManagement/$Path"; Headers = $Global:AuthenticationHeader; ErrorAction = "Stop" }
+    # A path that starts with deviceManagement/ is relative to the beta root, every other one to deviceAppManagement
+    $Url = if ($Path -like "deviceManagement/*") { "https://graph.microsoft.com/beta/$Path" } else { "https://graph.microsoft.com/beta/deviceAppManagement/$Path" }
+    $Params = @{ Method = $Method; Uri = $Url; Headers = $Global:AuthenticationHeader; ErrorAction = "Stop" }
     if ($null -ne $Body) { $Params.Body = ($Body | ConvertTo-Json -Depth 8); $Params.ContentType = "application/json" }
     try { return (Invoke-RestMethod @Params) }
     catch {
@@ -490,8 +492,15 @@ function Remove-PackTuneIntuneApp {
         a superseding app that points at it gets that supersedence taken off; the relationships of the app itself are cleared first
         (Intune refuses to delete a "parent of another app"); then the delete, and a read back that the app is gone. Every step is logged.
     #>
-    param([Parameter(Mandatory = $true)][string]$Id, [string]$Name)
+    param([Parameter(Mandatory = $true)][string]$Id, [string]$Name, [switch]$AllowInstalled)
     if (-not $Name) { $Name = $Id }
+    # Never while a device still reports the app as installed (the count is read again right now; when it cannot be read, nothing is deleted).
+    # -AllowInstalled is for the old dependency apps only: Chocolatey and winget stay on the devices whatever happens to the app in Intune.
+    if (-not $AllowInstalled) {
+        $Installed = $null
+        try { $Installed = Get-PackTuneAppInstalledCount -AppId $Id } catch { throw "$Name ($Id) is kept: the install count cannot be read ($($_.Exception.Message)). Nothing is deleted without it." }
+        if ($Installed -gt 0) { throw "$Name ($Id) is kept: still installed on $Installed device(s). Set the assignment to Uninstall first and remove the app when no device reports it any more." }
+    }
     $Relations = @(Get-PackTuneAppRelationships -AppId $Id)
     $Dependents = @($Relations | Where-Object { $_.Direction -eq "Incoming" -and $_.Kind -eq "Dependency" })
     if ($Dependents.Count) { throw "$Name ($Id) is kept: $($Dependents.Count) app(s) still depend on it: $((($Dependents | ForEach-Object { "$($_.TargetName) ($($_.TargetId))" }) -join ', ')). Switch or remove those first." }
@@ -643,7 +652,7 @@ function Remove-PackTuneUnusedDependencyApps {
         $Removed = $false
         if ($WhatIf) { Write-Host "Would delete $($Old.DisplayName) ($($Old.Id)): nothing depends on it" }
         else {
-            try { Remove-PackTuneIntuneApp -Id $Old.Id -Name $Old.DisplayName; $Removed = $true }
+            try { Remove-PackTuneIntuneApp -Id $Old.Id -Name $Old.DisplayName -AllowInstalled; $Removed = $true }
             catch { [void]$Failed.Add("$($Old.DisplayName) ($($Old.Id)): $($_.Exception.Message)"); Write-Error "$($Old.DisplayName) ($($Old.Id)) was not deleted: $($_.Exception.Message)" -ErrorAction Continue }
         }
         [pscustomobject]@{ Id = $Old.Id; DisplayName = $Old.DisplayName; Kind = $Old.Kind; Removed = $Removed }

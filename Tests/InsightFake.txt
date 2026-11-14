@@ -10,9 +10,12 @@ if ($P -like '*/deviceStatuses*') {
         @{ deviceId = 'md-4'; deviceName = 'PC-0002'; userPrincipalName = 'shared@example.test'; installState = 'installed'; installStateDetail = 'ok'; displayVersion = '26.6.0'; lastSyncDateTime = $Now.AddDays(-12).ToString('o') }
     ) }
 }
-if ($P -like '*/installSummary') {
-    if (Test-Path (Join-Path $Dir 'fake-summary-down.txt')) { throw 'Graph GET failed (403): forbidden (fake)' }
-    return @{ installedDeviceCount = 12; failedDeviceCount = 1; pendingInstallDeviceCount = 3; notInstalledDeviceCount = 4; notApplicableDeviceCount = 2; installedUserCount = 11; failedUserCount = 1; pendingInstallUserCount = 3; notInstalledUserCount = 4 }
+if ($P -like '*/installSummary') { throw 'Graph GET failed (400): BadRequest - the install summary is not available for this app type (fake)' }
+if ($P -like '*/reports/getAppStatusOverviewReport') {
+    if (Test-Path (Join-Path $Dir 'fake-summary-down.txt')) { throw 'Graph POST failed (403): forbidden (fake)' }
+    $Id = ([string]$Body.filter -replace "^\(ApplicationId eq '(.*)'\)$", '$1')
+    $Cols = 'ApplicationId', 'FailedDeviceCount', 'InstalledDeviceCount', 'PendingInstallDeviceCount', 'NotInstalledDeviceCount', 'NotApplicableDeviceCount', 'InstalledUserCount'
+    return @{ TotalRowCount = 1; Schema = @($Cols | ForEach-Object { @{ Column = $_; PropertyType = 'String' } }); Values = @(, @($Id, 1, 12, 3, 4, 2, 11)) }
 }
 if ($P -like '*/mobileApps/*/assignments*') {
     $Id = (($P -split '/mobileApps/')[1] -split '/')[0]

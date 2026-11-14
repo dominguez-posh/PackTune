@@ -257,7 +257,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         $saved = $script:CustomApps
         $script:CustomApps = @([pscustomobject]@{ Id = 'c-1'; DisplayName = 'Old Tool'; Kind = 'msi'; AppId = 'old-tool-1'; Version = '1.0'; ProductCode = '{X}'; UpgradeCode = ''; Manifest = ('ab' * 32); Identity = ''; Thumbprint = ''; Publisher = 'P'; Created = (Get-Date).ToString('o'); Intents = 'available'; Source = 'Custom'; IsChocolatey = $false })
         Update-CustomRows; $ui.LstCustom.SelectedItem = $script:CustomRows[0]
-        Test-Smoke 'no store: existing apps are listed, New version and Export are off, Remove stays on' (@($script:CustomRows).Count -eq 1 -and -not $ui.BtnCustomNewVersion.IsEnabled -and -not $ui.BtnCustomExport.IsEnabled -and $ui.BtnCustomRemove.IsEnabled)
+        Test-Smoke 'no store: existing apps are listed, New version and Export are off, Remove stays off until the install count is known' (@($script:CustomRows).Count -eq 1 -and -not $ui.BtnCustomNewVersion.IsEnabled -and -not $ui.BtnCustomExport.IsEnabled -and -not $ui.BtnCustomRemove.IsEnabled)
         $script:StoreState = $ready; Update-CustomRows; $ui.LstCustom.SelectedItem = $script:CustomRows[0]
         Test-Smoke 'store ready again: everything is back on' ($ui.BtnCustomNew.IsEnabled -and $ui.BtnCustomNewVersion.IsEnabled -and $ui.BtnCustomExport.IsEnabled -and $ui.BoxCustomStore.Visibility -eq 'Collapsed')
         $script:CustomApps = $saved; $ui.LstCustom.SelectedItem = $null; Update-CustomRows
@@ -294,6 +294,19 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'custom: removed at once after the confirmed delete' (@($script:CustomRows | Where-Object { $_['Title'] -eq 'Custom Fresh' }).Count -eq 0)
         $script:RemovedApps.Clear(); $script:PendingApps.Clear(); $script:CustomApps = $null
         $script:TenantApps = $origApps; $script:TenantPackages = $origPackages; $script:RecentDeploys = $origRecent; Update-TenantRows -Force
+        $true } }
+    @{ Name = 'crash guard'; Do = {
+        # an exception that nothing catches (like one thrown in an event handler of the window) must not end the process: it is logged with the stack and the window goes on
+        $crashLog = Join-Path $script:LogFolder 'crash.log'
+        Remove-Item $crashLog -Force -ErrorAction SilentlyContinue
+        [void]$window.Dispatcher.BeginInvoke([System.Action]{ throw 'smoke boom in an event handler' })
+        $window.Dispatcher.Invoke([System.Action]{ }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+        $window.Dispatcher.Invoke([System.Action]{ }, [System.Windows.Threading.DispatcherPriority]::ApplicationIdle)
+        $logged = (Test-Path $crashLog) -and ((Get-Content $crashLog -Raw) -match 'smoke boom in an event handler')
+        Test-Smoke 'an unhandled UI exception is written to crash.log with its stack and the window stays' ($logged -and (Get-Content $crashLog -Raw) -match 'script stack') ''
+        [PackTune.CrashGuard]::Report('Thread', (New-Object System.InvalidOperationException 'smoke boom in a thread'))
+        $line = $null; $seen = @(); while ([PackTune.CrashGuard]::Pending.TryDequeue([ref]$line)) { $seen += $line }
+        Test-Smoke 'a thread exception is logged too and queued for the log and toast of the window' ((Get-Content $crashLog -Raw) -match 'smoke boom in a thread' -and $seen.Count -ge 1)
         $true } }
     @{ Name = 'store readiness item'; Do = {
         $saved = $script:StoreState
@@ -494,7 +507,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'panel shows the selected app with version and update mode' ($ui.ScrollTenantApp.Visibility -eq 'Visible' -and $ui.TxtTenantAppTitle.Text -eq '7-Zip' -and $ui.RbTenantStartup.IsChecked -and $ui.CmbTenantVersion.SelectedIndex -eq 0)
         Test-Smoke 'panel summarises when updates install' ($ui.TxtTenantWhen.Text -like '*10:00 to 15:00*' -and $ui.TxtTenantConditions.Text) "$($ui.TxtTenantWhen.Text) | $($ui.TxtTenantConditions.Text)"
         Test-Smoke 'Available note shown for an Available app' ($ui.TxtTenantAvailableNote.Visibility -eq 'Visible')
-        Test-Smoke 'open, test, remove enabled for a selected app' ($ui.BtnTenantOpen.IsEnabled -and $ui.BtnTenantRemove.IsEnabled)
+        Test-Smoke 'open is enabled; remove is off while 12 devices report the app installed, with the reason and the Set to Uninstall shortcut' ($ui.BtnTenantOpen.IsEnabled -and -not $ui.BtnTenantRemove.IsEnabled -and $ui.TxtTenantRemoveNote.Text -like 'Still installed on 12 devices*' -and $ui.BtnTenantSetUninstall.Visibility -eq 'Visible') $ui.TxtTenantRemoveNote.Text
         $ui.LstTenant.SelectedItem = $rows[0]
         Test-Smoke 'dependency app has no update controls' ($ui.GbTenantPolicy.Visibility -eq 'Collapsed' -and $ui.BtnTenantApply.Visibility -eq 'Collapsed')
         $ui.LstTenant.SelectedItem = $zip
@@ -629,6 +642,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $r = Get-ActionApp
             Test-Smoke 'while the list reloads: Remove is off, the panel says "Updating the list ...", actions get no app' ($off -and $null -eq $r)
             $script:Tasks.RemoveAt($script:Tasks.Count - 1); Update-TenantButtons
+            $script:DeviceCounts[[string]$ui.LstTenant.SelectedItem.Data.Id] = @{ Id = [string]$ui.LstTenant.SelectedItem.Data.Id; Installed = 0; Fetched = Get-Date }; Update-TenantButtons   # no device reports it any more
             & $script:ClickActions[$ui.BtnTenantRemove]
             return $false
         }
@@ -805,7 +819,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             return $false
         }
         if ($s.Phase -eq 3) {
-            if (-not (Test-Idle 'removeinfo') -or -not (Test-Idle 'custom') -or -not (Test-Idle 'customlist')) { return $false }
+            if (-not (Test-Idle 'removeinfo') -or -not (Test-Idle 'custom') -or -not (Test-Idle 'customlist') -or -not (Test-Idle 'counts')) { return $false }
             $s.Phase = 4
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             $new = $fake | Where-Object { $_.displayVersion -eq '2.0.0' }
@@ -813,6 +827,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke 'the list shows both, the older one marked as replaced' ($script:CustomRows.Count -eq 2 -and @($script:CustomRows | Where-Object { $_['Kind'] -like '*(replaced)' }).Count -eq 1) ($script:CustomRows | ForEach-Object { $_['Kind'] })
             Save-SmokeShot '35-custom-versions'
             $ui.LstCustom.SelectedIndex = 0
+            foreach ($ca in @($script:CustomApps)) { $script:DeviceCounts[[string]$ca.Id] = @{ Id = [string]$ca.Id; Installed = 0; Fetched = Get-Date } }; Update-CustomRemoveState (Get-SelectedCustomApp)
             & $script:ClickActions[$ui.BtnCustomRemove]
             return $false
         }

@@ -413,19 +413,35 @@ function Get-InsightErrorCause {
     return "error $Hex"
 }
 
-function Get-InsightAppInstallSummary {
-    <#
-        How many devices have an app in which state, from Intune's own summary (beta: GET /deviceAppManagement/mobileApps/{id}/installSummary):
-        one small call per app instead of one row per device. Scopes: DeviceManagementApps.Read.All.
-    #>
-    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$AppId)
-    $S = Invoke-InsightGraph $Context GET "/beta/deviceAppManagement/mobileApps/$AppId/installSummary"
-    [pscustomobject]@{
-        AppId = $AppId; Installed = [int]$S.installedDeviceCount; Failed = [int]$S.failedDeviceCount; Pending = [int]$S.pendingInstallDeviceCount
-        NotInstalled = [int]$S.notInstalledDeviceCount; NotApplicable = [int]$S.notApplicableDeviceCount; Fetched = (Get-Date)
+function ConvertFrom-InsightReport {
+    # The answer of an Intune report (reports/get...Report): { Schema: [{ Column, PropertyType }], Values: [[...], ...] } as one object per row
+    param($Report)
+    $Columns = @(@($Report.Schema) | ForEach-Object { [string]$_.Column })
+    foreach ($Row in @($Report.Values)) {
+        $Values = @($Row)
+        $Object = [ordered]@{}
+        for ($i = 0; $i -lt $Columns.Count; $i++) { $Object[$Columns[$i]] = $(if ($i -lt $Values.Count) { $Values[$i] } else { $null }) }
+        [pscustomobject]$Object
     }
 }
 
+function Get-InsightAppInstallSummary {
+    <#
+        How many devices have an app in which state. The summary of the app (GET mobileApps/{id}/installSummary) answers 400 for Win32 apps, so
+        the report Intune itself uses for the status page is read: POST /beta/deviceManagement/reports/getAppStatusOverviewReport with the filter
+        ApplicationId. One small call per app instead of one row per device. Scopes: DeviceManagementApps.Read.All.
+    #>
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$AppId)
+    if ($AppId -notmatch '^[0-9A-Za-z-]{1,64}$') { throw "'$AppId' is not an app id." }
+    $Report = Invoke-InsightGraph $Context POST '/beta/deviceManagement/reports/getAppStatusOverviewReport' @{ filter = "(ApplicationId eq '$AppId')"; select = @() ; top = 1 }
+    $Row = @(ConvertFrom-InsightReport $Report) | Select-Object -First 1
+    # An app nobody has reported on yet has no row: all zero
+    $Count = { param($Name) if ($Row -and $null -ne $Row.$Name -and "$($Row.$Name)" -ne '') { [int]$Row.$Name } else { 0 } }
+    [pscustomobject]@{
+        AppId = $AppId; Installed = (& $Count 'InstalledDeviceCount'); Failed = (& $Count 'FailedDeviceCount'); Pending = (& $Count 'PendingInstallDeviceCount')
+        NotInstalled = (& $Count 'NotInstalledDeviceCount'); NotApplicable = (& $Count 'NotApplicableDeviceCount'); Fetched = (Get-Date)
+    }
+}
 function Get-InsightAllUsersAssignment {
     <# The all-users assignment PackTune manages: its intent (required, available, uninstall) or $null, plus how many group assignments exist (kept as they are). #>
     param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$AppId)
@@ -738,5 +754,5 @@ function Expand-InsightLogs {
 Export-ModuleMember -Function Set-TenantInsightHooks, New-InsightGraphContext, Invoke-InsightGraph, Get-InsightRequiredScopes, Get-InsightScopeSet,
 Get-InsightTokenScopes, Test-InsightReadiness, Get-InsightGrantedScopes, Get-InsightCommandInfo, Get-InsightClassification, Get-InsightTenantApps,
 Set-InsightAppTakeOver, Export-InsightManagedApps, Read-InsightExportFile, Test-InsightFeedUrl, Get-InsightOtherTenantContext, New-InsightRecreatedApps,
-Get-InsightErrorCause, Get-InsightAppInstallStatus, Get-InsightAppInstallSummary, Get-InsightAllUsersAssignment, Set-InsightAllUsersAssignment, Get-InsightStatusScriptText, Test-InsightRemediationsAvailable, Get-InsightStatusScriptState,
+Get-InsightErrorCause, Get-InsightAppInstallStatus, ConvertFrom-InsightReport, Get-InsightAppInstallSummary, Get-InsightAllUsersAssignment, Set-InsightAllUsersAssignment, Get-InsightStatusScriptText, Test-InsightRemediationsAvailable, Get-InsightStatusScriptState,
 Set-InsightStatusScript, Initialize-InsightStatusReport, Get-InsightDeviceRunStates, ConvertFrom-InsightRunState, Merge-InsightStatus, Get-InsightDiagnosticsInfo, Expand-InsightLogs
