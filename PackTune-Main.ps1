@@ -2580,6 +2580,7 @@ exit $LASTEXITCODE
         $PreviousPolicy = New-PackTuneAppPolicy -Package $Package -Version $FromVersion -UpdateMode $UpdateMode -GraceHours $GraceHours -PackageSource $(if ($IsWinget) { "" } else { $script:Settings.PackageSource }) `
             -UpdateDelayMinMinutes $script:Settings.UpdateDelayMinMinutes -UpdateDelayMaxMinutes $script:Settings.UpdateDelayMaxMinutes -Schedule $Schedule
         $PreviousSource = Join-Path $WorkPath "source-previous"
+        New-Item -ItemType Directory -Path $PreviousSource -Force | Out-Null
         $PreviousDetection = if ($IsWinget) { New-WingetPackageScripts -WingetId $Package -SourcePath $PreviousSource -Policy $PreviousPolicy -DisplayName $Info.Title }
         else { New-ChocoPackageScripts -ChocoName $Package -SourcePath $PreviousSource -Policy $PreviousPolicy -DisplayName $Info.Title }
         $PreviousFiles = Join-Path $WorkPath "lab-previous"

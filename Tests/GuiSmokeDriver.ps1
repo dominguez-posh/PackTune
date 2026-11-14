@@ -1242,8 +1242,28 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                     [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)
                     Test-Smoke "lab script $($file.Name) is valid" ($errors.Count -eq 0) (@($errors | ForEach-Object { $_.Message }) -join '; ')
                 }
+                # Split button: the menu offers the installation test and the update test
+                $script:CustomInfo = [pscustomobject]@{ Name = 'Menu Tool'; Version = '2.0.0'; Path = (Join-Path $env:TEMP 'menu.msi') }
+                Show-TestMenu 'Custom' $ui.BtnCustomTestMenu
+                $headers = @($script:LastMenu.Items | ForEach-Object { [string]$_.Header })
+                Test-Smoke 'Test in sandbox is a split button: Test installation and Test update from the previous version' ($headers.Count -eq 2 -and $headers[0] -eq 'Test installation' -and $headers[1] -like 'Test update from the previous version*') ($headers -join ' | ')
+                Test-Smoke 'the drop buttons exist next to every Test in sandbox button' ($ui.BtnDetailTestMenu -and $ui.BtnTenantTestMenu -and $ui.BtnCustomTestMenu)
+                $script:LastMenu.IsOpen = $false; $script:CustomInfo = $null
+                # The update test: the previous version goes into the lab job, same Activity job and busy state
+                $script:Toasts.Clear()
+                Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Title 'PuTTY' -Version 'latest' -Policy @{ UpdateMode = 'Custom'; GraceHours = 24 } -FromVersion '0.78.0'
+                Test-Smoke 'update test: same busy state and a job named after the update' ($ui.BtnTenantTest.Content -eq 'Starting sandbox ...' -and @($script:Tasks | Where-Object { $_.Job.Kind -eq 'test' -and $_.Job.Display -like '*update from 0.78.0*' }).Count -eq 1)
+                $s.Phase = 3
+                return $false
+            }
+            3 {
+                if (-not (Test-Idle 'test')) { return $false }
+                $third = Join-Path $lab '03-Lab'
+                $job = if (Test-Path (Join-Path $third 'job.json')) { Get-Content (Join-Path $third 'job.json') -Raw | ConvertFrom-Json }
+                Test-Smoke 'update test: the lab gets the previous version (HasPrevious, PreviousVersion)' ($job -and $job.HasPrevious -eq $true -and $job.PreviousVersion -eq '0.78.0') (($job | ConvertTo-Json -Compress) + ' LOG: ' + (Get-JobLog))
                 $true
             }
+
         } } }
     @{ Name = 'settings'; Do = {
         Show-Page 'Settings'

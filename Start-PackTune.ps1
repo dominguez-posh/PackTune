@@ -1912,13 +1912,13 @@ Add-Click $ui.BtnCustomDeploy {
     }
     Show-Page 'Activity'
 }
-Add-Click $ui.BtnCustomTest {
+function Start-CustomTest([string]$PreviousMsi) {
     if (-not $script:CustomInfo) { return }
     if (Block-SandboxStart) { return }
     $props = ConvertFrom-CustomProps $ui.TxtCustomProps.Text
     $name = $script:CustomInfo.Name
-    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props } `
-        -Work 'param($Msi, $Props) Test-PackTuneCustomApp -MsiPath $Msi -Properties $Props -AutoRun' -OnDone {
+    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name$(if ($PreviousMsi) { " (update from the previous version)" })" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props; Previous = $PreviousMsi } `
+        -Work 'param($Msi, $Props, $Previous) $p = @{ MsiPath = $Msi; Properties = $Props }; if ($Previous) { $p.PreviousMsiPath = $Previous }; Test-PackTuneCustomApp @p -AutoRun' -OnDone {
         param($Result, $Job)
         $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
         if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Display)] the sandbox test could not run, see above." 'Error'; Show-Toast "Sandbox test of $($Job.Display) could not run: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" 'bad' 'Details' { Show-Page 'Activity' } }
@@ -1928,6 +1928,7 @@ Add-Click $ui.BtnCustomTest {
     })
     Show-SandboxStarted
 }
+Add-Click $ui.BtnCustomTest { Start-CustomTest }
 Add-Click $ui.BtnCustomOpen {
     $app = Get-SelectedCustomApp
     if ($app) { Start-Process "https://intune.microsoft.com/#view/Microsoft_Intune_Apps/SettingsMenu/~/0/appId/$($app.Id)" }
@@ -3547,6 +3548,61 @@ function Set-SandboxButtonBusy($Button, [bool]$Busy, [bool]$Enabled, $Tip) {
     $Button.IsEnabled = $Enabled -and -not $Busy
     $Button.ToolTip = $Tip
 }
+function Show-TestMenu([ValidateSet('Detail', 'Tenant', 'Custom')][string]$Kind, $Target) {
+    # Split button of Test in sandbox: the installation test (default) or the update from a previous version
+    $menu = New-Object System.Windows.Controls.ContextMenu
+    $script:TestMenuActions = @{}
+    $add = {
+        param([string]$Header, [string]$Text, [bool]$Enabled, [scriptblock]$Action)
+        $mi = New-Object System.Windows.Controls.MenuItem
+        $mi.Header = $Header; $mi.ToolTip = $Text; $mi.IsEnabled = $Enabled
+        [System.Windows.Controls.ToolTipService]::SetIsEnabled($mi, $false)
+        $script:TestMenuActions[$mi] = $Action
+        $mi.Add_Click({ param($src) try { & $script:TestMenuActions[$src] } catch { Show-Error $_.Exception.Message } })
+        [void]$menu.Items.Add($mi)
+    }
+    $blocker = Get-SandboxBlocker
+    switch ($Kind) {
+        'Custom' {
+            & $add 'Test installation' 'Install, detect and uninstall this MSI in a fresh Windows Sandbox.' ([bool]$script:CustomInfo -and -not $blocker) { Start-CustomTest }
+            & $add 'Test update from the previous version ...' 'Choose the previous MSI: it is installed first, then this one as the update.' ([bool]$script:CustomInfo -and -not $blocker) {
+                $dlg = New-Object Microsoft.Win32.OpenFileDialog
+                $dlg.Title = 'Previous version (MSI)'; $dlg.Filter = 'MSI files (*.msi)|*.msi'
+                if ($script:CustomMode -eq 'Version' -and $script:CustomUpdateApp -and $script:CustomUpdateApp.Path) { $dlg.InitialDirectory = Split-Path $script:CustomUpdateApp.Path }
+                if ($dlg.ShowDialog($window)) { Start-CustomTest $dlg.FileName }
+            }
+        }
+        default {
+            if ($Kind -eq 'Detail') {
+                $src = $script:DetailRow
+                if (-not $src) { return }
+                $source = Get-AppSource $src; $package = Get-AppId $src $source; $title = $src.Name
+                $policy = @{ UpdateMode = $script:Settings.UpdateMode; GraceHours = $script:Settings.GraceHours }; $released = ''
+                $versions = @(Get-PackTunePackageVersions -Package $package -Source $source)
+            }
+            else {
+                $app = Get-SelectedTenantApp
+                if (-not $app) { return }
+                $package = $app.Package; $source = $app.Source; $title = $app.DisplayName; $policy = Read-TenantPolicy; $released = [string]$app.Version
+                $versions = @($ui.CmbTenantVersion.ItemsSource | Where-Object { $_ -and $_ -notlike 'Always*' })
+            }
+            $run = { Start-PackageTest -Package $package -Source $source -Title $title -Version 'latest' -Policy $policy }.GetNewClosure()
+            & $add 'Test installation' 'Install, detect and uninstall the newest version in a fresh Windows Sandbox.' (-not $blocker) $run
+            $older = @(@($released) + @($versions | Select-Object -Skip 1) | Where-Object { $_ } | Select-Object -Unique | Select-Object -First 12)
+            if (-not $older.Count) { & $add 'Test update from the previous version' 'No older version is known.' $false {} }
+            foreach ($v in $older) {
+                $from = [string]$v
+                $label = "Test update from $from$(if ($from -eq $released) { ' (released in Intune)' })"
+                $go = { Start-PackageTest -Package $package -Source $source -Title $title -Version 'latest' -Policy $policy -FromVersion $from }.GetNewClosure()
+                & $add $label "Installs $from first, then updates to the newest version, and detects both." (-not $blocker) $go
+            }
+        }
+    }
+    Show-Flyout $menu $Target
+}
+Add-Click $ui.BtnDetailTestMenu { Show-TestMenu 'Detail' $ui.BtnDetailTestMenu }
+Add-Click $ui.BtnTenantTestMenu { Show-TestMenu 'Tenant' $ui.BtnTenantTestMenu }
+Add-Click $ui.BtnCustomTestMenu { Show-TestMenu 'Custom' $ui.BtnCustomTestMenu }
 function Block-SandboxStart {
     # $true (with a message) when no sandbox test can start now: one is running, or Windows Sandbox is open
     $msg = ''
@@ -3570,6 +3626,9 @@ function Update-SandboxButtons {
     $isDep = $app -and ($app.IsChocolatey -or $app.IsDependency)
     Set-SandboxButtonBusy $ui.BtnTenantTest $busy ([bool]$app -and -not $isDep -and -not $blocker) $tip
     Set-SandboxButtonBusy $ui.BtnCustomTest $busy ([bool]$script:CustomInfo) $tip
+    $ui.BtnDetailTestMenu.IsEnabled = $ui.BtnDetailTest.IsEnabled -or ($detail -and -not $busy -and -not $blocker)
+    $ui.BtnTenantTestMenu.IsEnabled = $ui.BtnTenantTest.IsEnabled
+    $ui.BtnCustomTestMenu.IsEnabled = $ui.BtnCustomTest.IsEnabled
 }
 function Get-SandboxInstallCommand {
     # The elevated command: only the optional feature, no restart (the user restarts when it suits)
@@ -3621,13 +3680,13 @@ catch { [pscustomobject]@{ Exit = -1; Declined = ($_.Exception.Message -match 'c
 }
 
 function Start-PackageTest {
-    param([Parameter(Mandatory)][string]$Package, [Parameter(Mandatory)][string]$Source, [string]$Title, [string]$Version, [hashtable]$Policy)
+    param([Parameter(Mandatory)][string]$Package, [Parameter(Mandatory)][string]$Source, [string]$Title, [string]$Version, [hashtable]$Policy, [string]$FromVersion)
     if (Block-SandboxStart) { return }
     if ($Source -eq 'Winget' -and -not $script:ModuleState.Winget) { throw 'winget packages need the Microsoft.WinGet.Client module: install it under Settings > Components.' }
     $name = if ($Title) { $Title } else { $Package }
-    $arguments = @{ Package = $Package; Source = $Source; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours }
-    $work = 'param($Package, $Source, $Version, $UpdateMode, $GraceHours) Test-PackTunePackage -ChocoName $Package -Source $Source -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours -AutoRun'
-    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name" -Package $Package -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
+    $arguments = @{ Package = $Package; Source = $Source; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours; FromVersion = $FromVersion }
+    $work = 'param($Package, $Source, $Version, $UpdateMode, $GraceHours, $FromVersion) $p = @{ ChocoName = $Package; Source = $Source; Version = $Version; UpdateMode = $UpdateMode; GraceHours = $GraceHours }; if ($FromVersion) { $p.FromVersion = $FromVersion }; Test-PackTunePackage @p -AutoRun'
+    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name$(if ($FromVersion) { " (update from $FromVersion)" })" -Package $Package -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
         param($Result, $Job)
         $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
         if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Package)] the sandbox test could not run, see above." 'Error'; Show-Toast "Sandbox test of $($Job.Display) could not run: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" 'bad' 'Details' { Show-Page 'Activity' } }

@@ -445,7 +445,7 @@
                                             <Button x:Name="BtnCustomIconRemove" Style="{StaticResource SmallButton}" Content="Remove" Visibility="Collapsed"/>
                                         </StackPanel>
                                         <Button x:Name="BtnDetailRemoveMine" Margin="0,18,0,0" Content="Remove from my apps" Tag="&#xE74D;" Visibility="Collapsed" ToolTip="Takes the app off this list only; nothing in Intune changes"/>
-                                        <Button x:Name="BtnDetailTest" Margin="0,18,0,0" Content="Test in sandbox" Tag="&#xE768;"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,18,0,0"><Button x:Name="BtnDetailTest" Content="Test in sandbox" Tag="&#xE768;"/><Button x:Name="BtnDetailTestMenu" Style="{StaticResource IconButton}" Margin="4,0,0,0" Content="&#xE70D;" ToolTip="More test options (update from the previous version)" AutomationProperties.Name="More test options"/></StackPanel>
                                         <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Runs this app in a fresh Windows Sandbox. No sign-in needed, nothing is changed in Intune."/>
                                     </StackPanel>
                                 </ScrollViewer>
@@ -655,7 +655,7 @@
                                                 <Button x:Name="BtnTenantApply" Style="{StaticResource PrimaryButton}" Padding="14,9" Content="Apply in Intune"/>
                                                 <Grid Margin="0,8,0,0">
                                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                    <Button x:Name="BtnTenantTest" Content="Test in sandbox" Padding="8,8"/>
+                                                    <StackPanel Orientation="Horizontal"><Button x:Name="BtnTenantTest" Content="Test in sandbox" Padding="8,8"/><Button x:Name="BtnTenantTestMenu" Style="{StaticResource IconButton}" Margin="4,0,0,0" Content="&#xE70D;" ToolTip="More test options (update from the previous version)" AutomationProperties.Name="More test options"/></StackPanel>
                                                     <Button x:Name="BtnTenantOpen" Grid.Column="2" Content="Open in Intune" Padding="8,8"/>
                                                 </Grid>
                                                 <Button x:Name="BtnTenantRemove" Style="{StaticResource DangerGhost}" Content="Remove from Intune..." Margin="0,8,0,0"/>
@@ -1114,7 +1114,7 @@
                     <Border Grid.Row="2" Style="{StaticResource DialogFooter}" Padding="28,14">
                         <Grid>
                             <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-                            <Button x:Name="BtnCustomTest" Content="Test in sandbox" Tag="&#xE768;" Margin="0,0,16,0"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,0,16,0"><Button x:Name="BtnCustomTest" Content="Test in sandbox" Tag="&#xE768;"/><Button x:Name="BtnCustomTestMenu" Style="{StaticResource IconButton}" Margin="4,0,0,0" Content="&#xE70D;" ToolTip="More test options (update from the previous version)" AutomationProperties.Name="More test options"/></StackPanel>
                             <TextBlock x:Name="TxtCustomDlgStatus" Grid.Column="1" Style="{StaticResource Hint}" VerticalAlignment="Center" FontSize="13" Margin="0,0,16,0"/>
                             <StackPanel Grid.Column="2" Orientation="Horizontal">
                                 <Button x:Name="BtnCustomCancel" Content="Cancel" Margin="0,0,8,0" Padding="16,8"/>
