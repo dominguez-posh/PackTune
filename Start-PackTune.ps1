@@ -674,6 +674,9 @@ function Complete-UiTask($Task) {
     # The task may have renewed the token: the UI thread uses the same sign-in
     if ($script:Shared.Auth) { Set-PackTuneAuthState $script:Shared.Auth }
     $errors = @($job.Log.ToArray() | Where-Object Level -eq 'Error')
+    if ($job.Kind -in $script:ReadKinds) {
+        if ($job.Status -eq 'failed') { $script:ReadFailures[[string]$job.Kind] = "$($job.Display): $(Get-FriendlyCause $(if ($errors.Count) { [string]$errors[-1].Text } else { 'failed' }))" } elseif ($job.Status -eq 'succeeded') { $script:ReadFailures.Remove([string]$job.Kind) }
+    }
     # Background uploads/reads of the package store repeat with every action: one log line per cause until it changes or the task works again
     if ($job.Kind -in 'protocolsync', 'protocolhistory') { if ($job.Status -eq 'succeeded') { $script:BackgroundCause.Remove([string]$job.Kind) } }
     foreach ($entry in @($job.Log.ToArray())) {
@@ -717,18 +720,47 @@ function Update-Busy {
     $script:LastVisibleTasks = $running.Count
 }
 $script:LastVisibleTasks = 0
+$script:ReadyKind = 'busy'
 $script:StuckMinutes = 5                                  # a background read that runs longer is stopped, logged and shown (sandbox tests, deployments and the like are long by nature)
 $script:StuckKinds = 'customlist', 'tenant', 'counts', 'status', 'statuscheck', 'assignread', 'testsync', 'storecheck', 'versions', 'failedlist', 'deps', 'meta', 'icons', 'popular'
 function Update-BusyBar {
     # One slim bar at the bottom: what runs in the background (with a count when several); a click opens Activity
     $run = @($script:Tasks | Where-Object { $_.Job.Status -in 'queued', 'running' -and $_.Job.Kind -notin 'protocolsync', 'protocolhistory' })
-    if (-not $run.Count) { $ui.BoxBusy.Visibility = 'Collapsed'; return }
-    $first = [string]$run[0].Job.Title
-    $first = if ($first.Length -gt 90) { $first.Substring(0, 90) } else { $first }
-    $ui.TxtBusy.Text = "$first ...$(if ($run.Count -gt 1) { "  (+$($run.Count - 1) more)" })"
-    $ui.BoxBusy.Visibility = 'Visible'
+    if ($run.Count) {
+        $first = [string]$run[0].Job.Title
+        $first = if ($first.Length -gt 90) { $first.Substring(0, 90) } else { $first }
+        $ui.PbBusy.Visibility = 'Visible'; $ui.DotReady.Visibility = 'Collapsed'
+        $ui.TxtBusy.Text = "$first ...$(if ($run.Count -gt 1) { "  (+$($run.Count - 1) more)" })"
+        $script:ReadyKind = 'busy'
+        return
+    }
+    $state = Get-ReadyState
+    $ui.PbBusy.Visibility = 'Collapsed'; $ui.DotReady.Visibility = 'Visible'
+    $ui.DotReady.Fill = ConvertTo-Brush $(switch ($state.Kind) { 'ready' { '#2E7D32' } 'problem' { '#E08A00' } 'starting' { '#0067C0' } default { '#8A8A8A' } })
+    $ui.TxtBusy.Text = $state.Text
+    $script:ReadyKind = $state.Kind
 }
-$ui.BoxBusy.Add_MouseLeftButtonUp({ try { Show-Page 'Activity' } catch { } })
+# What went wrong in the last background reads (kind -> short cause); a later success of the same kind clears it
+$script:ReadFailures = @{}
+$script:ReadKinds = 'tenant', 'counts', 'customlist', 'storecheck', 'popular', 'deps', 'testsync', 'status', 'assignread'
+$script:ReadyProblemSource = $null      # tests: script block returning the problem texts instead of looking at the app
+function Get-ReadyProblems {
+    if ($script:ReadyProblemSource) { return @(& $script:ReadyProblemSource) }
+    $problems = New-Object System.Collections.ArrayList
+    foreach ($k in $script:ReadFailures.Keys) { [void]$problems.Add([string]$script:ReadFailures[$k]) }
+    try { foreach ($i in @(Get-ReadinessItems | Where-Object { $_.State -eq 'bad' -and -not $_.Wait -and -not $_.Optional })) { $t = "$($i.Title)"; if (-not ($problems -contains $t)) { [void]$problems.Add($t) } } } catch { }
+    if ($script:StoreState -and $script:StoreState.State -in 'NoAccess') { [void]$problems.Add('Package store not reachable') }
+    return @($problems | Select-Object -Unique)
+}
+function Get-ReadyState {
+    # Nothing runs: grey when not signed in, blue while the start sequence is not through, orange with the first problem, green Ready
+    if (-not (Test-SignedIn)) { return @{ Kind = 'signedout'; Text = 'Not signed in' } }
+    $problems = @(Get-ReadyProblems)
+    if ($problems.Count) { return @{ Kind = 'problem'; Text = "Ready with $($problems.Count) problem$(if ($problems.Count -gt 1) { 's' }): $($problems[0])" } }
+    if ($null -eq $script:TenantApps -or -not $script:StoreState -or $script:Refreshing) { return @{ Kind = 'starting'; Text = 'Starting ...' } }
+    return @{ Kind = 'ready'; Text = 'Ready' }
+}
+$ui.BoxBusy.Add_MouseLeftButtonUp({ try { if ($script:ReadyKind -eq 'busy') { Show-Page 'Activity' } elseif ($script:ReadyKind -eq 'problem') { Show-Page 'Start' } elseif ($script:ReadyKind -eq 'signedout') { Show-Page 'Start' } else { Show-Page 'Activity' } } catch { } })
 function Stop-StuckTasks {
     foreach ($task in @($script:Tasks)) {
         $j = $task.Job
