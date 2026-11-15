@@ -26,7 +26,8 @@ $script:ToolVersion = '2.2.0'
 $script:RepoUrl = 'https://github.com/dominguez-posh/PackTune'
 $script:CorePath = Join-Path $PSScriptRoot 'PackTune-Main.ps1'
 . $script:CorePath
-Import-Module (Join-Path $PSScriptRoot 'Modules\Keevault.psm1') -Force
+Import-Module (Join-Path $PSScriptRoot 'Modules\PackTune.SignIn.psm1') -Force   # the Microsoft sign-in (embedded window, token)
+Import-Module (Join-Path $PSScriptRoot 'Modules\Keevault.psm1') -Force           # sign-in with an account from Keevault (uses the one above)
 
 # ---------------------------------------------------------------- console window (M365 MFA tool technique)
 if (-not ('PackTune.NativeWindow' -as [type])) {
