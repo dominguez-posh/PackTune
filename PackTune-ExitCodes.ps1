@@ -20,6 +20,7 @@ $script:PackTuneExitCodes = @(
     @{ Code = 61013; Name = 'HashMismatch'; Cause = 'the installer does not match its checksum or signature' }
     @{ Code = 61014; Name = 'DiskFull'; Cause = 'not enough free disk space' }
     @{ Code = 61015; Name = 'PackageManagerFailed'; Cause = 'choco reported a failure without a more specific cause (see the device log)' }
+    @{ Code = 61017; Name = 'InstallerReservedCode'; Cause = 'the installer failed but returned 1618 or 1707, which Intune counts as retry or success' }
     @{ Code = 61016; Name = 'NoMachineInstaller'; Cause = 'the package has no installer for all users of the device (machine scope)' }
     @{ Code = 61020; Name = 'FolderProtect'; Cause = 'the PackTune folder on the device could not be protected' }
     @{ Code = 61021; Name = 'HelpersCopy'; Cause = 'the update helpers could not be copied on the device' }
@@ -52,6 +53,8 @@ function Resolve-PackageFailure([int]$Code, [string]$Text) {
     if ($Text -match '(?i)Unable to connect|remote name could not be resolved|actively refused|operation has timed out|No such host is known|Unable to load the service index|Failed to fetch results') { return $PTExit.SourceUnreachable }
     if ($Text -match '(?i)Download of .* failed|Error retrieving|Error while downloading|downloading .* failed') { return $PTExit.DownloadFailed }
     if ($Code -in 1, -1) { return $PTExit.PackageManagerFailed }
+    # 1618 (retry) and 1707 (success) from the installer of a failed path would be taken for what they are in Intune's default return code list
+    if ($Code -in 1618, 1707) { return $PTExit.InstallerReservedCode }
     return $Code
 }
 function Resolve-WingetFailure([int]$Code) {
@@ -62,11 +65,33 @@ function Resolve-WingetFailure([int]$Code) {
         -1978335216 { return $PTExit.NoMachineInstaller }      # 0x8A150010 no applicable installer
         -1978335215 { return $PTExit.HashMismatch }            # 0x8A150011 installer hash mismatch
         -1978335212 { return $PTExit.SourceNotFound }          # 0x8A150014 no package found
-        default { if ($Code -in 112, -2147024784) { return $PTExit.DiskFull }; return $Code }
+        default { if ($Code -in 112, -2147024784) { return $PTExit.DiskFull }; if ($Code -in 1618, 1707) { return $PTExit.InstallerReservedCode }; return $Code }
     }
 }
 '@
     return $Block.Replace('__CODES__', ($Lines -join "`r`n"))
+}
+
+function Get-DeviceRetryCheckText {
+    # One function for install.ps1 and the detection rules: has the update of an installed app failed so often (update.ps1 runs as a task,
+    # Intune never sees its exit code) that Intune should run install.ps1 again? Only a failed UPDATE attempt counts (not skipped, not pending:
+    # waiting for a condition, the window or the user's deadline is not a failure), at least 3 failed attempts in a row over at least a day,
+    # the last one at least 6 hours ago (no loop), and not when the app's retry setting is "None" (last-result.json: retry = false).
+    return @'
+function Test-UpdateRetryDue([string]$ResultPath) {
+    try {
+        if (-not (Test-Path -LiteralPath $ResultPath)) { return $false }
+        $LR = Get-Content -LiteralPath $ResultPath -Raw | ConvertFrom-Json
+        if ($LR.status -ne "failed" -or $LR.action -ne "upgrade") { return $false }
+        if ($LR.retry -eq $false) { return $false }
+        if ([int]$LR.failures -lt 3) { return $false }
+        if (((Get-Date) - [datetime]$LR.firstFailure).TotalHours -lt 24) { return $false }
+        if (((Get-Date) - [datetime]$LR.lastAttempt).TotalHours -lt 6) { return $false }
+        return $true
+    }
+    catch { return $false }
+}
+'@
 }
 
 function Get-PackTuneCodeCause {

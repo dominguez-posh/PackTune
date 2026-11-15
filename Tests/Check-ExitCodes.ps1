@@ -78,6 +78,53 @@ foreach ($c in @(@(-1978335224, 'DownloadFailed'), @(-1978335217, 'SourceUnreach
 }
 Test-Check 'lock: another installation running is 1618, a lock of someone else is its own code' ((Get-LockExitCode) -eq 1618 -and (& { $script:LockError = 'the lock belongs to someone else'; (Get-LockExitCode) }) -eq $PTExit.LockForeign)
 
+# --- installer codes that Intune would take for success or retry never leave a failed path
+Test-Check 'reserved codes: 1618 and 1707 from choco or an installer in a failed path become 61017, successes stay' ((Resolve-PackageFailure 1618 'x') -eq $PTExit.InstallerReservedCode -and (Resolve-PackageFailure 1707 'x') -eq $PTExit.InstallerReservedCode -and (Resolve-PackageFailure 0 'x') -eq 0 -and (Resolve-PackageFailure 3010 'x') -eq 3010 -and (Resolve-PackageFailure 1641 'x') -eq 1641)
+Test-Check 'reserved codes: the same for winget' ((Resolve-WingetFailure 1618) -eq $PTExit.InstallerReservedCode -and (Resolve-WingetFailure 1707) -eq $PTExit.InstallerReservedCode -and (Resolve-WingetFailure 1603) -eq 1603)
+
+# --- failing updates: the retry condition (shared by install.ps1 and the detection rules) and the choco detection rule itself
+. ([scriptblock]::Create((Get-DeviceRetryCheckText)))
+function New-ResultFile([hashtable]$Over) {
+    $r = @{ format = 1; package = 'x'; lastAttempt = (Get-Date).AddHours(-7).ToString('o'); action = 'upgrade'; status = 'failed'; exitCode = 61011; cause = 'failed'; installedVersion = '1'; targetVersion = '2'; failures = 3; firstFailure = (Get-Date).AddDays(-2).ToString('o'); retry = $true }
+    foreach ($k in $Over.Keys) { $r[$k] = $Over[$k] }
+    $f = Join-Path $work ('lr-' + [guid]::NewGuid().ToString('N').Substring(0, 6) + '.json')
+    ($r | ConvertTo-Json -Compress) | Set-Content $f -Encoding ASCII
+    return $f
+}
+$retryCases = @(
+    @('three failed updates over two days, the last 7 hours ago', @{}, $true),
+    @('only two failed attempts', @{ failures = 2 }, $false),
+    @('three failures but within a day', @{ firstFailure = (Get-Date).AddHours(-5).ToString('o') }, $false),
+    @('the last attempt less than 6 hours ago (no loop)', @{ lastAttempt = (Get-Date).AddHours(-2).ToString('o') }, $false),
+    @('retry setting None', @{ retry = $false }, $false),
+    @('waiting for a condition (skipped) is not a failure', @{ status = 'skipped'; failures = 0 }, $false),
+    @('update known, not installed yet (pending: window or deadline)', @{ status = 'pending'; failures = 0 }, $false),
+    @('a failed first installation is not an update retry', @{ action = 'install' }, $false),
+    @('the last update worked', @{ status = 'ok'; failures = 0 }, $false)
+)
+foreach ($c in $retryCases) { Test-Check "retry due: $($c[0]) -> $($c[2])" ((Test-UpdateRetryDue (New-ResultFile $c[1])) -eq $c[2]) }
+$brokenFile = Join-Path $work 'broken.json'; 'not json' | Set-Content $brokenFile
+Test-Check 'retry due: no file or a broken file is not a reason' (-not (Test-UpdateRetryDue (Join-Path $work 'none.json')) -and -not (Test-UpdateRetryDue $brokenFile))
+
+# the generated choco detection rule, run against a fake program folder: installed and healthy is detected, a failing update is not
+$fakeRoot = Join-Path $work 'fake'
+$pf = Join-Path $fakeRoot 'pf'; $choco = Join-Path $fakeRoot 'choco'
+$policyD = New-PackTuneAppPolicy -Package 'contosoapp'
+$dDir = Join-Path $work 'dcase'; New-Item -ItemType Directory -Path (Join-Path $dDir 'source') -Force | Out-Null
+$detFile = New-ChocoPackageScripts -ChocoName 'contosoapp' -SourcePath (Join-Path $dDir 'source') -Policy $policyD -DisplayName 'Contoso'
+New-Item -ItemType Directory -Path (Join-Path $choco 'lib\contosoapp'), (Join-Path $pf 'PackTune\Chocolatey\contosoapp') -Force | Out-Null
+'<package><metadata><version>1.0</version></metadata></package>' | Set-Content (Join-Path $choco 'lib\contosoapp\contosoapp.nuspec')
+$policyD.Fingerprint | Set-Content (Join-Path $pf 'PackTune\Chocolatey\contosoapp\policy.txt')
+function Invoke-Detection { $env:ChocolateyInstall = $choco; $env:ProgramW6432 = $pf; & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $detFile | Out-Null; return $LASTEXITCODE }
+$resultPath = Join-Path $pf 'PackTune\Chocolatey\contosoapp\last-result.json'
+Test-Check 'detection (choco, run here): installed with the policy marker and no result file is detected' ((Invoke-Detection) -eq 0)
+Copy-Item (New-ResultFile @{}) $resultPath -Force
+Test-Check 'detection (choco, run here): installed, but the update failed 3 times over 2 days: not detected, so Intune runs install.ps1' ((Invoke-Detection) -eq 1)
+Copy-Item (New-ResultFile @{ retry = $false }) $resultPath -Force
+Test-Check 'detection (choco, run here): the same with the retry setting None: detected' ((Invoke-Detection) -eq 0)
+Copy-Item (New-ResultFile @{ status = 'ok'; failures = 0 }) $resultPath -Force
+Test-Check 'detection (choco, run here): after a successful update: detected again' ((Invoke-Detection) -eq 0)
+
 # --- PackTune side: the same table gives the cause, in the module as well
 $insight = Get-Module TenantInsight
 foreach ($e in $table) {
@@ -93,7 +140,7 @@ Test-Check 'cause: an unknown code gives its hex value, no code gives nothing' (
 $readme = Get-Content (Join-Path $repo 'README.md') -Raw
 Test-Check 'README: documents every PackTune exit code with its cause' (@($table | Where-Object { $readme -notmatch "\b$($_.Code)\b" }).Count -eq 0) ((@($table | Where-Object { $readme -notmatch "\b$($_.Code)\b" } | ForEach-Object Code)) -join ',')
 Test-Check 'README: says devices run install.ps1 once more after the update (new device script revision)' ($readme -match '(?i)exit codes' -and $readme -match '(?i)run install\.ps1 once')
-Test-Check 'device script revision raised to 10 (the codes change the scripts, so the fingerprint)' ($script:DeviceScriptRevision -ge 10)
+Test-Check 'device script revision raised to 11 (codes and failing-update retry change the scripts, so the fingerprint)' ($script:DeviceScriptRevision -ge 11)
 Test-Check 'no PackTune code is part of a return code list of an app (Intune defaults stay: success 0 / 1707, soft 3010, hard 1641, retry 1618)' (@(Get-ChildItem $repo -Filter 'PackTune-*.ps1' | Where-Object { (Get-Content $_.FullName -Raw) -match '(?i)New-IntuneWin32AppReturnCode|returnCodes\s*=' }).Count -eq 0)
 
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue

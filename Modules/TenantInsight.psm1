@@ -652,7 +652,7 @@ function ConvertFrom-InsightRunState {
     foreach ($F in @($Report.f)) {
         if (-not $F) { continue }
         [void]$Apps.Add([pscustomobject]@{ Package = [string]$F.p; Source = $(if ($F.s -eq 'w') { 'Winget' } else { 'Chocolatey' }); LastAttempt = [string]$F.t
-                Action = [string]$F.a; ExitCode = $F.e; Cause = $(if ($F.c) { [string]$F.c } else { Get-InsightErrorCause $F.e }); InstalledVersion = [string]$F.v; TargetVersion = [string]$F.g; Ok = $false })
+                Action = [string]$F.a; ExitCode = $F.e; Cause = $(if ($F.c -and [string]$F.c -notmatch '^failed: exit code') { [string]$F.c } else { Get-InsightErrorCause $F.e }); InstalledVersion = [string]$F.v; TargetVersion = [string]$F.g; Ok = $false })
     }
     foreach ($O in @($Report.o)) {
         if (-not $O) { continue }

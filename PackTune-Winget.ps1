@@ -192,6 +192,7 @@ $LogId = $SafeId
 $LogTag = if ($Uninstall) { "uninstall" } else { "install" }
 $ResultFile = ""
 $Sched = $ScheduleJson | ConvertFrom-Json
+$RetryViaIntune = $Sched.RetryMode -ne "None"
 
 __COMMON__
 
@@ -256,7 +257,7 @@ if ($Uninstall) {
     Write-Output "winget uninstall exit code $ExitCode"
     Write-DeviceLog "winget uninstall $Id exit code $ExitCode"
     # Tasks, helpers and marker only go when the software is gone; otherwise Intune reports the error and retries
-    if ($ExitCode -notin 0, $NotInstalled, 1605, 1614 -and $ExitCode -notin $Reboot) { Stop-Transcript | Out-Null; exit $ExitCode }
+    if ($ExitCode -notin 0, $NotInstalled, 1605, 1614 -and $ExitCode -notin $Reboot) { Stop-Transcript | Out-Null; exit (Resolve-WingetFailure $ExitCode) }
     Remove-UpdateTasks
     try { Remove-ItemSafely $AppRoot } catch { Write-Output "$AppRoot could not be removed: $($_.Exception.Message)" }
     Remove-OldToolFolder "Winget\$SafeId"
@@ -330,6 +331,16 @@ catch {
     exit $PTExit.TaskRegister
 }
 
+# An update that keeps failing (update.ps1 runs as a task, Intune never sees it) is tried again here, through update.ps1: its conditions, time
+# window, retry setting and the user's deadline still apply; nothing is reinstalled. A failure exits with the cause code, success clears it.
+if ($Installed -and $Mode -ne "Off" -and (Test-UpdateRetryDue $ResultFile)) {
+    Write-Output "The last updates of $Id failed repeatedly, trying the update again"
+    Write-DeviceLog "update failed repeatedly, retried by Intune"
+    & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File (Join-Path $AppRoot "update.ps1") -Mode Startup -Trigger Retry
+    $RetryCode = $LASTEXITCODE
+    if ($RetryCode -notin 0, 1641, 3010) { Stop-Transcript | Out-Null; exit $RetryCode }
+}
+
 # The detection rule compares this marker with the policy in Intune
 try { Write-ProtectedFile (Join-Path $AppRoot "policy.txt") $Policy }
 catch { Write-Output "The policy marker could not be written: $($_.Exception.Message)"; Stop-Transcript | Out-Null; exit $PTExit.PolicyWrite }
@@ -392,13 +403,14 @@ function Get-PendingUpdate {
 }
 function Invoke-SourceMaintenance { }
 function Invoke-Upgrade {
-    if (-not (Enter-DeploymentLock)) { Write-Log "another choco or winget installation is still running, next try later"; return 1618 }
+    if (-not (Enter-DeploymentLock)) { Write-Log "another choco or winget installation is still running, next try later"; return (Get-LockExitCode) }
     try {
         $VersionArguments = @()
         if ($Config.Version) { $VersionArguments = @("--version", $Config.Version) }
         # Machine scope only: without it a user-scope installer would install into the profile of SYSTEM
         & $Winget upgrade @Common @VersionArguments --scope machine | Out-Null
         $Code = $LASTEXITCODE
+        if ($Code -notin $Success -and $Code -notin $Reboot) { $Code = Resolve-WingetFailure $Code }
     }
     finally { Exit-DeploymentLock }
     if ($Code -eq $NoApplicableInstaller) { Write-Log "$Id has no machine-scope installer" }
@@ -433,9 +445,12 @@ $Newest = $Folders | Sort-Object { try { [version](($_.Name -split "_")[1]) } ca
 # WindowsApps is readable for SYSTEM (Intune runs this detection as SYSTEM); never winget.exe from PATH
 $Winget = if ($Newest) { Join-Path $Newest.FullName "winget.exe" } else { $null }
 if (-not $Winget) { exit 1 }
+__RETRYCHECK__
 # The exit code tells whether it is installed; the table output cuts long ids ("...")
 & $Winget list --id $Id --exact --source winget --accept-source-agreements --disable-interactivity 2>$null | Out-Null
 if ($LASTEXITCODE -eq 0) {
+    # Installed, but its updates keep failing: not detected, Intune runs install.ps1, which retries the update and reports the cause
+    if (Test-UpdateRetryDue (Join-Path $ProgramFilesDir "PackTune\Winget\$SafeId\last-result.json")) { Write-Output "$Id is installed, but its last updates failed repeatedly"; exit 1 }
     Write-Output "$Id is installed (update policy $Policy)"
     exit 0
 }
@@ -455,7 +470,7 @@ exit 1
     $InstallScript = $InstallScript.Replace("__DISPLAYNAME__", (& $Quote $DisplayName)).Replace("__POLICY__", $Policy.Fingerprint)
     $InstallScript = $InstallScript.Replace("__DELAYMIN__", [string]$Policy.UpdateDelayMinMinutes).Replace("__DELAYMAX__", [string]$Policy.UpdateDelayMaxMinutes)
     $UpdateScript = $UpdateScript.Replace("__GETWINGET__", $GetWinget)
-    $DetectionScript = $DetectionScript.Replace("__ID__", $WingetId).Replace("__POLICY__", $Policy.Fingerprint)
+    $DetectionScript = $DetectionScript.Replace("__RETRYCHECK__", (Get-DeviceRetryCheckText)).Replace("__ID__", $WingetId).Replace("__POLICY__", $Policy.Fingerprint)
 
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $InstallScript -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "update.ps1") -Value $UpdateScript -Encoding ASCII

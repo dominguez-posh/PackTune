@@ -172,7 +172,7 @@ foreach ($case in @(@('fails.pkg', 'upgrade', 'failed', 1603, 'failed: exit code
     Save-LastResult $case[1] $case[2] $case[3] $case[4] $case[5] $case[6]
 }
 $written = Get-Content (Join-Path $schemaRoot 'fails.pkg\last-result.json') -Raw | ConvertFrom-Json
-Test-Check 'Save-LastResult writes the documented fields' ((@($written.PSObject.Properties.Name) -join ',') -eq 'format,package,lastAttempt,action,status,exitCode,cause,installedVersion,targetVersion') (@($written.PSObject.Properties.Name) -join ',')
+Test-Check 'Save-LastResult writes the documented fields' ((@($written.PSObject.Properties.Name) -join ',') -eq 'format,package,lastAttempt,action,status,exitCode,cause,installedVersion,targetVersion,failures,firstFailure,retry') (@($written.PSObject.Properties.Name) -join ',')
 $schemaOut = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $scriptFile -ChocoRoot $schemaRoot -WingetRoot (Join-Path $temp 'none')
 $schema = ($schemaOut | Out-String).Trim() | ConvertFrom-Json
 $f = @($schema.f)[0]

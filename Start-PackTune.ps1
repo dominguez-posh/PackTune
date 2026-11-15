@@ -3495,6 +3495,39 @@ function Update-TenantSummary($App) {
     $ui.TxtSumInstalled.Text = [string]$c.Installed; $ui.TxtSumFailed.Text = [string]$c.Failed; $ui.TxtSumPending.Text = [string]$c.Pending; $ui.TxtSumNotInstalled.Text = [string]$c.NotInstalled
     if ($c.Failed) { $ui.TxtSumFailed.Foreground = ConvertTo-Brush '#A11D1D' }
     $ui.TxtSumInfo.Text = "From Intune's install summary, read $(([datetime]$c.Fetched).ToString('HH:mm'))$(if ($c.NotApplicable) { ", $($c.NotApplicable) not applicable" })."
+    Update-FailedDevices $App $c
+}
+# The failed devices of the selected app with the cause of their exit code (the same mapping as the Status page), read when the app has failures
+$script:FailedDevices = @{}     # app id -> @{ Fetched; Lines; More } or @{ Requested }
+function Update-FailedDevices($App, $Counts) {
+    if (-not $Counts -or $Counts.Error -or -not [int]$Counts.Failed) { $ui.TxtSumFailedDevices.Visibility = 'Collapsed'; return }
+    $f = $script:FailedDevices[[string]$App.Id]
+    if ($f -and $f.Lines) {
+        $ui.TxtSumFailedDevices.Text = (@($f.Lines) + @($(if ($f.More) { "and $($f.More) more: see Per device details" }))) -join "`n"
+        $ui.TxtSumFailedDevices.Visibility = 'Visible'
+        return
+    }
+    $ui.TxtSumFailedDevices.Visibility = 'Collapsed'
+    if ($f -and $f.Requested -and ((Get-Date) - $f.Requested).TotalSeconds -lt 120) { return }
+    if (Test-TaskRunning 'failedlist') { return }
+    $script:FailedDevices[[string]$App.Id] = @{ Requested = Get-Date }
+    $work = @'
+param($AppId, $Fake)
+$Ctx = if ($Fake) { New-InsightGraphContext -Invoke ([scriptblock]::Create($Fake)) } else { New-InsightGraphContext }
+$St = Get-InsightAppInstallStatus -Context $Ctx -AppId $AppId
+$bad = @($St.Devices | Where-Object { $_.State -in 'failed', 'uninstallFailed' } | Sort-Object DeviceName)
+[pscustomobject]@{ AppId = $AppId; Devices = @($bad | Select-Object -First 5 | ForEach-Object { [pscustomobject]@{ Name = $_.DeviceName; Code = $_.ErrorCode; Cause = $_.Cause } }); More = [Math]::Max(0, $bad.Count - 5) }
+'@
+    [void](Start-UiTask -Kind 'failedlist' -Title "Reading the failed devices of $($App.DisplayName)" -Hidden -NeedsAuth -Arguments @{ AppId = $App.Id; Fake = $script:InsightFake } -Work $work -OnDone {
+        param($Result, $Job)
+        $r = @($Result | Where-Object { $_ -and $_.AppId }) | Select-Object -First 1
+        if ($Job.Status -eq 'succeeded' -and $r) {
+            $script:FailedDevices[[string]$r.AppId] = @{ Fetched = Get-Date; More = [int]$r.More
+                Lines = @($r.Devices | ForEach-Object { $code = if ($_.Code) { Format-ExitCodeText $_.Code } else { '' }; "$($_.Name)$(if ($code) { " ($code)" }): $(if ($_.Cause) { $_.Cause } else { 'no cause reported' })" }) }
+        }
+        $cur = Get-SelectedTenantApp
+        if ($cur -and $script:FailedDevices[[string]$cur.Id].Lines) { Update-TenantSummary $cur }
+    })
 }
 Add-Click $ui.BtnTenantCustomPage {
     $app = Get-SelectedTenantApp

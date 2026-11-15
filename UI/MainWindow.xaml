@@ -640,6 +640,7 @@
                                                         <StackPanel><TextBlock x:Name="TxtSumNotInstalled" FontSize="20" FontWeight="SemiBold" Text="-"/><TextBlock Text="not installed" Style="{StaticResource Hint}" TextWrapping="Wrap"/></StackPanel>
                                                     </UniformGrid>
                                                     <TextBlock x:Name="TxtSumInfo" Style="{StaticResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                                                    <TextBlock x:Name="TxtSumFailedDevices" Visibility="Collapsed" Margin="0,8,0,0" TextWrapping="Wrap" FontSize="12.5" Foreground="#A11D1D" AutomationProperties.Name="Failed devices with their cause"/>
                                                     <Button x:Name="BtnSumStatus" Content="Per device details ..." HorizontalAlignment="Left" Margin="0,8,0,0" Padding="14,5"/>
                                                 </StackPanel>
                                             </Border>
