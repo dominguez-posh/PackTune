@@ -500,6 +500,17 @@ $script:Shared = [hashtable]::Synchronized(@{
     Meta         = [hashtable]::Synchronized(@{})
     CancelSignIn = $false
 })
+function Get-MetaSnapshot {
+    # A copy of the package infos for enumerating on the UI thread: background lookups keep writing to Shared.Meta, and
+    # enumerating a synchronized hashtable while it changes throws "Collection was modified". The writers take the same
+    # lock (SyncRoot), so the copy is consistent.
+    $meta = $script:Shared.Meta
+    $copy = @{}
+    [System.Threading.Monitor]::Enter($meta.SyncRoot)
+    try { foreach ($entry in $meta.GetEnumerator()) { $copy[$entry.Key] = $entry.Value } }
+    finally { [System.Threading.Monitor]::Exit($meta.SyncRoot) }
+    $copy
+}
 # Deployments and tenant changes one after another; what the user starts (sign-in, search, module installation)
 # next to them; feed lookups and icon rendering on their own pool, so they never hold up a click
 $script:WorkPool = [runspacefactory]::CreateRunspacePool(1, 1)
@@ -773,7 +784,7 @@ function Save-MetaCache {
     try {
         $copy = @{}
         # A lookup that failed (offline, rate limit) is not remembered, only a real "not found"
-        foreach ($key in @($script:Shared.Meta.Keys)) { $entry = $script:Shared.Meta[$key]; if ($entry.Found -or $entry.NotFound) { $copy[$key] = $entry } }
+        foreach ($e in (Get-MetaSnapshot).GetEnumerator()) { $entry = $e.Value; if ($entry.Found -or $entry.NotFound) { $copy[$e.Key] = $entry } }
         New-Item -Path $script:WorkRoot -ItemType Directory -Force | Out-Null
         $copy | ConvertTo-Json -Depth 4 | Set-Content -Path $script:MetaCachePath -Encoding UTF8
         $script:MetaDirty = $false
@@ -826,8 +837,9 @@ foreach ($item in $Items) {
 function Start-IconRender {
     # One background task renders the missing SVG icons of all known packages, one after another
     if (@($script:Tasks | Where-Object { $_.Job.Kind -eq 'icons' }).Count -gt 0) { return }
-    $items = foreach ($key in @($script:Shared.Meta.Keys)) {
-        $url = [string]$script:Shared.Meta[$key].IconUrl
+    $snapshot = Get-MetaSnapshot
+    $items = foreach ($key in @($snapshot.Keys)) {
+        $url = [string]$snapshot[$key].IconUrl
         if ($url -notmatch '^https?://.*\.svg(\?|#|$)' -or $script:IconsQueued.ContainsKey($url)) { continue }
         $file = Get-IconCacheFile $url
         if (Test-Path $file) { continue }
@@ -909,7 +921,7 @@ function Complete-MetaPrefetch {
     # The interface started while lookups were still running: the automatic refresh follows now
     if ($script:AutoRefreshPending -and -not (Test-TaskRunning 'popular')) { $script:AutoRefreshPending = $false; Start-AppsRefresh -Auto }
     Update-RefreshButton
-    $failed = @($script:Shared.Meta.Values | Where-Object { -not $_.Found -and -not $_.NotFound })
+    $failed = @((Get-MetaSnapshot).Values | Where-Object { -not $_.Found -and -not $_.NotFound })
     if ($failed.Count -gt 0 -and -not $script:MetaWarned) {
         $script:MetaWarned = $true
         Write-UiLog "Infos for $($failed.Count) package(s) could not be read ($($failed[0].Error)). Refresh in the Apps list tries again." 'Warning'
