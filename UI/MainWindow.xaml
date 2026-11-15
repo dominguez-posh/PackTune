@@ -529,16 +529,22 @@
                                             <Button x:Name="BtnCustomStoreSetup" Grid.Column="1" Content="Set up" Margin="16,0,0,0" Padding="16,6"/>
                                         </Grid>
                                     </Border>
-                                    <Grid Margin="0,18,0,0">
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="36"/><ColumnDefinition Width="*"/><ColumnDefinition Width="150"/><ColumnDefinition Width="170"/></Grid.ColumnDefinitions>
-                                        <Grid.Resources><Style TargetType="TextBlock"><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{StaticResource MutedText}"/></Style></Grid.Resources>
-                                        <TextBlock Grid.Column="1" Margin="12,0,0,6" Text="Application"/><TextBlock Grid.Column="2" Text="Kind and version"/><TextBlock Grid.Column="3" Text="Assigned"/>
-                                    </Grid>
-                                    <Border BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="0,1,0,0">
-                                        <Grid>
-                                            <ListBox x:Name="LstCustom" Style="{StaticResource PlainList}" ItemTemplate="{StaticResource CustomRowTemplate}" MaxHeight="620"/>
-                                            <TextBlock x:Name="TxtCustomEmpty" Style="{StaticResource Hint}" FontSize="13" Margin="0,16"/>
-                                        </Grid>
+                                    <Border Style="{StaticResource CardBox}" Margin="0,16,0,0">
+                                        <StackPanel>
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/><ColumnDefinition Width="120"/><ColumnDefinition Width="125"/><ColumnDefinition Width="90"/><ColumnDefinition Width="110"/>
+                                                </Grid.ColumnDefinitions>
+                                                <Grid.Resources><Style TargetType="TextBlock"><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="SemiBold"/><Setter Property="Foreground" Value="{StaticResource MutedText}"/><Setter Property="Margin" Value="12,10"/></Style></Grid.Resources>
+                                                <TextBlock Text="App" Margin="16,10"/><TextBlock Grid.Column="1" Text="Version"/><TextBlock Grid.Column="2" Text="Updates"/><TextBlock Grid.Column="3" Text="Assigned"/><TextBlock Grid.Column="4" Text="On devices"/>
+                                            </Grid>
+                                            <Border BorderBrush="{StaticResource SurfaceBorder}" BorderThickness="0,1,0,0">
+                                                <Grid>
+                                                    <ListBox x:Name="LstCustom" Style="{StaticResource PlainList}" ItemTemplate="{StaticResource TenantRowTemplate}" MaxHeight="560"/>
+                                                    <TextBlock x:Name="TxtCustomEmpty" Style="{StaticResource Hint}" Margin="16,18" FontSize="13" IsHitTestVisible="False"/>
+                                                </Grid>
+                                            </Border>
+                                        </StackPanel>
                                     </Border>
                                 </StackPanel>
                             </ScrollViewer>

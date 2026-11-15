@@ -2007,22 +2007,45 @@ function Get-IntentsText($Intents) {
     (@($i | ForEach-Object { switch ($_) { 'required' { 'Required' } 'available' { 'Available' } default { $_ } } }) -join ', ')
 }
 function Test-StoreReady { [bool]($script:StoreState -and $script:StoreState.State -eq 'Ready') }
+function Get-CustomRowData($a, $apps) {
+    # One row exactly like a row of In tenant (same fields, same template): icon, name and line, version, assignment, counts
+    $newer = @($apps | Where-Object { $_.AppId -eq $a.AppId -and $_.Id -ne $a.Id -and (Compare-SourceVersion $_.Version $a.Version) -eq 1 }).Count -gt 0
+    $count = $script:DeviceCounts[[string]$a.Id]
+    $kind = if ($a.Kind -eq 'msix') { 'Custom MSIX' } else { 'Custom MSI' }
+    $tested = Get-UiTestState 'Custom' ([string]$a.AppId) ([string]$a.Version)
+    $sub = "$kind $([char]0x00B7) $(if ($a.Kind -eq 'msix') { $a.Identity } else { $a.ProductCode }) $([char]0x00B7) Sandbox: $tested"
+    $ok = if ($count -and -not $count.Error) { "$($count.Installed) installed" } elseif ($count -and $count.Error) { Get-ShortCountError $count.Error } else { '...' }
+    $bad = if ($count -and -not $count.Error) { @($(if ($count.Failed) { "$($count.Failed) failed" }), $(if ($count.Pending) { "$($count.Pending) pending" })) | Where-Object { $_ } | Select-Object -First 2 } else { '' }
+    $bad = (@($bad) -join " $([char]0x00B7) ").Trim()
+    $icon = try { Get-TenantAppIcon $a } catch { $null }
+    $title = if ($newer) { "$($a.DisplayName) (replaced)" } else { [string]$a.DisplayName }
+    New-Row (@{
+        Data = $a; Title = $title; Sub = $sub; Version = [string]$a.Version; Newer = ''; NewerVis = 'Collapsed'; Updates = 'Own application'
+        Assigned = (Get-IntentsText $a.Intents); Ok = $ok; Bad = $bad; BadVis = (ConvertTo-Vis ([bool]$bad)); Icon = $icon; MonoVis = (ConvertTo-Vis (-not $icon))
+    } + (Get-TileStyle $title))
+}
+$script:CustomKeys = ''
 function Update-CustomRows {
-    # The list is rebuilt by every refresh (counts, store check, assignment change ...): the selected app stays selected, so the panel does not close under the person's click
+    # Same behaviour as the In tenant list: the rows are rebuilt only when the apps changed, otherwise updated in place, so a refresh in the
+    # background never replaces the row under the person's click
     $keepId = if ($ui.LstCustom.SelectedItem) { [string]$ui.LstCustom.SelectedItem.Data.Id } else { '' }
-    $script:CustomRows.Clear()
     $apps = @($script:CustomApps | Where-Object { $_ })
-    foreach ($a in $apps) {
-        $newer = @($apps | Where-Object { $_.AppId -eq $a.AppId -and $_.Id -ne $a.Id -and (Compare-SourceVersion $_.Version $a.Version) -eq 1 }).Count -gt 0
-        $kind = "$($a.Kind.ToUpper()) $($a.Version)"
-        if ($newer) { $kind += ' (replaced)' }
-        $colors = if ($newer) { $script:PillColors['gray'] } else { $script:PillColors['info'] }
-        $row = New-Row (@{
-            Data = $a; Title = $a.DisplayName; Sub = "$($a.Publisher)  $([char]0x00B7)  $($a.ProductCode)"; Kind = $kind; KindBg = $colors[0]; KindFg = $colors[1]
-            Assigned = (Get-IntentsText $a.Intents); Loading = $(if (-not $script:DeviceCounts.ContainsKey([string]$a.Id) -and (Test-TaskRunning 'counts')) { 'Reading install counts ...' } else { '' })
-        } + (Get-TileStyle $a.DisplayName))
-        $script:CustomRows.Add($row)
+    $rows = @($apps | ForEach-Object { Get-CustomRowData $_ $apps })
+    $keys = ($apps | ForEach-Object { $_.Id }) -join '|'
+    if ($keys -eq $script:CustomKeys -and $script:CustomRows.Count -eq $rows.Count) {
+        for ($i = 0; $i -lt $rows.Count; $i++) {
+            $old = $script:CustomRows[$i]
+            foreach ($k in 'Title', 'Sub', 'Version', 'Ok', 'Bad', 'BadVis', 'Assigned', 'Icon', 'MonoVis', 'Updates') { $old[$k] = $rows[$i][$k] }
+            $old.Data = $rows[$i].Data
+        }
     }
+    else {
+        $script:CustomKeys = $keys
+        $script:CustomRows.Clear()
+        foreach ($r in $rows) { $script:CustomRows.Add($r) }
+    }
+    # (an empty hint text lay over the list and took the clicks: shown only when there is nothing to click)
+    $ui.TxtCustomEmpty.Visibility = ConvertTo-Vis ($rows.Count -eq 0)
     $count = @($apps | Where-Object { $a = $_; -not (@($apps | Where-Object { $_.AppId -eq $a.AppId -and $_.Id -ne $a.Id -and (Compare-SourceVersion $_.Version $a.Version) -eq 1 }).Count) }).Count
     $ui.TxtCustomSubtitle.Text = if (-not (Test-SignedIn)) { 'Your own software as Win32 apps: an MSI is read, packaged and deployed automatically. Sign in to see the custom applications in your tenant.' }
     elseif ($null -eq $script:CustomApps) { 'Reading the custom applications of your tenant ...' }
@@ -2043,6 +2066,7 @@ function Update-CustomRows {
         if ($pending) { $ui.LstCustom.SelectedItem = $pending; $script:CustomPendingSelect = $null }
     }
     if ($keepId -and -not $ui.LstCustom.SelectedItem) {
+        Write-CustomTrace "selection of $keepId was lost by a rebuild, restored"
         $again = @($script:CustomRows | Where-Object { $_.Data.Id -eq $keepId }) | Select-Object -First 1
         if ($again) { $ui.LstCustom.SelectedItem = $again }
     }
@@ -2162,10 +2186,23 @@ function Show-CustomDetails($App) {
     Update-CustomPanelTest $App
     $ui.BtnCustomExport.ToolTip = if (Test-StoreReady) { $null } else { 'Set up the package store first' }
 }
+function Write-CustomTrace([string]$Text) {
+    # Debug trail of the Custom page (day log): where a click on a row stops
+    try { Write-UiLog "[Custom page] $Text" 'Debug' } catch { }
+}
 $ui.LstCustom.Add_SelectionChanged({
     $row = $ui.LstCustom.SelectedItem
-    try { Show-CustomDetails $(if ($row) { $row.Data }) } catch { Show-Error $_.Exception.Message }
+    try {
+        if (-not $row) { Write-CustomTrace 'selection cleared: panel closed'; Show-CustomDetails $null; return }
+        $id = [string]$row.Data.Id
+        if (-not $id) { Write-CustomTrace "selection of '$($row.Title)' skipped: the app has no Intune id (found by the notes only)"; Show-CustomDetails $row.Data; return }
+        Write-CustomTrace "selected $($row.Data.DisplayName) ($id, $($row.Data.Kind) $($row.Data.Version)): opening the panel"
+        Show-CustomDetails $row.Data
+        Write-CustomTrace "panel open for $($row.Data.DisplayName), counts $(if ($script:DeviceCounts.ContainsKey($id)) { 'known' } else { 'not read yet' })"
+    }
+    catch { Write-CustomTrace "opening the panel failed: $($_.Exception.Message)"; Show-Error $_.Exception.Message }
 })
+$ui.LstCustom.Add_PreviewMouseLeftButtonDown({ param($s, $e) Write-CustomTrace "click on the list ($(try { [string]$e.OriginalSource.GetType().Name } catch { '?' })), $($script:CustomRows.Count) row(s), $(@($script:Tasks | Where-Object { $_.Job.Status -in 'queued', 'running' }).Count) task(s) running" })
 function Get-SelectedCustomApp { $row = $ui.LstCustom.SelectedItem; if ($row) { $row.Data } }
 
 function ConvertFrom-CustomProps([string]$Text) {
@@ -3711,7 +3748,7 @@ function Get-ShortCountError([string]$Raw) {
 function Start-CountsTask {
     # Intune's install summary per app (one small call each, DeviceManagementApps.Read.All), a short cache so the list does not hammer Graph
     $ids = @(@($script:TenantApps | Where-Object { -not $_.IsChocolatey -and ($_.Package -or $_.IsCustom) }) + @($script:CustomApps | Where-Object { $_ }) | ForEach-Object { $_.Id } | Select-Object -Unique | Where-Object {
-        $c = $script:DeviceCounts[$_]; -not $c -or $c.Error -or -not $c.Fetched -or ((Get-Date) - [datetime]$c.Fetched).TotalSeconds -gt $script:CountsCacheSeconds })
+        $c = $script:DeviceCounts[$_]; -not $c -or -not $c.Fetched -or ((Get-Date) - [datetime]$c.Fetched).TotalSeconds -gt $(if ($c.Error) { [Math]::Max(60, $script:CountsCacheSeconds) } else { $script:CountsCacheSeconds }) })
     if ($ids.Count -eq 0 -or (Test-TaskRunning 'counts')) { return }
     $work = '
 param($Ids, $Fake)

@@ -843,7 +843,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             Test-Smoke 'gate: the deployed app carries the test record in its notes' ($deployedNotes -like '*;test=passed;date=*;hash=*') $deployedNotes
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             Test-Smoke 'deploy: the app is in Intune with the custom marker and the Available assignment' ($fake.Count -eq 1 -and $fake[0].displayName -eq 'Smoke Tool' -and $fake[0].assignment -eq 'available' -and $fake[0].notes -like '*ver=1.0.0;product={BBBBBBBB-0000-0000-0000-000000000001}*') (($fake | ForEach-Object notes) -join ';')
-            Test-Smoke 'the custom page lists it with version and assignment' ($script:CustomRows.Count -eq 1 -and $script:CustomRows[0]['Title'] -eq 'Smoke Tool' -and $script:CustomRows[0]['Kind'] -eq 'MSI 1.0.0' -and $script:CustomRows[0]['Assigned'] -eq 'Available') ($script:CustomRows | ForEach-Object { $_['Kind'] })
+            Test-Smoke 'the custom page lists it with version and assignment' ($script:CustomRows.Count -eq 1 -and $script:CustomRows[0]['Title'] -eq 'Smoke Tool' -and $script:CustomRows[0]['Version'] -eq '1.0.0' -and $script:CustomRows[0]['Sub'] -like 'Custom MSI*' -and $script:CustomRows[0]['Assigned'] -eq 'Available') ($script:CustomRows | ForEach-Object { $_['Kind'] })
             Test-Smoke 'it is no catalog app in the In tenant list' (@($script:TenantApps | Where-Object { $_.DisplayName -eq 'Smoke Tool' }).Count -eq 0) ''
             Show-Page 'Custom'
             $ui.LstCustom.SelectedIndex = 0
@@ -882,7 +882,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             $fake = @(Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like 'PoweredByPackTune;custom=msi*' })
             $new = $fake | Where-Object { $_.displayVersion -eq '2.0.0' }
             Test-Smoke 'new version: a second app that supersedes the first, with its assignment' ($fake.Count -eq 2 -and $new -and @($new.supersedence).Count -eq 1 -and $new.assignments[0].Intent -eq 'available') ($fake | ForEach-Object displayVersion)
-            Test-Smoke 'the list shows both, the older one marked as replaced' ($script:CustomRows.Count -eq 2 -and @($script:CustomRows | Where-Object { $_['Kind'] -like '*(replaced)' }).Count -eq 1) ($script:CustomRows | ForEach-Object { $_['Kind'] })
+            Test-Smoke 'the list shows both, the older one marked as replaced' ($script:CustomRows.Count -eq 2 -and @($script:CustomRows | Where-Object { $_['Title'] -like '*(replaced)' }).Count -eq 1) ($script:CustomRows | ForEach-Object { $_['Kind'] })
             Save-SmokeShot '35-custom-versions'
             $ui.LstCustom.SelectedIndex = 0
             foreach ($ca in @($script:CustomApps)) { $script:DeviceCounts[[string]$ca.Id] = @{ Id = [string]$ca.Id; Installed = 0; Fetched = Get-Date } }; Update-CustomRemoveState (Get-SelectedCustomApp)
@@ -923,7 +923,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             if (-not (Test-Idle 'customlist')) { return $false }
             $s.Phase = 2
             $msixRows = @($script:CustomRows | Where-Object { $_['Title'] -eq 'Captured Tool' })
-            Test-Smoke 'the MSIX application is listed as MSIX' ($msixRows.Count -eq 1 -and $msixRows[0]['Kind'] -eq 'MSIX 1.0.0.0') ($script:CustomRows | ForEach-Object { $_['Kind'] })
+            Test-Smoke 'the MSIX application is listed as MSIX' ($msixRows.Count -eq 1 -and $msixRows[0]['Sub'] -like 'Custom MSIX*' -and $msixRows[0]['Version'] -eq '1.0.0.0') ($script:CustomRows | ForEach-Object { $_['Sub'] })
             $ui.LstCustom.SelectedItem = $msixRows[0]
             Test-Smoke 'details of an MSIX app: package identity and the certificate of this version' ($ui.LblCustomProduct.Text -eq 'Package identity' -and $ui.TxtCustomProduct.Text -eq 'PackTune.CapturedTool' -and $ui.TxtCustomUpgrade.Text -eq ('AB' * 20) -and $ui.LblCustomUpgrade.Text -like 'Certificate*') ''
             Test-Smoke 'details: kept in the package store (manifest), Export is available' ($ui.TxtCustomStore.Text -like '*manifest 0123456789abcdef*' -and $ui.BtnCustomExport.IsEnabled) $ui.TxtCustomStore.Text
@@ -1669,7 +1669,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $null = Start-UiTask -Kind 'versions' -Title 'Loading details of Panel Tool' -Hidden -Work 'Start-Sleep -Seconds 60'
                 $null = Start-UiTask -Kind 'failedlist' -Title 'Reading install counts' -Hidden -Work 'Start-Sleep -Seconds 60'
                 Update-BusyBar
-                Test-Smoke 'busy bar: visible with the first task and the count of the others' ($ui.BoxBusy.Visibility -eq 'Visible' -and $ui.TxtBusy.Text -like 'Loading details of Panel Tool*+1 more*') $ui.TxtBusy.Text
+                Test-Smoke 'busy bar: visible with the first task and the count of the others' ($ui.BoxBusy.Visibility -eq 'Visible' -and $ui.PbBusy.Visibility -eq 'Visible' -and $ui.TxtBusy.Text -match '\(\+\d+ more\)') $ui.TxtBusy.Text
                 $script:CustomApps | Out-Null
                 $s.Phase = 2; return $false
             }
@@ -1702,6 +1702,57 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'not signed in: grey Not signed in' ($ui.TxtBusy.Text -eq 'Not signed in' -and $script:ReadyKind -eq 'signedout' -and $ui.DotReady.Fill.Color.ToString() -eq '#FF8A8A8A') $ui.TxtBusy.Text
                 $script:Shared.Auth = $savedAuth; $script:ReadyProblemSource = $null
                 Update-BusyBar
+                Show-Page 'Apps'
+                return $true
+            }
+        } } }
+    @{ Name = 'custom list is the In tenant list, a real click opens the panel'; Phase = 0; Do = {
+        param($s)
+        $storePath = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
+        switch ("$($s.Phase)") {
+            '0' {
+                if (-not (Test-Idle)) { return $false }
+                # an app as an earlier PackTune version made it: the old notes format (no manifest, no thumbprint), MSI, Available, the product code as the line below
+                $apps = @(Get-Content $storePath -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+                $apps += [pscustomobject]@{ id = 'old-kv-1'; displayName = 'Keevault'; publisher = 'Keevault'; description = 'x'; createdDateTime = '2026-10-01T10:00:00Z'
+                    notes = 'PoweredByPackTune;custom=msi;app=keevault-04aa7b8e;ver=0.9.34;product={04AA7B8E-1111-2222-3333-444455556666};upgrade={04AA7B8E-AAAA-BBBB-CCCC-DDDDEEEEFFFF};manifest=0123456789abcdef'
+                    displayVersion = '0.9.34'; assignment = 'available'; assignments = @([pscustomobject]@{ Type = '#microsoft.graph.allLicensedUsersAssignmentTarget'; Intent = 'available' }); dependencies = @(); supersedence = @() }
+                ConvertTo-Json -InputObject @($apps) -Depth 6 | Set-Content $storePath
+                $script:CustomApps = $null
+                Show-Page 'Custom'
+                $s.Phase = 1; return $false
+            }
+            '1' {
+                if (-not (Test-Idle 'customlist')) { return $false }
+                Close-Dialog   # an earlier step may have left a dialog (Help) open over the page
+                $window.UpdateLayout()
+                $row = @($script:CustomRows | Where-Object { $_['Title'] -eq 'Keevault' })[0]
+                Test-Smoke 'custom list rows are In tenant rows: version, line with product code and test state, Available, install counts, own application' ($row['Version'] -eq '0.9.34' -and $row['Sub'] -like 'Custom MSI*{04AA7B8E-*Sandbox: *' -and $row['Assigned'] -eq 'Available' -and $row['Updates'] -eq 'Own application' -and $row['Ok'] -ne $null) (($row['Sub'], $row['Assigned'], $row['Ok']) -join ' | ')
+                Test-Smoke 'the list is the same control and template as In tenant (columns, row height, selection style)' ($ui.LstCustom.ItemTemplate -eq $ui.LstTenant.ItemTemplate -and $ui.LstCustom.Style -eq $ui.LstTenant.Style)
+                $item = $ui.LstCustom.ItemContainerGenerator.ContainerFromItem($row)
+                Test-Smoke 'the row is on screen as a list item' ($item -and $item.ActualHeight -gt 20) "$($item.ActualHeight)"
+                # hit test at the middle of the row: the list item must be what is under the pointer (no overlay, no bar on top)
+                $pt = $item.TranslatePoint((New-Object System.Windows.Point ($item.ActualWidth / 2), ($item.ActualHeight / 2)), $window)
+                $params = New-Object System.Windows.Media.PointHitTestParameters $pt
+                $hitList = New-Object System.Collections.ArrayList
+                $filter = [System.Windows.Media.HitTestFilterCallback]{ param($o) if ($o -is [System.Windows.UIElement] -and (-not $o.IsVisible -or -not $o.IsHitTestVisible)) { [System.Windows.Media.HitTestFilterBehavior]::ContinueSkipSelfAndChildren } else { [System.Windows.Media.HitTestFilterBehavior]::Continue } }
+                $result = [System.Windows.Media.HitTestResultCallback]{ param($r) [void]$hitList.Add($r.VisualHit); [System.Windows.Media.HitTestResultBehavior]::Stop }
+                [System.Windows.Media.VisualTreeHelper]::HitTest($window, $filter, $result, $params)
+                $hit = [pscustomobject]@{ VisualHit = $hitList[0] }
+                $v = if ($hit) { $hit.VisualHit } else { $null }
+                while ($v -and $v -isnot [System.Windows.Controls.ListBoxItem]) { $v = [System.Windows.Media.VisualTreeHelper]::GetParent($v) }
+                Test-Smoke 'hit test: the pointer over the Keevault row reaches its list item' ($v -ne $null -and [object]::ReferenceEquals($v.DataContext, $row)) "hit $($hit.VisualHit.Name)/$($hit.VisualHit.Text) path $((& { $x = $hit.VisualHit; $o = @(); while ($x -and $o.Count -lt 14) { $o += $x.GetType().Name + $(if ($x.Name) { ':' + $x.Name }); $x = [System.Windows.Media.VisualTreeHelper]::GetParent($x) }; $o -join ' < ' })) pt $($pt)"
+                # a real left click on the item (the event the mouse raises)
+                $ui.LstCustom.SelectedItem = $null
+                $e = New-Object System.Windows.Input.MouseButtonEventArgs ([System.Windows.Input.Mouse]::PrimaryDevice, 0, [System.Windows.Input.MouseButton]::Left)
+                $e.RoutedEvent = [System.Windows.UIElement]::MouseLeftButtonDownEvent; $e.Source = $item
+                $item.RaiseEvent($e)
+                Test-Smoke 'a click on the row selects it and the details panel opens' ($ui.LstCustom.SelectedItem -and $ui.LstCustom.SelectedItem.Data.Id -eq 'old-kv-1' -and $ui.PanelCustomDetails.Visibility -eq 'Visible' -and $ui.TxtCustomTitle.Text -eq 'Keevault' -and $ui.BtnCustomPanelTest.Visibility -eq 'Visible') (Get-SmokeLog)
+                Test-Smoke 'every step of the click is in the day log (click, selection, panel open)' ((Get-SmokeLog) -match '\[Custom page\] selected Keevault \(old-kv-1, msi 0\.9\.34\): opening the panel' -and (Get-SmokeLog) -match '\[Custom page\] panel open for Keevault') ''
+                # a refresh while the panel is open must not close it or drop the row
+                Update-CustomRows; Update-CustomRows
+                Test-Smoke 'refreshes in the background keep the row selected and the panel open' ($ui.LstCustom.SelectedItem.Data.Id -eq 'old-kv-1' -and $ui.PanelCustomDetails.Visibility -eq 'Visible')
+                $ui.LstCustom.SelectedItem = $null
                 Show-Page 'Apps'
                 return $true
             }
@@ -1822,6 +1873,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $row = @($script:TenantRowList | Where-Object { $_['Title'] -eq '7-Zip' })[0]
                 Test-Smoke 'summary failure: column shows the short cause, the card the mapped cause (no raw text, no "-")' ($row['Ok'] -eq 'No permission' -and $ui.TxtSumInfo.Text -like 'Could not read the counts: No permission*' -and $ui.TxtSumInfo.Text -notmatch 'Graph GET') "$($row['Ok']) / $($ui.TxtSumInfo.Text)"
                 $script:CountsCacheSeconds = 120
+                $script:DeviceCounts.Clear()   # a failed read is asked again only after a minute: start afresh
                 Start-CountsTask
                 $s.Phase = 2; return $false
             }
