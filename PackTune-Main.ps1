@@ -97,7 +97,7 @@ $script:DefaultSettings = [ordered]@{
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
 # Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
-$script:DeviceScriptRevision = 11
+$script:DeviceScriptRevision = 12
 # Longest random delay of the update tasks that is read back from the notes (one week)
 $script:MaxDelayMinutes = 10080
 
@@ -464,7 +464,9 @@ function New-PackTuneAppPolicy {
         [int]$UpdateDelayMinMinutes = 5,
         [int]$UpdateDelayMaxMinutes = 60,
         # Hashtable or object with schedule values (see $script:ScheduleFields); missing ones use the built-in defaults
-        $Schedule
+        $Schedule,
+        # PackTune: an uninstall removes only what PackTune installed (software that was on the device before stays); All: also a pre-existing installation
+        [ValidateSet("PackTune", "All")][string]$UninstallScope = "PackTune"
     )
     if ($Version -eq "latest") { $Version = "" }
     if ($Version -and $Version -notmatch '^[0-9A-Za-z][0-9A-Za-z.+-]*$') { throw "'$Version' is not a valid package version" }
@@ -475,7 +477,7 @@ function New-PackTuneAppPolicy {
     }
     $Cfg = ConvertTo-ChocoScheduleCfg $ScheduleObject
     # Every field of the policy is part of the fingerprint (the cfg text covers the whole schedule)
-    $Text = "$($Package.ToLower())|$Version|$UpdateMode|$GraceHours|$PackageSource|$UpdateDelayMinMinutes|$UpdateDelayMaxMinutes|$Cfg|$($script:DeviceScriptRevision)"
+    $Text = "$($Package.ToLower())|$Version|$UpdateMode|$GraceHours|$PackageSource|$UpdateDelayMinMinutes|$UpdateDelayMaxMinutes|$Cfg|$UninstallScope|$($script:DeviceScriptRevision)"
     $Sha = [Security.Cryptography.SHA256]::Create()
     $Hash = -join ($Sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Text))[0..7] | ForEach-Object { $_.ToString("x2") })
     $Sha.Dispose()
@@ -488,6 +490,7 @@ function New-PackTuneAppPolicy {
         UpdateDelayMinMinutes = $UpdateDelayMinMinutes
         UpdateDelayMaxMinutes = $UpdateDelayMaxMinutes
         Schedule              = $ScheduleObject
+        UninstallScope        = $UninstallScope
         Fingerprint           = $Hash
     }
 }#Returns the update policy of an app with its fingerprint
@@ -539,6 +542,8 @@ function ConvertTo-PackTuneAppNotes {
     $Notes = "$($script:ToolMarker);from=$From;package=$($Policy.Package);version=$Version;update=$($Policy.UpdateMode);grace=$($Policy.GraceHours)" +
         ";source=$([uri]::EscapeDataString([string]$Policy.PackageSource));delay=$($Policy.UpdateDelayMinMinutes)-$($Policy.UpdateDelayMaxMinutes)"
     if ($Policy.Schedule) { $Notes += ";cfg=$(ConvertTo-ChocoScheduleCfg $Policy.Schedule)" }
+    # Only the non-default value is written: "remove also a pre-existing installation" on uninstall
+    if ($Policy.UninstallScope -eq "All") { $Notes += ";uninstall=all" }
     # Written by the deploy gate when an app went out without a passed sandbox test: testOverride=<state>;<date>;<admin>
     if ($ExtraNotes) { $Notes += ";$ExtraNotes" }
     if ($Notes.Length -ge $script:NotesMaxLength) { throw "The notes of the app would be $($Notes.Length) characters long (limit used: $($script:NotesMaxLength)). Shorten the package source or the process names." }
@@ -550,7 +555,7 @@ function ConvertFrom-PackTuneAppNotes {
     # PackageSource and the delays are $null for apps from before they were stored (callers use the current settings).
     # Schedule is always complete: without cfg (older apps) it is the built-in default, which behaves like before.
     $Result = [ordered]@{ Package = $null; Version = ""; UpdateMode = "Startup"; GraceHours = 48; HasPolicy = $false
-        PackageSource = $null; UpdateDelayMinMinutes = $null; UpdateDelayMaxMinutes = $null; Schedule = $null; HasSchedule = $false; From = $null }
+        PackageSource = $null; UpdateDelayMinMinutes = $null; UpdateDelayMaxMinutes = $null; Schedule = $null; HasSchedule = $false; From = $null; UninstallScope = "PackTune" }
     $Result.From = Get-PackTuneNotesSource $Notes
     if ($Notes -match 'package=([A-Za-z0-9._+-]+)') { $Result.Package = $Matches[1] }
     if ($Notes -match 'version=([0-9A-Za-z.+-]+)' -and $Matches[1] -ne "latest") { $Result.Version = $Matches[1] }
@@ -558,6 +563,7 @@ function ConvertFrom-PackTuneAppNotes {
     # Numbers with TryParse and clamped to the valid ranges: crafted notes (grace=99999999999) must not break the app list
     $Number = 0
     if ($Notes -match 'grace=(\d+)' -and [int]::TryParse($Matches[1], [ref]$Number)) { $Result.GraceHours = [Math]::Min(2160, [Math]::Max(1, $Number)) }
+    if ($Notes -match '(?:^|;)uninstall=all(?:;|$)') { $Result.UninstallScope = "All" }
     if ($Notes -match 'source=([^;]*)') { try { $Result.PackageSource = [uri]::UnescapeDataString($Matches[1]) } catch { } }
     if ($Notes -match 'delay=(\d+)-(\d+)') {
         $Min = 0; $Max = 0
@@ -1464,10 +1470,103 @@ function Get-ChocoIconBase64 {
 
 }#Returns a Intune-Deployment-ready Base64-Coded PNG, or $null if there is no usable icon
 
+function Get-DevicePreExistingCommon {
+    # Software that was on the device before PackTune: machine-wide (uninstall entries of HKLM, 64 and 32 bit) and per user (loaded profiles in
+    # HKU, %LOCALAPPDATA%\Programs of every profile). Used by install.ps1 before the first install; the record goes to preexisting.json in the
+    # protected app folder. Parameters are only there for the tests (other registry keys / folders).
+    return @'
+function Get-PreExistingInstall {
+    param([string[]]$Names, [string[]]$MachineKeys, [string[]]$UserKeys, [string[]]$ProgramsRoots)
+    $Names = @($Names | Where-Object { $_ -and ([string]$_).Length -ge 3 } | Select-Object -Unique)
+    $Result = [ordered]@{ Machine = $false; Version = ""; Origin = ""; UserCopies = 0 }
+    if ($Names.Count -eq 0) { return [pscustomobject]$Result }
+    $Match = {
+        param($Display)
+        foreach ($N in $Names) {
+            $Esc = [WildcardPattern]::Escape($N)
+            if ($Display -eq $N -or $Display -like "$Esc *" -or $Display -like "$Esc(*") { return $true }
+        }
+        return $false
+    }
+    if (-not $MachineKeys) { $MachineKeys = @("HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*", "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*") }
+    foreach ($Entry in @(Get-ItemProperty -Path $MachineKeys -ErrorAction SilentlyContinue)) {
+        $Display = [string]$Entry.DisplayName
+        if (-not $Display -or $Entry.SystemComponent -eq 1 -or -not (& $Match $Display)) { continue }
+        $Result.Machine = $true
+        $Result.Version = [string]$Entry.DisplayVersion
+        $Result.Origin = if ($Entry.WindowsInstaller -eq 1 -or [string]$Entry.UninstallString -match "msiexec") { "MSI" } else { "EXE" }
+        break
+    }
+    # Per user: one key list per loaded profile; the folders under AppData\Local\Programs of every profile (cheap, no scan of the disk)
+    if (-not $UserKeys) {
+        $UserKeys = @(Get-ChildItem -Path "Registry::HKEY_USERS" -ErrorAction SilentlyContinue | Where-Object { $_.PSChildName -match "^S-1-5-21-[0-9-]+$" } |
+            ForEach-Object { "Registry::HKEY_USERS\$($_.PSChildName)\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*" })
+    }
+    $ByRegistry = 0
+    foreach ($Key in $UserKeys) {
+        foreach ($Entry in @(Get-ItemProperty -Path $Key -ErrorAction SilentlyContinue)) {
+            $Display = [string]$Entry.DisplayName
+            if ($Display -and (& $Match $Display)) { $ByRegistry++; break }
+        }
+    }
+    if (-not $ProgramsRoots) {
+        $ProgramsRoots = @(Get-ChildItem -LiteralPath (Join-Path $env:SystemDrive "Users") -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notin "Public", "Default", "Default User", "All Users" } | ForEach-Object { Join-Path $_.FullName "AppData\Local\Programs" })
+    }
+    $ByFolder = 0
+    foreach ($Root in $ProgramsRoots) {
+        foreach ($Dir in @(Get-ChildItem -LiteralPath $Root -Directory -ErrorAction SilentlyContinue)) {
+            if (& $Match $Dir.Name) { $ByFolder++; break }
+        }
+    }
+    # The same profile can show up in both places: the larger number is the better count
+    $Result.UserCopies = [Math]::Max($ByRegistry, $ByFolder)
+    return [pscustomobject]$Result
+}
+function New-PreExistingRecord($Found, [bool]$OtherInstall, [string]$OtherOrigin, [string]$OtherVersion) {
+    # preExisting = the software is on the device machine-wide without PackTune (MSI/EXE, or winget/choco outside PackTune); a copy only in
+    # user profiles does not count (PackTune installs machine-wide next to it and never touches it, it is reported as userCopies)
+    $Machine = [bool]($Found.Machine -or $OtherInstall)
+    $Origin = if ($Found.Machine) { [string]$Found.Origin } elseif ($OtherInstall) { $OtherOrigin } elseif ($Found.UserCopies -gt 0) { "user" } else { "" }
+    $Version = if ($Found.Machine) { [string]$Found.Version } else { $OtherVersion }
+    $Scope = if ($Machine) { "machine" } elseif ($Found.UserCopies -gt 0) { "user" } else { "" }
+    return [ordered]@{ format = 1; preExisting = $Machine; version = $Version; scope = $Scope; origin = $Origin; userCopies = [int]$Found.UserCopies; date = (Get-Date).ToString("o") }
+}
+function Save-PreExistingRecord([string]$Folder, [string[]]$Names, [bool]$OtherInstall, [string]$OtherOrigin, [string]$OtherVersion, [hashtable]$Probe = @{}) {
+    # Once, before the first install: records what is on the device and logs it. A folder with a config.json is from an earlier PackTune install:
+    # the software is ours then, whatever is found now. Returns the record, or $null when nothing was recorded.
+    $File = Join-Path $Folder "preexisting.json"
+    if ((Test-Path -LiteralPath $File) -or (Test-Path -LiteralPath (Join-Path $Folder "config.json"))) { return $null }
+    try {
+        $Found = Get-PreExistingInstall -Names $Names @Probe
+        $Record = New-PreExistingRecord $Found $OtherInstall $OtherOrigin $OtherVersion
+        Write-ProtectedFile $File ($Record | ConvertTo-Json -Compress)
+        if ($Record.preExisting) { Write-DeviceLog "adopted: $($Names[0]) was on the device before PackTune ($($Record.origin) $($Record.version)); PackTune takes over its updates"; Write-Output "Adopted: $($Names[0]) was already on the device ($($Record.origin) $($Record.version))." }
+        else { Write-DeviceLog "$($Names[0]) was not on the device before PackTune" }
+        if ($Record.userCopies -gt 0) { Write-DeviceLog "also installed per user for $($Record.userCopies) profile(s); the user copies are not touched"; Write-Output "Also installed per user for $($Record.userCopies) profile(s); those copies are not touched." }
+        return [pscustomobject]$Record
+    }
+    catch { Write-DeviceLog "pre-existing check failed: $($_.Exception.Message)"; return $null }
+}
+'@
+}#Detection of software that was on the device before PackTune
+
 function Get-DeviceScriptCommon {
     # Functions of install.ps1 and update.ps1, for Chocolatey and winget apps: the device wide lock and the protected
     # folders of the update helpers (both run as SYSTEM)
     return (Get-DeviceExitCodeBlock) + (Get-DeviceRetryCheckText) + @'
+function Get-PreExistingRecord([string]$Folder) {
+    # preexisting.json of the app folder: the software was on the device before PackTune (written once by install.ps1, see Get-DevicePreExistingCommon)
+    $File = Join-Path $Folder "preexisting.json"
+    if (Test-Path -LiteralPath $File) { try { return (Get-Content -LiteralPath $File -Raw | ConvertFrom-Json) } catch { } }
+    return $null
+}
+function Test-KeepPreExisting([string]$Folder, [string]$Scope) {
+    # Uninstall: true = the software was on the device before PackTune and the app's setting is "remove only what PackTune installed"
+    $R = Get-PreExistingRecord $Folder
+    return [bool]($R -and $R.preExisting -and $Scope -ne "All")
+}
+
 # Every folder of this tool on the device is under %ProgramFiles%\PackTune: Chocolatey\<package>, Winget\<id>,
 # Winget\Logs, Runtime. Before the rename it was %ProgramFiles%\IntuneChocoDeployment ($OldToolRoot): install.ps1 and the
 # runtime remove their part of it (Remove-OldToolFolder), nothing else touches it. Users cannot create anything in %ProgramFiles%, so no user can prepare
@@ -1704,6 +1803,7 @@ function Write-DeviceLog([string]$Text) {
 #   failures          failed attempts of this action in a row (0 when the last attempt did not fail)
 #   firstFailure      time of the first failed attempt of that row, "" when none
 #   retry             false when the app's retry setting is "None": Intune must not run install.ps1 again for a failing update
+#   preExisting       true when the software was on the device (machine-wide) before PackTune: adopted; userCopies = profiles with a per-user copy; origin = MSI/EXE/winget/choco/user
 # $ResultFile is set by the scripts once the folder is protected.
 function Save-LastResult([string]$Action, [string]$Status, [int]$ExitCode, [string]$Cause, [string]$Installed = "", [string]$Target = "") {
     if (-not $ResultFile) { return }
@@ -1720,9 +1820,12 @@ function Save-LastResult([string]$Action, [string]$Status, [int]$ExitCode, [stri
             catch { }
         }
         $RetryOk = if (Get-Variable -Name RetryViaIntune -ErrorAction SilentlyContinue) { [bool]$RetryViaIntune } else { $true }
+        # Software that was on the device before PackTune (preexisting.json of the app folder): reported with every result
+        $Pre = Get-PreExistingRecord (Split-Path -Path $ResultFile -Parent)
         $Result = [ordered]@{ format = 1; package = (& $Clean $LogId); lastAttempt = (Get-Date).ToString("o"); action = $Action; status = $Status
             exitCode = $ExitCode; cause = (& $Clean $Cause); installedVersion = (& $Clean $Installed); targetVersion = (& $Clean $Target)
-            failures = $Failures; firstFailure = $First; retry = $RetryOk }
+            failures = $Failures; firstFailure = $First; retry = $RetryOk
+            preExisting = [bool]($Pre -and $Pre.preExisting); userCopies = $(if ($Pre) { [int]$Pre.userCopies } else { 0 }); origin = $(if ($Pre) { (& $Clean $Pre.origin) } else { "" }) }
         Write-ProtectedFile $ResultFile ($Result | ConvertTo-Json -Compress)
     }
     catch { }
@@ -2291,6 +2394,7 @@ param(
     [string]$ScheduleJson = '__SCHEDULE__',
     [int]$DelayMin = __DELAYMIN__,
     [int]$DelayMax = __DELAYMAX__,
+    [string]$UninstallScope = '__UNINSTALLSCOPE__',
     [switch]$Uninstall
 )
 
@@ -2326,6 +2430,7 @@ $SourceArguments = @()
 if ($Source) { $SourceArguments = @("--source", $Source) }
 
 __COMMON__
+__PREEXISTING__
 __CHOCOCOMMON__
 if (-not (Test-Path $Choco)) { Write-Output "choco.exe not found in $ChocoRoot"; exit $PTExit.ChocoMissing }
 
@@ -2336,8 +2441,15 @@ $Base = Join-Path $ToolRoot "Chocolatey"
 $AppRoot = Join-Path $Base $Package
 
 if ($Uninstall) {
+    # Software that was on the device before PackTune stays (setting "remove only what PackTune installed"): only the policy, tasks and helpers go
+    $PreRecord = Get-PreExistingRecord $AppRoot
+    $KeepSoftware = Test-KeepPreExisting $AppRoot $UninstallScope
+    if ($KeepSoftware) {
+        Write-DeviceLog "uninstall: $Package was on the device before PackTune ($($PreRecord.origin) $($PreRecord.version)), the software is kept; tasks and helpers are removed"
+        Write-Output "$Package was on the device before PackTune: the software is kept, only PackTune's update tasks and helpers are removed."
+    }
     $ExitCode = 0
-    if (Get-InstalledVersion) {
+    if (-not $KeepSoftware -and (Get-InstalledVersion)) {
         if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; exit (Get-LockExitCode) }
         # --remove-dependencies: a meta package (e.g. vlc) takes its installer package (vlc.install) with it
         & $Choco uninstall $Package -y --no-progress --remove-dependencies
@@ -2367,6 +2479,11 @@ try {
 catch { Write-Output "The folder $AppRoot could not be protected: $($_.Exception.Message)"; exit $PTExit.FolderProtect }
 $ResultFile = Join-Path $AppRoot "last-result.json"
 
+# Before the first install: is the software there already (MSI/EXE machine-wide, choco outside PackTune, per-user copies)? Recorded once in the
+# protected folder (a folder that has a config.json is from an earlier PackTune install: then it is ours, whatever is found).
+$PackageBase = $Package -replace '\.(install|portable)$', ''
+$PreRecorded = [bool](Save-PreExistingRecord $AppRoot @($DisplayName, $PackageBase, ($PackageBase -split '\.')[-1]) ([bool]$Installed) "choco" ([string]$Installed))
+
 # A new installation always installs. When only the policy changed (released version, update mode), the device
 # follows its update mode: Off installs a released version right away (latest + Off leaves the installed version
 # alone), Startup at the next startup, Custom asks the user and installs at the latest when the grace period is over.
@@ -2388,6 +2505,7 @@ if ($Upgrade) {
     Write-DeviceLog "choco $InstallAction $Package exit code $ExitCode"
     Save-LastResult $InstallAction $(if ($InstallOk) { "ok" } else { "failed" }) $(if ($ExitCode -in 1641, 3010) { 0 } else { $ExitCode }) $(if ($InstallOk) { "ok" } else { "failed: exit code $ExitCode" }) ([string](Get-InstalledVersion)) $Version
 }
+if (-not $Upgrade -and $PreRecorded) { Save-LastResult "adopt" "ok" 0 "adopted" ([string]$Installed) }
 if ($ExitCode -notin 0, 1641, 3010) { exit $ExitCode }
 
 # Settings for the update helpers; a new policy starts its own grace period
@@ -2586,6 +2704,8 @@ exit 1
     $InstallScript = $InstallScript.Replace("__VERSION__", (& $Quote $Policy.Version)).Replace("__MODE__", $Policy.UpdateMode).Replace("__GRACE__", [string][int]$Policy.GraceHours)
     $InstallScript = $InstallScript.Replace("__DISPLAYNAME__", (& $Quote $DisplayName)).Replace("__POLICY__", $Policy.Fingerprint)
     $InstallScript = $InstallScript.Replace("__DELAYMIN__", [string]$Policy.UpdateDelayMinMinutes).Replace("__DELAYMAX__", [string]$Policy.UpdateDelayMaxMinutes)
+    $InstallScript = $InstallScript.Replace("__PREEXISTING__", (Get-DevicePreExistingCommon))
+    $InstallScript = $InstallScript.Replace("__UNINSTALLSCOPE__", $(if ($Policy.UninstallScope -eq "All") { "All" } else { "PackTune" }))
     $DetectionScript = $DetectionScript.Replace("__RETRYCHECK__", (Get-DeviceRetryCheckText)).Replace("__PACKAGE__", $ChocoName).Replace("__POLICY__", $Policy.Fingerprint)
 
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $InstallScript -Encoding ASCII
@@ -2709,6 +2829,8 @@ function New-PackTuneChocolateyApp {
         [string]$UpdateMode = $script:Settings.UpdateMode,
         [ValidateRange(1, 2160)]
         [int]$GraceHours = $script:Settings.GraceHours,
+        # PackTune: an uninstall removes only what PackTune installed; All: also software that was on the device before
+        [ValidateSet("PackTune", "All")][string]$UninstallScope = "PackTune",
         # When and under which conditions updates install (hashtable of New-ChocoSchedule values); default = the UpdateSchedule setting
         $Schedule = (Get-ChocoScheduleDefaults),
         # "latest" = devices follow the newest version; "current" = pin today's version; or an exact version.
@@ -2781,7 +2903,7 @@ function New-PackTuneChocolateyApp {
                 $TestOverride = Assert-PackTuneCatalogTested -Source Chocolatey -Package $Name -Version $(if ($PinnedVersion) { $PinnedVersion } else { [string]$Infos.Version }) -Architecture $Architecture -SkipTestReason $SkipTestReason
                 if ($TestOverride) { Write-Warning $TestOverride.Text }
                 $Policy = New-PackTuneAppPolicy -Package $Name -Version $PinnedVersion -UpdateMode $UpdateMode -GraceHours $GraceHours `
-                    -PackageSource $PackageSource -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes -Schedule $Schedule
+                    -PackageSource $PackageSource -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes -Schedule $Schedule -UninstallScope $UninstallScope
                 Write-Host ("Version: {0}, updates: {1}" -f $(if ($PinnedVersion) { $PinnedVersion } else { "always the latest" }), (Format-PackTuneUpdateMode $Policy))
 
                 ### Install and Detection Script, package
@@ -2898,6 +3020,8 @@ function Update-PackTuneApp {
         [string]$Version,
         [ValidateSet("Off", "Startup", "Custom")][string]$UpdateMode,
         [ValidateRange(1, 2160)][int]$GraceHours,
+        # PackTune / All: what an uninstall removes (see New-PackTuneAppPolicy); without it the value of the app stays
+        [ValidateSet("PackTune", "All")][string]$UninstallScope,
         # Schedule values to change (hashtable of New-ChocoSchedule values, may be partial); the others stay as they are
         $Schedule,
         # Releases a version that has no passed sandbox test anyway: the reason is logged and written to the app notes
@@ -2927,6 +3051,7 @@ function Update-PackTuneApp {
     }
     $NewMode = if ($UpdateMode) { $UpdateMode } else { $Current.UpdateMode }
     $NewGrace = if ($PSBoundParameters.ContainsKey("GraceHours")) { $GraceHours } else { $Current.GraceHours }
+    $NewUninstall = if ($UninstallScope) { $UninstallScope } else { $Current.UninstallScope }
 
     # Source and delay stay those of the app; apps from before they were in the notes take the current settings
     $NewSource = if ($IsWinget) { "" } elseif ($null -ne $Current.PackageSource) { $Current.PackageSource } else { $script:Settings.PackageSource }
@@ -2936,7 +3061,7 @@ function Update-PackTuneApp {
     # The schedule stays that of the app (apps from before schedules existed keep the built-in defaults = their old behavior)
     $NewSchedule = New-ChocoSchedule -Values $Schedule -Base $Current.Schedule
     $Policy = New-PackTuneAppPolicy -Package $Package -Version $NewVersion -UpdateMode $NewMode -GraceHours $NewGrace -PackageSource $NewSource `
-        -UpdateDelayMinMinutes $DelayMin -UpdateDelayMaxMinutes $DelayMax -Schedule $NewSchedule
+        -UpdateDelayMinMinutes $DelayMin -UpdateDelayMaxMinutes $DelayMax -Schedule $NewSchedule -UninstallScope $NewUninstall
     Write-Host ("{0}: version {1}, updates {2}" -f $App.displayName, $(if ($NewVersion) { $NewVersion } else { "always the latest" }), (Format-PackTuneUpdateMode $Policy))
 
     Write-Host "Building the package with the new policy"
@@ -3103,6 +3228,7 @@ function Get-PackTuneTenantApps {
             Version      = $Policy.Version
             UpdateMode   = $Policy.UpdateMode
             GraceHours   = $Policy.GraceHours
+            UninstallScope = $Policy.UninstallScope
             HasPolicy    = $Policy.HasPolicy
             Schedule     = $Policy.Schedule
         }

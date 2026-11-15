@@ -2987,6 +2987,7 @@ function Format-ScheduleSummary($S) {
 # ---------------------------------------------------------------- deploy dialog
 $script:DeployCombos = New-Object System.Collections.ArrayList
 $script:DeploySchedule = $null     # schedule values chosen for this deployment (hashtable), $null = settings default
+$script:DeployUninstallScope = 'PackTune'   # On uninstall (Advanced dialog): PackTune = only what PackTune installed, All = also a pre-existing installation
 $script:DeployVersionTexts = @{}
 
 function Get-SourceOptionText($Src, [string]$Source) {
@@ -3078,7 +3079,7 @@ function Show-DeployDialog {
     $ui.CmbDeployAssign.SelectedIndex = $assignIndex
     $ui.CmbDeployVersion.SelectedIndex = if ($script:Settings.VersionMode -eq 'Pinned') { 1 } else { 0 }
     Set-PolicyControls 'Deploy' $script:Settings.UpdateMode $script:Settings.GraceHours
-    $script:DeploySchedule = $null
+    $script:DeploySchedule = $null; $script:DeployUninstallScope = 'PackTune'
     Update-DeploySchedule
     Update-DeployVersionTexts
     Show-Dialog 'DlgDeploy'
@@ -3149,8 +3150,9 @@ function Start-Deploy {
     $schedule = if ($script:DeploySchedule) { (New-ChocoSchedule -Values $script:DeploySchedule -Base (Get-ChocoScheduleDefaults)) } else { $null }
     Update-UiToken
     $work = @'
-param($Id, $Source, $Assignment, $Architecture, $IconBase64, $UpdateMode, $GraceHours, $Version, $Schedule, $SkipTestReason)
+param($Id, $Source, $Assignment, $Architecture, $IconBase64, $UpdateMode, $GraceHours, $Version, $Schedule, $UninstallScope, $SkipTestReason)
 $Params = @{ Assignment = $Assignment; Architecture = $Architecture; NoIconPrompt = $true; UpdateMode = $UpdateMode; GraceHours = $GraceHours; Version = $Version }
+if ($UninstallScope -eq 'All') { $Params.UninstallScope = 'All' }
 if ($SkipTestReason) { $Params.SkipTestReason = $SkipTestReason }
 if ($IconBase64) { $Params.IconBase64 = $IconBase64 }
 if ($Schedule) { $Params.Schedule = $Schedule }
@@ -3179,7 +3181,7 @@ else { New-PackTuneChocolateyApp -ChocoName $Id @Params }
             }
             if (-not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'deploy' }).Count) { Start-TenantRefresh }
             Update-AppList
-        } -Arguments @{ Id = $item.Id; Source = $item.Source; Assignment = $assignment; Architecture = $script:Settings.Architecture; IconBase64 = $icon; UpdateMode = $policy.UpdateMode; GraceHours = $policy.GraceHours; Version = $version; Schedule = $schedule; SkipTestReason = $(if ($skipReason -and @($gate | Where-Object { $_.Key -eq $item.Key -and (Get-UiTestState $_.Source $_.Id $_.Version) -ne 'Passed' }).Count) { $skipReason } else { '' }) })
+        } -Arguments @{ Id = $item.Id; Source = $item.Source; Assignment = $assignment; Architecture = $script:Settings.Architecture; IconBase64 = $icon; UpdateMode = $policy.UpdateMode; GraceHours = $policy.GraceHours; Version = $version; Schedule = $schedule; UninstallScope = $script:DeployUninstallScope; SkipTestReason = $(if ($skipReason -and @($gate | Where-Object { $_.Key -eq $item.Key -and (Get-UiTestState $_.Source $_.Id $_.Version) -ne 'Passed' }).Count) { $skipReason } else { '' }) })
     }
     Write-UiLog "$($todo.Count) deployment(s) queued, assignment $assignment, updates: $(Format-UpdateText $policy.UpdateMode $policy.GraceHours)." 'Info'
     Clear-Selection
@@ -3202,6 +3204,8 @@ $ui.SchRetry.ItemsSource = @('Retry at the next chance', 'Do not retry', 'Retry 
 $ui.SchGraceUnit.ItemsSource = @('hours', 'days')
 $script:SchDays = 1..7 | ForEach-Object { $ui["SchD$_"] }
 
+$ui.SchUninstall.ItemsSource = @('Remove only what PackTune installed (default)', 'Also remove a pre-existing installation')
+$ui.SchUninstall.SelectedIndex = 0
 function Set-ScheduleControls($S, [int]$GraceHours, [int]$DelayMin, [int]$DelayMax) {
     $ui.SchStart.IsChecked = [bool]$S.TriggerStart; $ui.SchWindow.IsChecked = [bool]$S.TriggerWindow
     $ui.SchFrom.Text = $S.WindowFrom; $ui.SchTo.Text = $S.WindowTo
@@ -3243,7 +3247,8 @@ function Read-ScheduleControls {
     if ($schedule.IdleMinutes -eq 0 -and $ui.SchIdle.IsChecked) { throw 'Choose the idle time in minutes.' }
     $delayMin = 0; $delayMax = 0
     if (-not ([int]::TryParse($ui.SchDelayMin.Text.Trim(), [ref]$delayMin) -and [int]::TryParse($ui.SchDelayMax.Text.Trim(), [ref]$delayMax)) -or $delayMin -lt 0 -or $delayMax -lt $delayMin) { throw 'The random wait needs two whole minutes, the second not smaller than the first.' }
-    @{ Values = $values; Schedule = $schedule; GraceHours = (ConvertTo-GraceHours $ui.SchGrace.Text $ui.SchGraceUnit.SelectedIndex $false); DelayMin = $delayMin; DelayMax = $delayMax }
+    @{ Values = $values; Schedule = $schedule; GraceHours = (ConvertTo-GraceHours $ui.SchGrace.Text $ui.SchGraceUnit.SelectedIndex $false); DelayMin = $delayMin; DelayMax = $delayMax
+       UninstallScope = $(if ($ui.SchUninstall.SelectedIndex -eq 1) { 'All' } else { 'PackTune' }) }
 }
 
 function Update-ScheduleSummary {
@@ -3272,6 +3277,7 @@ function Show-ScheduleDialog {
     $dMin = if ($App -and $App.DelayMin) { $App.DelayMin } else { $script:Settings.UpdateDelayMinMinutes }
     $dMax = if ($App -and $App.DelayMax) { $App.DelayMax } else { $script:Settings.UpdateDelayMaxMinutes }
     Set-ScheduleControls $Schedule $GraceHours $script:Settings.UpdateDelayMinMinutes $script:Settings.UpdateDelayMaxMinutes
+    $ui.SchUninstall.SelectedIndex = $(if ($Mode -eq 'Deploy') { if ($script:DeployUninstallScope -eq 'All') { 1 } else { 0 } } elseif ($App -and $App.UninstallScope -eq 'All') { 1 } else { 0 })
     $ui.TxtSchNotRunning.Text = if ($App) { "$($App.DisplayName) is not in use" } else { 'The app is not in use' }
     Update-ScheduleApplyButton
     Update-ScheduleSummary
@@ -3298,7 +3304,7 @@ Add-Click $ui.BtnScheduleCancel { if ($script:SchCtx.Mode -eq 'Deploy') { Show-D
 Add-Click $ui.BtnScheduleApply {
     $r = Read-ScheduleControls
     switch ($script:SchCtx.Mode) {
-        'Deploy' { $script:DeploySchedule = $r.Values; Update-DeploySchedule; Show-Dialog 'DlgDeploy' }
+        'Deploy' { $script:DeploySchedule = $r.Values; $script:DeployUninstallScope = $r.UninstallScope; Update-DeploySchedule; Show-Dialog 'DlgDeploy' }
         'Default' { Save-DefaultSchedule $r; Close-Dialog }
         default {
             if ($ui.RbSchDefault.IsChecked) { Save-DefaultSchedule $r; Close-Dialog }
@@ -3308,7 +3314,7 @@ Add-Click $ui.BtnScheduleApply {
                 $version = Get-TenantVersion
                 $script:TenantSchedule = $r.Values
                 Close-Dialog
-                Start-AppApply -App $app -Version $version -Policy @{ UpdateMode = $policy.UpdateMode; GraceHours = $(if ($policy.UpdateMode -eq 'Custom') { $policy.GraceHours } else { $r.GraceHours }) } -Schedule $r.Values
+                Start-AppApply -App $app -Version $version -Policy @{ UpdateMode = $policy.UpdateMode; GraceHours = $(if ($policy.UpdateMode -eq 'Custom') { $policy.GraceHours } else { $r.GraceHours }) } -Schedule $r.Values -UninstallScope $r.UninstallScope
             }
         }
     }
@@ -3501,7 +3507,7 @@ Get-PackTuneTenantApps | ForEach-Object {
     try { $Intents = (@(Get-PackTuneAppIntents -AppId $_.Id -Context $Ctx) | Select-Object -Unique) -join '','' } catch { }
     [pscustomobject]@{
         Id = [string]$_.Id; DisplayName = [string]$_.DisplayName; Package = [string]$_.Package; Source = [string]$_.Source; IsChocolatey = [bool]$_.IsChocolatey; Created = [string]$_.Created
-        Version = [string]$_.Version; UpdateMode = [string]$_.UpdateMode; GraceHours = [int]$_.GraceHours; HasPolicy = [bool]$_.HasPolicy; Intents = $Intents; Schedule = $_.Schedule
+        Version = [string]$_.Version; UpdateMode = [string]$_.UpdateMode; GraceHours = [int]$_.GraceHours; UninstallScope = [string]$_.UninstallScope; HasPolicy = [bool]$_.HasPolicy; Intents = $Intents; Schedule = $_.Schedule
     }
 }
 # Custom applications (MSI / MSIX, marker custom=...) are listed here too
@@ -4032,7 +4038,7 @@ $ui.LstTenant.AddHandler([System.Windows.Controls.Primitives.ButtonBase]::ClickE
 
 function Start-AppApply {
     # Rebuilds the package with the new settings and changes the app in Intune (in place or through supersedence); devices follow on their own
-    param([Parameter(Mandatory)]$App, [Parameter(Mandatory)][string]$Version, [Parameter(Mandatory)][hashtable]$Policy, $Schedule)
+    param([Parameter(Mandatory)]$App, [Parameter(Mandatory)][string]$Version, [Parameter(Mandatory)][hashtable]$Policy, $Schedule, [string]$UninstallScope)
     if (-not (Test-SignedIn)) { throw 'Sign in to Intune first (Sign in, top right).' }
     # The deploy gate for a released version (a changed update policy alone needs no test)
     $skipReason = ''
@@ -4041,10 +4047,10 @@ function Start-AppApply {
         if ($null -eq $skipReason) { return }
     }
     Update-UiToken
-    $arguments = @{ AppId = $App.Id; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours; Schedule = $Schedule; SkipTestReason = $skipReason }
+    $arguments = @{ AppId = $App.Id; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours; Schedule = $Schedule; UninstallScope = $UninstallScope; SkipTestReason = $skipReason }
     $work = @'
-param($AppId, $Version, $UpdateMode, $GraceHours, $Schedule, $SkipTestReason)
-$Skip = @{}; if ($SkipTestReason) { $Skip.SkipTestReason = $SkipTestReason }
+param($AppId, $Version, $UpdateMode, $GraceHours, $Schedule, $UninstallScope, $SkipTestReason)
+$Skip = @{}; if ($SkipTestReason) { $Skip.SkipTestReason = $SkipTestReason }; if ($UninstallScope) { $Skip.UninstallScope = $UninstallScope }
 if ($Schedule) { Update-PackTuneApp -AppId $AppId -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours -Schedule $Schedule @Skip }
 else { Publish-PackTuneRelease -AppId $AppId -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours @Skip }
 '@
@@ -4214,6 +4220,9 @@ function Show-StatusRows($St) {
         $last = $d.LastResult
         $label, $kind = if ($d.State -in 'failed', 'uninstallFailed') { 'Failed', 'bad' } elseif ($d.State -eq 'pendingInstall') { 'Waiting', 'warn' } elseif ($d.NotReported) { 'No report', 'gray' } elseif ($d.State -eq 'installed') { 'Installed', 'ok' } else { $d.State, 'gray' }
         $cause = if ($last -and -not $last.Ok -and $last.Cause) { [string]$last.Cause } elseif ($d.Cause) { [string]$d.Cause } elseif ($label -eq 'No report') { "No report for 7 days" } else { '' }
+        # Software that was on the device before PackTune, and per-user copies (from the status script of the device; without it nothing reaches PackTune)
+        $notes = @(); if ($last -and $last.PreExisting) { $notes += 'pre-existing (adopted)' }; if ($last -and [int]$last.UserCopies -gt 0) { $notes += $(if ([int]$last.UserCopies -eq 1) { 'user copy present' } else { "user copy present ($($last.UserCopies) profiles)" }) }
+        if ($notes.Count) { $cause = (@($cause) + @($notes) | Where-Object { $_ }) -join ' - ' }
         $code = if ($last -and -not $last.Ok -and $null -ne $last.ExitCode) { "exit $($last.ExitCode)" } elseif ($d.ErrorCode) { Format-ExitCodeText $d.ErrorCode } else { '' }
         $when = if ($d.LastReport) { $t = ([datetime]$d.LastReport).ToLocalTime(); if ($t.Date -eq (Get-Date).Date) { "Today $($t.ToString('HH:mm'))" } else { $t.ToString('d MMM') } } else { '' }
         New-Row @{ Data = $d; Title = $d.DeviceName; Sub = $d.User; Status = $label; StatusBg = $script:PillColors[$kind][0]; StatusFg = $script:PillColors[$kind][1]

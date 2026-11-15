@@ -524,8 +524,19 @@ foreach ($Entry in @(@('c', $ChocoRoot), @('w', $WingetRoot), @('c', $OldChocoRo
         if ($Cause.Length -gt 48) { $Cause = $Cause.Substring(0, 48) }
         $Code = 0
         try { $Code = [int]$R.exitCode } catch { }
-        if (($Code -eq 0 -or $Code -eq 3010 -or $Code -eq 1641) -and [string]$R.status -ne 'failed') { [void]$Good.Add(('{0}={1}' -f $Dir.Name, $R.installedVersion)) }
-        else { [void]$Failed.Add([ordered]@{ p = $Dir.Name; s = $Entry[0]; t = $Time; a = [string]$R.action; e = $Code; c = $Cause; v = [string]$R.installedVersion; g = [string]$R.targetVersion }) }
+        # Software that was on the device before PackTune: ~A (adopted), and ~U<n> (per-user copies in n profiles); short, the output is capped
+        $Pre = ''
+        if ($R.preExisting) { $Pre += '~A' }
+        $Users = 0
+        try { $Users = [int]$R.userCopies } catch { }
+        if ($Users -gt 0) { $Pre += '~U' + $Users }
+        if (($Code -eq 0 -or $Code -eq 3010 -or $Code -eq 1641) -and [string]$R.status -ne 'failed') { [void]$Good.Add(('{0}={1}{2}' -f $Dir.Name, $R.installedVersion, $Pre)) }
+        else {
+            $Item = [ordered]@{ p = $Dir.Name; s = $Entry[0]; t = $Time; a = [string]$R.action; e = $Code; c = $Cause; v = [string]$R.installedVersion; g = [string]$R.targetVersion }
+            if ($R.preExisting) { $Item.pe = 1 }
+            if ($Users -gt 0) { $Item.uc = $Users }
+            [void]$Failed.Add($Item)
+        }
     }
 }
 $F = New-Object System.Collections.ArrayList
@@ -652,12 +663,18 @@ function ConvertFrom-InsightRunState {
     foreach ($F in @($Report.f)) {
         if (-not $F) { continue }
         [void]$Apps.Add([pscustomobject]@{ Package = [string]$F.p; Source = $(if ($F.s -eq 'w') { 'Winget' } else { 'Chocolatey' }); LastAttempt = [string]$F.t
-                Action = [string]$F.a; ExitCode = $F.e; Cause = $(if ($F.c -and [string]$F.c -notmatch '^failed: exit code') { [string]$F.c } else { Get-InsightErrorCause $F.e }); InstalledVersion = [string]$F.v; TargetVersion = [string]$F.g; Ok = $false })
+                PreExisting = [bool]$F.pe; UserCopies = [int]$F.uc; Action = [string]$F.a; ExitCode = $F.e; Cause = $(if ($F.c -and [string]$F.c -notmatch '^failed: exit code') { [string]$F.c } else { Get-InsightErrorCause $F.e }); InstalledVersion = [string]$F.v; TargetVersion = [string]$F.g; Ok = $false })
     }
     foreach ($O in @($Report.o)) {
         if (-not $O) { continue }
         $Name, $Version = ([string]$O -split '=', 2)
-        [void]$Apps.Add([pscustomobject]@{ Package = $Name; Source = $null; LastAttempt = $null; Action = $null; ExitCode = 0; Cause = $null; InstalledVersion = $Version; TargetVersion = $null; Ok = $true })
+        # "version~A~U2": adopted (was on the device before PackTune) and per-user copies in 2 profiles
+        $Parts = @(([string]$Version) -split '~')
+        $Version = $Parts[0]
+        $Adopted = $Parts -contains 'A'
+        $UserCopies = 0
+        foreach ($Part in $Parts) { if ($Part -match '^U(\d+)$') { $UserCopies = [int]$Matches[1] } }
+        [void]$Apps.Add([pscustomobject]@{ Package = $Name; Source = $null; LastAttempt = $null; PreExisting = [bool]$Adopted; UserCopies = $UserCopies; Action = $null; ExitCode = 0; Cause = $null; InstalledVersion = $Version; TargetVersion = $null; Ok = $true })
     }
     [pscustomobject]@{
         DeviceName = [string]$State.managedDevice.deviceName; User = [string]$State.managedDevice.userPrincipalName

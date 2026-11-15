@@ -177,7 +177,7 @@ function Publish-PackTuneSupersedingApp {
     $DelayMax = if ($null -ne $Current.UpdateDelayMaxMinutes) { $Current.UpdateDelayMaxMinutes } else { $script:Settings.UpdateDelayMaxMinutes }
 
     $Policy = New-PackTuneAppPolicy -Package $Package -Version $NewVersion -UpdateMode $NewMode -GraceHours $NewGrace -PackageSource $NewSource `
-        -UpdateDelayMinMinutes $DelayMin -UpdateDelayMaxMinutes $DelayMax
+        -UpdateDelayMinMinutes $DelayMin -UpdateDelayMaxMinutes $DelayMax -UninstallScope $Current.UninstallScope
     Write-Host ("{0}: new app for version {1}, updates {2}" -f $Old.displayName, $(if ($NewVersion) { $NewVersion } else { "always the latest" }), (Format-PackTuneUpdateMode $Policy))
 
     Write-Host "Building the package"

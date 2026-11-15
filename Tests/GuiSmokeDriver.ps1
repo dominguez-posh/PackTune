@@ -1150,7 +1150,10 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $ui.SchFrom.Text = '25:00'
                 try { [void](Read-ScheduleControls); Test-Smoke 'invalid time rejected' $false } catch { Test-Smoke 'invalid time rejected' ($_.Exception.Message -like '*time like 10:00*') $_.Exception.Message }
                 $ui.SchFrom.Text = '12:00'
+                Test-Smoke 'schedule dialog: On uninstall offers "only what PackTune installed" (default) and "also a pre-existing installation"' (@($ui.SchUninstall.ItemsSource).Count -eq 2 -and $ui.SchUninstall.SelectedIndex -eq 0 -and (Read-ScheduleControls).UninstallScope -eq 'PackTune')
+                $ui.SchUninstall.SelectedIndex = 1
                 & $script:ClickActions[$ui.BtnScheduleApply]
+                Test-Smoke 'On uninstall is kept for the deployment' ($script:DeployUninstallScope -eq 'All')
                 Test-Smoke 'schedule is kept for the deployment, deploy dialog is back' ($ui.DlgDeploy.Visibility -eq 'Visible' -and $script:DeploySchedule.OnlyOnMains -and $ui.TxtDeploySchedule.Text -like '*12:00 to 13:00*') $ui.TxtDeploySchedule.Text
                 Start-Deploy
                 $s.Phase = 1
@@ -1159,7 +1162,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             1 {
                 if (-not (Test-Idle)) { return $false }
                 $app = Get-StoreApp $s.Package
-                Test-Smoke 'deployment carries update settings and schedule' ($app.notes -match 'update=Custom;grace=72;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+(;testOverride=[a-z]+;\d{8};[A-Za-z0-9@._-]+)?$' -and $app.notes -notmatch 'version=latest' -and $app.displayVersion -ne 'latest') $app.notes
+                Test-Smoke 'deployment carries update settings and schedule' ($app.notes -match 'update=Custom;grace=72;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+(;uninstall=all)?(;testOverride=[a-z]+;\d{8};[A-Za-z0-9@._-]+)?$' -and $app.notes -notmatch 'version=latest' -and $app.displayVersion -ne 'latest') $app.notes
                 $cfg = ConvertFrom-PackTuneAppNotes $app.notes
                 Test-Smoke 'schedule reached the notes' ($cfg.Schedule.WindowFrom -eq '12:00' -and $cfg.Schedule.OnlyOnMains -and -not $cfg.Schedule.TriggerStart -and $cfg.Schedule.WindowDays -eq '12345') ($cfg.Schedule | ConvertTo-Json -Compress)
                 $install = Get-Content (Join-Path $script:WorkRoot "package\$($s.Package)\source\install.ps1") -Raw
@@ -1179,10 +1182,12 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'panel shows the three explained choices, Ask the user selected' ($ui.RbTenantCustom.IsChecked -and $ui.TxtTenantGrace.Text -eq '3' -and $ui.CmbTenantGraceUnit.SelectedIndex -eq 1 -and $ui.PanelTenantGrace.Visibility -eq 'Visible')
                 Test-Smoke 'panel pins the version' ($ui.CmbTenantVersion.SelectedIndex -ge 1 -and $ui.CmbTenantVersion.SelectedItem -eq $row.Data.Version) "$($ui.CmbTenantVersion.SelectedItem)"
                 Test-Smoke 'panel summarises the schedule of the app' ($ui.TxtTenantWhen.Text -like '*') $ui.TxtTenantWhen.Text
+                Test-Smoke 'On uninstall of the deployment reached the app: notes and the install script' ((Get-StoreApp $s.Package).notes -like '*;uninstall=all*' -and (Get-Content (Join-Path $script:WorkRoot "package\$($s.Package)\source\install.ps1") -Raw) -match "\`$UninstallScope = 'All'")
                 # Schedule dialog from the panel: change and apply (in place, the app is Available but the schedule path uses Update-PackTuneApp)
                 $ui.RbTenantStartup.IsChecked = $true
                 & $script:ClickActions[$ui.BtnTenantSchedule]
                 Test-Smoke 'schedule dialog opens for the app with its values' ($ui.DlgSchedule.Visibility -eq 'Visible' -and $ui.SegSchedule.Visibility -eq 'Visible' -and $ui.SchFrom.Text -eq '12:00' -and [bool]$ui.SchMains.IsChecked -and $ui.TxtScheduleTitle.Text -like '*PuTTY*') $ui.TxtScheduleTitle.Text
+                Test-Smoke 'schedule dialog of the app shows its On uninstall setting' ($ui.SchUninstall.SelectedIndex -eq 1)
                 $ui.SchIdle.IsChecked = $true; $ui.SchIdleMin.SelectedIndex = 3
                 $ui.SchRetry.SelectedIndex = 2; $ui.SchRetryCount.Text = '2'
                 Update-ScheduleSummary
@@ -1199,6 +1204,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $app = Get-StoreApp $s.Package
                 Test-Smoke 'schedule applied in place through Update-PackTuneApp' ($app.notes -match 'version=latest;update=Startup' -and $app.uploads -eq ($s.Uploads + 1) -and $app.detection -ne $s.Detection) "$($app.notes) / $($app.uploads)"
                 $cfg = ConvertFrom-PackTuneAppNotes $app.notes
+                Test-Smoke 'changing the schedule keeps On uninstall of the app' ($cfg.UninstallScope -eq 'All')
                 Test-Smoke 'new schedule reached the app' ($cfg.Schedule.IdleMinutes -eq 15 -and $cfg.Schedule.RetryMode -eq 'Every' -and $cfg.Schedule.RetryCount -eq 2 -and $cfg.Schedule.WindowFrom -eq '12:00') ($cfg.Schedule | ConvertTo-Json -Compress)
                 $install = Get-Content (Join-Path $script:WorkRoot "package\$($s.Package)\source\install.ps1") -Raw
                 Test-Smoke 'new install script has the new routine' ($install -match "\`$Mode = 'Startup'")
@@ -1283,6 +1289,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'device table lists the devices, failed first' ($script:DeviceRowList.Count -eq 6 -and $script:DeviceRowList[0]['Title'] -eq 'NB-0420' -and $script:DeviceRowList[2]['Title'] -eq 'PC-0777' -and $script:DeviceRowList[0]['Status'] -eq 'Failed') (($script:DeviceRowList | ForEach-Object { $_['Title'] + ':' + $_['Status'] }) -join ', ')
         $pc = @($script:DeviceRowList | Where-Object { $_['Title'] -eq 'PC-0142' })[0]
         Test-Smoke 'with the status script: the cause comes from the device report, the sub line names the device log' ($pc['Cause'] -like '*rate limit*' -and $ui.TxtStatusSub.Text -like '*plus the update log*') $pc['Cause']
+        Test-Smoke 'device table says pre-existing (adopted) and the user copies where the status script reports them' ($pc['Cause'] -like '*pre-existing (adopted)*' -and $pc['Cause'] -like '*user copy present (2 profiles)*') $pc['Cause']
         $ui.LstDevices.SelectedItem = $pc
         Test-Smoke 'device log shows the reported lines and the retry hint' ($ui.BoxDeviceLog.Visibility -eq 'Visible' -and $ui.TxtDeviceLog.Text -like '*rate limit*' -and $ui.TxtRetryHint.Text -like '*retries by itself*') $ui.TxtDeviceLog.Text
         $info = Get-InsightDiagnosticsInfo -ManagedDeviceId $pc.Data.DeviceId -Package '7zip.install'

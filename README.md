@@ -246,6 +246,21 @@ Users cannot create anything in `%ProgramFiles%`. The folders belong to SYSTEM, 
 - **Device log**: `%ProgramData%\Microsoft\IntuneManagementExtension\Logs\PackTune-<package>.log` (1 MB, then one rollover to `...-<package>.1.log`). It is part of Intune's *Collect diagnostics*. The scripts write it only while that folder and the folders above it are admin-only and no links.
 - **`last-result.json`** in each app folder: `lastAttempt`, `action`, `status`, `exitCode`, `cause`, `installedVersion`, `targetVersion`. The status report reads it.
 
+### Software that was on the device before PackTune
+
+The software can already be on a device from somewhere else (Chrome from an MSI, a copy a user installed for themselves). Before the **first** install, `install.ps1` of both sources looks (once per app and device, nothing else is touched):
+
+- **Machine-wide**: the uninstall entries in `HKLM` (64 and 32 bit) by display name (also the name of the product as winget or Chocolatey knows it), and what `winget list --id --exact` or Chocolatey already hold outside PackTune.
+- **Per user**: the uninstall entries of the loaded profiles in `HKU` and the folders under `%LOCALAPPDATA%\Programs` of every profile. Profiles that are not loaded are not searched; the number is the larger count of the two places, so it can be low, never invented.
+
+The result is written to `preexisting.json` in the protected app folder (`preExisting`, `version`, `scope` machine or user, `origin` MSI, EXE, winget, choco or user, `userCopies`, `date`) and to the device log. An app folder that has a `config.json` comes from an earlier PackTune install: its software counts as PackTune's own, whatever is found.
+
+- **Machine-wide copy present: adopted.** PackTune takes over its updates like for its own installs (winget upgrade, or the Chocolatey installer over it); the log says `adopted`.
+- **Only a per-user copy present.** PackTune installs machine-wide as usual, reports `also installed per user for <n> profiles` and never touches the user copy.
+- **On uninstall** (setting per app, in the schedule dialog under *Advanced*, for new apps and for an app in *In tenant*; stored in the notes as `uninstall=all` only when it is not the default, and part of the policy fingerprint, device script revision 12): **Remove only what PackTune installed** is the default. Where `preExisting` is true the software stays; the policy, tasks and helpers are removed and the uninstall reports success. **Also remove a pre-existing installation** removes the software as before.
+
+**What reaches PackTune.** With the status report (Remediations) each device reports per app `~A` (adopted) and `~U<n>` (user copies); *Status* shows `pre-existing (adopted)` and `user copy present (n profiles)` in the cause column of the device. Without Remediations nothing of this reaches PackTune: Intune's install report only knows installed, failed or pending, and the exit code does not carry it. The device log and `preexisting.json` on the device have it in any case (Collect diagnostics). Apps taken over from another tenant or re-created (*Import*) get the default of the setting.
+
 ### Detection and policy fingerprint
 
 Every update setting (version, mode, grace period, package source, delays, schedule and the device script revision) is hashed into a fingerprint, which is part of the detection rule. The device's `policy.txt` must match it. A change in Intune therefore makes detection fail, Intune runs `install.ps1` again, and that applies the new policy. Changes to the device scripts raise the revision, which changes the fingerprint for every app.
@@ -365,6 +380,7 @@ Run in Windows PowerShell 5.1 from the repository folder. None of them contacts 
 - `Tests\Check-Sandbox.ps1`: the sandbox module without a sandbox (the lab sequence and its stop-on-unexpected verdict, fake launcher, a real single-use certificate that is removed again, fake signtool, toolchain hashes, entry point rules, registry restore of the update capture). `Tests\Check-Custom.ps1`, `Check-CustomMsix.ps1`, `Check-Store.ps1`: custom applications (MSI read from a Property table, the device scripts, certificate per version made and removed around the capture, deployment, new version, export, delete) and the package store against a fake SharePoint in memory (upload sessions, manifest, tamper tests, zip slip). `Tests\Spike-MsixWin32.ps1` runs the MSIX install, detect, failed-update restore, update and uninstall scripts as SYSTEM in Windows Sandbox.
 - `Tests\Check-ExitCodes.ps1`: the exit code table (unique, clear of Intune's defaults), the codes in the generated device scripts, what the device helpers make of choco and winget results, the causes in PackTune and the insight module, the README table, the device script revision.
 - `Tests\Check-TestGate.ps1`: the test results per version, the backend gate for deploy, winget and release, the override notes, the package store copy and sync.
+- `Tests\Check-PreExisting.ps1`: software that was on the device before PackTune (detection with test keys under `HKCU` and a temp folder: machine-wide MSI and EXE, per-user copies, the record, adoption, the uninstall decision for both settings, the status script flags and what the device table reads from them, the setting in policy, fingerprint and notes, the generated install scripts).
 - `Tests\Check-Sources.ps1`: recommended source, source filter, deployment per source, PackTune Runtime dependency and migration, release by supersedence or in place.
 
 The screenshots and the tour are rendered from the same demo data and refreshed with:
