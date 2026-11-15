@@ -175,6 +175,7 @@ param(
     [string]$ScheduleJson = '__SCHEDULE__',
     [int]$DelayMin = __DELAYMIN__,
     [int]$DelayMax = __DELAYMAX__,
+    [string]$UninstallScope = '__UNINSTALLSCOPE__',
     [switch]$Uninstall
 )
 
@@ -195,6 +196,7 @@ $Sched = $ScheduleJson | ConvertFrom-Json
 $RetryViaIntune = $Sched.RetryMode -ne "None"
 
 __COMMON__
+__PREEXISTING__
 
 # The helpers of this app: %ProgramFiles%\PackTune\Winget\<id> (see $ToolRoot). The tasks of older
 # versions (same names, helpers under %ProgramData%\IntuneWingetDeployment) are replaced below; that old folder is not
@@ -249,11 +251,21 @@ function Remove-UpdateTasks {
 }
 
 if ($Uninstall) {
-    if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; Stop-Transcript | Out-Null; exit (Get-LockExitCode) }
-    # Without --source: winget often cannot map the installed product to its source entry
-    & $Winget uninstall --id $Id --exact --silent --accept-source-agreements --disable-interactivity | Out-Host
-    $ExitCode = $LASTEXITCODE
-    Exit-DeploymentLock
+    # Software that was on the device before PackTune stays (setting "remove only what PackTune installed"): only the policy, tasks and helpers go
+    $PreRecord = Get-PreExistingRecord $AppRoot
+    $KeepSoftware = Test-KeepPreExisting $AppRoot $UninstallScope
+    $ExitCode = 0
+    if ($KeepSoftware) {
+        Write-DeviceLog "uninstall: $Id was on the device before PackTune ($($PreRecord.origin) $($PreRecord.version)), the software is kept; tasks and helpers are removed"
+        Write-Output "$Id was on the device before PackTune: the software is kept, only PackTune's update tasks and helpers are removed."
+    }
+    else {
+        if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; Stop-Transcript | Out-Null; exit (Get-LockExitCode) }
+        # Without --source: winget often cannot map the installed product to its source entry
+        & $Winget uninstall --id $Id --exact --silent --accept-source-agreements --disable-interactivity | Out-Host
+        $ExitCode = $LASTEXITCODE
+        Exit-DeploymentLock
+    }
     Write-Output "winget uninstall exit code $ExitCode"
     Write-DeviceLog "winget uninstall $Id exit code $ExitCode"
     # Tasks, helpers and marker only go when the software is gone; otherwise Intune reports the error and retries
@@ -275,6 +287,9 @@ if ($Version) { $VersionArguments += @("--version", $Version) }
 try { Protect-Folder $AppRoot }
 catch { Write-Output "The folder $AppRoot could not be protected: $($_.Exception.Message)"; Stop-Transcript | Out-Null; exit $PTExit.FolderProtect }
 $ResultFile = Join-Path $AppRoot "last-result.json"
+# Before the first install: is the software there already (winget, MSI/EXE machine-wide, per-user copies)? Recorded once in the protected folder
+# (a folder that has a config.json is from an earlier PackTune install: then it is ours, whatever is found).
+$PreRecorded = [bool](Save-PreExistingRecord $AppRoot @($DisplayName, ($Id -replace '\.', ' '), ($Id -split '\.')[-1]) ([bool]$Installed) "winget" "")
 # Which released version is installed: winget gives no plain answer, so the scripts remember it
 $VersionFile = Join-Path $AppRoot "version.txt"
 $AppliedVersion = if (Test-Path $VersionFile) { (Get-Content -Path $VersionFile -Raw).Trim() } else { "" }
@@ -296,6 +311,7 @@ if ($Applied) {
     Write-DeviceLog "winget $InstallAction $Id exit code $ExitCode"
     Save-LastResult $InstallAction $(if ($InstallOk) { "ok" } else { "failed" }) $(if ($InstallOk) { 0 } else { $ExitCode }) $(if ($InstallOk) { "ok" } else { "failed: exit code $ExitCode" }) $(if ($InstallOk) { $Version } else { "" }) $Version
 }
+if (-not $Applied -and $PreRecorded) { Save-LastResult "adopt" "ok" 0 "adopted" ([string]$AppliedVersion) }
 if ($ExitCode -notin $Success -and $ExitCode -notin $Reboot) { Stop-Transcript | Out-Null; exit $ExitCode }
 
 # Settings for the update helpers; a new policy starts its own grace period
@@ -464,9 +480,10 @@ exit 1
     $CommonText = Get-DeviceScriptCommon
     $InstallScript = $InstallScript.Replace("__TASKREG__", (Get-DeviceTaskRegistration)).Replace("__COMMON__", $CommonText)
     $UpdateScript = $UpdateScript.Replace("__UPDATECOMMON__", (Get-DeviceUpdateCommon)).Replace("__COMMON__", $CommonText)
+    $InstallScript = $InstallScript.Replace("__PREEXISTING__", (Get-DevicePreExistingCommon))
     $InstallScript = $InstallScript.Replace("__SCHEDULE__", (Get-DeviceScheduleText $Policy.Schedule))
     $InstallScript = $InstallScript.Replace("__GETWINGET__", $GetWinget).Replace("__ID__", $WingetId).Replace("__VERSION__", (& $Quote $Policy.Version))
-    $InstallScript = $InstallScript.Replace("__MODE__", $Policy.UpdateMode).Replace("__GRACE__", [string][int]$Policy.GraceHours)
+    $InstallScript = $InstallScript.Replace("__MODE__", $Policy.UpdateMode).Replace("__GRACE__", [string][int]$Policy.GraceHours).Replace("__UNINSTALLSCOPE__", $(if ($Policy.UninstallScope -eq "All") { "All" } else { "PackTune" }))
     $InstallScript = $InstallScript.Replace("__DISPLAYNAME__", (& $Quote $DisplayName)).Replace("__POLICY__", $Policy.Fingerprint)
     $InstallScript = $InstallScript.Replace("__DELAYMIN__", [string]$Policy.UpdateDelayMinMinutes).Replace("__DELAYMAX__", [string]$Policy.UpdateDelayMaxMinutes)
     $UpdateScript = $UpdateScript.Replace("__GETWINGET__", $GetWinget)
@@ -506,6 +523,8 @@ function New-PackTuneWingetApp {
         [string]$UpdateMode = $script:Settings.UpdateMode,
         [ValidateRange(1, 2160)]
         [int]$GraceHours = $script:Settings.GraceHours,
+        # PackTune: an uninstall removes only what PackTune installed; All: also software that was on the device before
+        [ValidateSet("PackTune", "All")][string]$UninstallScope = "PackTune",
         # When and under which conditions updates install (hashtable of New-ChocoSchedule values); default = the UpdateSchedule setting
         $Schedule = (Get-ChocoScheduleDefaults),
         # "latest" = devices follow the newest version; "current" = pin today's version; or an exact version.
@@ -562,7 +581,7 @@ function New-PackTuneWingetApp {
                     }
                 }
                 $Policy = New-PackTuneAppPolicy -Package $Id -Version $PinnedVersion -UpdateMode $UpdateMode -GraceHours $GraceHours `
-                    -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes -Schedule $Schedule
+                    -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes -Schedule $Schedule -UninstallScope $UninstallScope
                 Write-Host ("Version: {0}, updates: {1}" -f $(if ($PinnedVersion) { $PinnedVersion } else { "always the latest" }), (Format-PackTuneUpdateMode $Policy))
 
                 Write-Host "Creating the install and detection script"

@@ -164,6 +164,8 @@ Test-Check 'status script tolerates missing folders' (($none | Out-String) -matc
 $commonAst = [Management.Automation.Language.Parser]::ParseInput((Get-DeviceScriptCommon), [ref]$null, [ref]$null)
 $saveFn = $commonAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Save-LastResult' }, $true)
 . ([scriptblock]::Create($saveFn.Extent.Text))
+$recFn = $commonAst.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-PreExistingRecord' }, $true)
+. ([scriptblock]::Create($recFn.Extent.Text))
 function Write-ProtectedFile([string]$Path, [string]$Text) { Set-Content -LiteralPath $Path -Value $Text -Encoding ASCII }   # stand-in, the real one only writes under %ProgramFiles%
 $schemaRoot = Join-Path $temp 'schema'
 foreach ($case in @(@('fails.pkg', 'upgrade', 'failed', 1603, 'failed: exit code 1603', '1.0', '2.0'), @('fine.pkg', 'install', 'ok', 0, 'ok', '3.1', '3.1'), @('waits.pkg', 'upgrade', 'skipped', 0, 'waiting: on battery', '4.0', '4.1'))) {
@@ -172,7 +174,7 @@ foreach ($case in @(@('fails.pkg', 'upgrade', 'failed', 1603, 'failed: exit code
     Save-LastResult $case[1] $case[2] $case[3] $case[4] $case[5] $case[6]
 }
 $written = Get-Content (Join-Path $schemaRoot 'fails.pkg\last-result.json') -Raw | ConvertFrom-Json
-Test-Check 'Save-LastResult writes the documented fields' ((@($written.PSObject.Properties.Name) -join ',') -eq 'format,package,lastAttempt,action,status,exitCode,cause,installedVersion,targetVersion,failures,firstFailure,retry') (@($written.PSObject.Properties.Name) -join ',')
+Test-Check 'Save-LastResult writes the documented fields' ((@($written.PSObject.Properties.Name) -join ',') -eq 'format,package,lastAttempt,action,status,exitCode,cause,installedVersion,targetVersion,failures,firstFailure,retry,preExisting,userCopies,origin') (@($written.PSObject.Properties.Name) -join ',')
 $schemaOut = & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File $scriptFile -ChocoRoot $schemaRoot -WingetRoot (Join-Path $temp 'none')
 $schema = ($schemaOut | Out-String).Trim() | ConvertFrom-Json
 $f = @($schema.f)[0]

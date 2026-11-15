@@ -50,7 +50,7 @@ if ($P -like '*/mobileApps/*/assignments*') {
     return @{ value = @($List) }
 }
 if ($P -like '*/deviceHealthScripts/*/deviceRunStates*') {
-    $Out = '{"f":[{"p":"7zip.install","s":"c","t":"11:50","a":"upgrade","e":1,"c":"Download blocked by the Chocolatey rate limit","v":"23.1","g":"26.6.0"}],"o":[]}'
+    $Out = '{"f":[{"p":"7zip.install","s":"c","t":"11:50","a":"upgrade","e":1,"c":"Download blocked by the Chocolatey rate limit","v":"23.1","g":"26.6.0","pe":1,"uc":2}],"o":[]}'
     return @{ value = @(@{ detectionState = 'success'; lastStateUpdateDateTime = $Now.ToString('o'); preRemediationDetectionScriptOutput = $Out; managedDevice = @{ id = 'md-1'; deviceName = 'PC-0142'; userPrincipalName = 'j.weber@example.test' } }) }
 }
 if ($P -like '*/deviceHealthScripts/*/assign') { return @{} }

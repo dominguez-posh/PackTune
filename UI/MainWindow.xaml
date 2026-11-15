@@ -1120,6 +1120,10 @@
                                             <ComboBox x:Name="SchInterval" HorizontalAlignment="Stretch" AutomationProperties.Name="Look for new versions"/>
                                         </StackPanel>
                                         <StackPanel Margin="0,0,0,12">
+                                            <TextBlock Text="On uninstall" Style="{StaticResource SmallLabel}"/>
+                                            <ComboBox x:Name="SchUninstall" HorizontalAlignment="Stretch" AutomationProperties.Name="On uninstall" ToolTip="What an uninstall removes on a device where the software was already installed before PackTune (for example Chrome from an MSI). The per-user copies of users are never touched."/>
+                                        </StackPanel>
+                                        <StackPanel Margin="0,0,0,12">
                                             <TextBlock Text="Deadline, installed anyway after" Style="{StaticResource SmallLabel}"/>
                                             <StackPanel Orientation="Horizontal"><TextBox x:Name="SchGrace" Width="52" Padding="6,4" AutomationProperties.Name="Deadline"/><ComboBox x:Name="SchGraceUnit" Width="90" MinWidth="90" Margin="8,0,0,0" AutomationProperties.Name="Unit"/></StackPanel>
                                         </StackPanel>
