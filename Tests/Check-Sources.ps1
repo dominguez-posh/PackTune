@@ -215,7 +215,7 @@ $rtStore = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
 $all = @(Get-Store); foreach ($x in $all) { if ($x.id -eq $runtimeId) { $x.notes = 'PackTuneRuntimeApp'; $x.detection = 'b2xk' } }
 ConvertTo-Json -InputObject @($all) -Depth 8 | Set-Content $rtStore
 $st = Get-PackTuneRuntimeState
-Test-Check 'runtime revision: an app without a revision counts as older, state Outdated with the numbers and what changes' ($st.State -eq 'Outdated' -and $st.RuntimeRevision -eq 0 -and $st.ToolRevision -eq $script:RuntimeRevision -and $st.Change -like '*Tray*') $st.State
+Test-Check 'runtime revision: an app without a revision counts as older, state Outdated with the numbers and what changes' ($st.State -eq 'Outdated' -and $st.RuntimeRevision -eq 0 -and $st.ToolRevision -eq $script:RuntimeRevision -and $st.Change -like '*App Installer*') $st.State
 $before = @(Get-Store); $rtBefore = $before | Where-Object id -eq $runtimeId
 $depsBefore = @($before | Where-Object { @($_.dependencies).targetId -contains $runtimeId } | ForEach-Object id)
 $null = Update-PackTuneRuntime 6>&1

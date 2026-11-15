@@ -127,6 +127,30 @@ function Complete-LabStep($s, $r) {
     Update-Summary
 }
 
+$script:Progress = @{ Last = ''; Changed = Get-Date; StatusAt = [datetime]::MinValue; StatusLine = '' }
+$QuietLimitSeconds = if ($job.QuietSeconds) { [int]$job.QuietSeconds } else { 180 }
+function Update-StepProgress {
+    # While a step runs: the tail of its output in the panel, elapsed time on the chip, and a status line for PackTune (when the last line changes,
+    # at most every 10 s; a heartbeat every minute otherwise). No new output for a while is said openly: "still working".
+    $running = $script:Running
+    $s = $running.Step
+    $elapsed = ((Get-Date) - $running.Handle.Started).TotalSeconds
+    $tail = @(Get-LabLastLines $running.Handle 8)
+    $last = if ($tail.Count) { [string]$tail[-1] } else { '' }
+    if ($last -ne $script:Progress.Last) { $script:Progress.Last = $last; $script:Progress.Changed = Get-Date }
+    $quiet = ((Get-Date) - $script:Progress.Changed).TotalSeconds
+    $line = Get-LabProgressLine -Index $s.Index -Count $steps.Count -Title $s.Title -ElapsedSeconds $elapsed -LastLine $last -QuietSeconds $quiet -QuietLimitSeconds $QuietLimitSeconds
+    $rows[$s.Index].Chip.Text = $(if ($quiet -ge $QuietLimitSeconds) { 'still working' } else { 'running' }) + ' {0:00}:{1:00}' -f [math]::Floor($elapsed / 60), [int]($elapsed % 60)
+    $info.Text = $line
+    $output.Text = "Step $($s.Index): $($s.Title)`r`n$line`r`n`r`n" + (($tail | ForEach-Object { $_ }) -join "`r`n")
+    $output.SelectionStart = $output.Text.Length; $output.ScrollToCaret()
+    $age = ((Get-Date) - $script:Progress.StatusAt).TotalSeconds
+    if (($line -ne $script:Progress.StatusLine -and $age -ge 10) -or $age -ge 60) {
+        $script:Progress.StatusAt = Get-Date; $script:Progress.StatusLine = $line
+        Write-JobStatus 'Running' $line
+    }
+}
+
 function Start-LabStep([int]$Index) {
     if ($script:Running) {
         if ($script:Running.Step.Index -eq $Index) { Stop-LabStep }
@@ -134,6 +158,8 @@ function Start-LabStep([int]$Index) {
     }
     $s = $steps[$Index - 1]
     $s.State = 'Running'; $s.Output = ''; $s.Detail = ''
+    $script:Progress = @{ Last = ''; Changed = Get-Date; StatusAt = Get-Date; StatusLine = '' }
+    Write-JobStatus 'Running' (Get-LabProgressLine -Index $s.Index -Count $steps.Count -Title $s.Title -ElapsedSeconds 0)
     Set-StepView $s
     $info.Text = "Running step $($s.Index): $($s.Title) ..."
     try { $script:Running = @{ Step = $s; Handle = (Start-LabCommand -CommandLine $commands[$s.Kind] -WorkingDirectory $(switch ($s.Target) { 'previous' { $PreviousSource } 'runtime' { $RuntimeSource } default { $Source } }) -AsSystem) } }
@@ -178,6 +204,7 @@ $timer.Add_Tick({
     if ($script:Running) {
         $result = Get-LabCommandResult $script:Running.Handle
         if ($result) { $step = $script:Running.Step; $script:Running = $null; Complete-LabStep $step $result }
+        else { try { Update-StepProgress } catch { } }
     }
     if (-not $script:Running -and $script:Queue.Count -gt 0) {
         $next = $script:Queue[0]; $script:Queue.RemoveAt(0)
