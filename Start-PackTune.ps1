@@ -451,10 +451,14 @@ function Show-Error([string]$Message) {
 
 $script:ConfirmFrame = $null
 $script:ConfirmAnswer = $false
-function Confirm-Action([string]$Message, [string]$Title = 'PackTune', [string]$YesLabel = 'Continue', [string]$NoLabel = 'Cancel') {
+$script:ConfirmReason = ''
+function Confirm-Action([string]$Message, [string]$Title = 'PackTune', [string]$YesLabel = 'Continue', [string]$NoLabel = 'Cancel', [switch]$AskReason) {
     # The app's own confirmation (card above everything, Enter = yes, Esc = no). Returns the answer; the window keeps running meanwhile.
-    if ($env:PACKTUNE_SMOKE -and -not $script:ConfirmDialogTest) { if (-not $script:ConfirmAsked) { $script:ConfirmAsked = New-Object System.Collections.ArrayList }; [void]$script:ConfirmAsked.Add(@($Title, $Message)); return ($null -eq $script:ConfirmSmokeAnswer -or [bool]$script:ConfirmSmokeAnswer) }
+    if ($env:PACKTUNE_SMOKE -and -not $script:ConfirmDialogTest) { if (-not $script:ConfirmAsked) { $script:ConfirmAsked = New-Object System.Collections.ArrayList }; [void]$script:ConfirmAsked.Add(@($Title, $Message)); if ($AskReason) { $script:ConfirmReason = $(if ($script:ConfirmSmokeReason) { [string]$script:ConfirmSmokeReason } else { 'smoke test reason' }) }; return ($null -eq $script:ConfirmSmokeAnswer -or [bool]$script:ConfirmSmokeAnswer) }
     if ($script:ConfirmFrame) { return $false }
+    $ui.ConfirmInputLabel.Visibility = ConvertTo-Vis ([bool]$AskReason); $ui.ConfirmInput.Visibility = ConvertTo-Vis ([bool]$AskReason); $ui.ConfirmInput.Text = ''
+    $ui.BtnConfirmYes.IsEnabled = -not $AskReason
+    $script:ConfirmReason = ''
     $ui.ConfirmTitle.Text = $Title
     $ui.ConfirmText.Text = $Message
     $ui.BtnConfirmYes.Content = $YesLabel; $ui.BtnConfirmNo.Content = $NoLabel
@@ -462,8 +466,9 @@ function Confirm-Action([string]$Message, [string]$Title = 'PackTune', [string]$
     $script:ConfirmFrame = New-Object System.Windows.Threading.DispatcherFrame
     $ui.ConfirmLayer.Visibility = 'Visible'
     [void]$ui.BtnConfirmYes.Focus()
+    if ($AskReason) { [void]$ui.ConfirmInput.Focus() }
     try { [System.Windows.Threading.Dispatcher]::PushFrame($script:ConfirmFrame) }
-    finally { $ui.ConfirmLayer.Visibility = 'Collapsed'; $script:ConfirmFrame = $null }
+    finally { $ui.ConfirmLayer.Visibility = 'Collapsed'; $script:ConfirmFrame = $null; $script:ConfirmReason = $ui.ConfirmInput.Text.Trim(); $ui.ConfirmInput.Visibility = 'Collapsed'; $ui.ConfirmInputLabel.Visibility = 'Collapsed'; $ui.BtnConfirmYes.IsEnabled = $true }
     return $script:ConfirmAnswer
 }
 function Complete-Confirm([bool]$Answer) {
@@ -471,6 +476,7 @@ function Complete-Confirm([bool]$Answer) {
     $script:ConfirmAnswer = $Answer
     $script:ConfirmFrame.Continue = $false
 }
+$ui.ConfirmInput.Add_TextChanged({ if ($ui.ConfirmInput.Visibility -eq 'Visible') { $ui.BtnConfirmYes.IsEnabled = [bool]$ui.ConfirmInput.Text.Trim() } })
 $ui.BtnConfirmYes.Add_Click({ Complete-Confirm $true })
 $ui.BtnConfirmNo.Add_Click({ Complete-Confirm $false })
 $script:ClickActions = @{}
@@ -666,7 +672,7 @@ function Complete-UiTask($Task) {
         }
         Write-UiLog ("[{0}] {1}" -f $job.Display, $entry.Text) $entry.Level
     }
-    if ($job.Status -eq 'failed' -and $job.Kind -notin 'meta', 'icons', 'protocolsync', 'protocolhistory' -and -not ($job.Kind -in $script:GraphReadKinds -and @($errors | Where-Object { Test-GraphReadFailureText ([string]$_.Text) }).Count)) {
+    if ($job.Status -eq 'failed' -and $job.Kind -notin 'meta', 'icons', 'protocolsync', 'protocolhistory', 'testsync' -and -not ($job.Kind -in $script:GraphReadKinds -and @($errors | Where-Object { Test-GraphReadFailureText ([string]$_.Text) }).Count)) {
         Show-Toast ("{0}: {1}" -f $job.Display, (Get-FriendlyCause $(if ($errors.Count) { [string]$errors[-1].Text } else { 'failed' }))) 'bad' 'Details' { Show-Page 'Activity' }
     }
     if ($job.Kind -in $script:GraphReadKinds) {
@@ -1533,8 +1539,30 @@ function Update-CatalogRows {
     $script:MyRows = @(Get-PackTuneMyAppRows -Cache $script:Shared.Meta -NoFetch)
 }
 
+# ---- sandbox test state of catalog apps (per source + package + version + architecture; a newer version is Not tested)
+$script:TestTable = Read-PackTuneCatalogTests
+function Update-TestTable { $script:TestTable = Read-PackTuneCatalogTests }
+function Get-UiTestRecord([string]$Source, [string]$Id, [string]$Version) {
+    if (-not $Id -or -not $Version -or $Version -eq 'latest') { return $null }
+    $script:TestTable[(Get-PackTuneCatalogTestKey -Source $Source -Package $Id -Version $Version -Architecture $script:Settings.Architecture)]
+}
+function Get-UiTestState([string]$Source, [string]$Id, [string]$Version) {
+    $r = Get-UiTestRecord $Source $Id $Version
+    if (-not $r) { 'Not tested' } elseif ($r.verdict -eq 'Passed') { 'Passed' } else { 'Failed' }
+}
+function Get-RowVersion($Src, [string]$Source) { if ($Source -eq 'Winget') { [string]$Src.WingetVersion } else { [string]$Src.ChocoVersion } }
+function Get-RowTestState($Src) { $source = Get-AppSource $Src; Get-UiTestState $source (Get-AppId $Src $source) (Get-RowVersion $Src $source) }
+function Get-TestText([string]$Source, [string]$Id, [string]$Version) {
+    # One line for the details: the last result for exactly this version, with date and cause
+    $r = Get-UiTestRecord $Source $Id $Version
+    if (-not $r) { return "Sandbox test: Not tested$(if ($Version) { " (version $Version)" })." }
+    $when = try { ([datetime]$r.date).ToLocalTime().ToString('d MMM yyyy HH:mm') } catch { '' }
+    if ($r.verdict -eq 'Passed') { "Sandbox test: Passed on $when (version $Version)." } else { "Sandbox test: Failed on $when (version $Version)$(if ($r.cause) { ": $($r.cause)" })." }
+}
 function New-TagRow([string]$Text, [string]$Kind) {
     switch ($Kind) {
+        'pass'   { New-Row @{ Text = $Text; Bg = '#E6F4EA'; Line = '#9BD0A8'; Fg = '#0F5C1F' } }
+        'fail'   { New-Row @{ Text = $Text; Bg = '#FDE7E9'; Line = '#E3A1A8'; Fg = '#A11D1D' } }
         'rec'    { New-Row @{ Text = $Text; Bg = '#005FB8'; Line = '#005FB8'; Fg = '#FFFFFF' } }
         'recsrc' { New-Row @{ Text = $Text; Bg = '#E8F1FB'; Line = '#005FB8'; Fg = '#003E92' } }
         default  { New-Row @{ Text = $Text; Bg = '#FFFFFF'; Line = '#D1D1D1'; Fg = '#3B3B3B' } }
@@ -1560,6 +1588,8 @@ function Set-CardRow($Card, $Src) {
         [void]$tags.Add((New-TagRow ("$label $version").Trim() $(if ($rec) { 'recsrc' } else { 'plain' })))
         if ($rec) { [void]$tags.Add((New-TagRow 'Recommended' 'rec')) }
     }
+    $testState = Get-RowTestState $Src
+    [void]$tags.Add((New-TagRow "Sandbox: $testState" $(switch ($testState) { 'Passed' { 'pass' } 'Failed' { 'fail' } default { 'plain' } })))
     $inTenant = (@($Src.Sources | Where-Object { $id = Get-AppId $Src $_; $id -and $script:TenantPackages.ContainsKey((Get-MetaKey $id $_)) }).Count -gt 0)
     $note = @($Src.Sources | ForEach-Object { $id = Get-AppId $Src $_; $meta = Get-AppMeta $Src $_; if ($meta -and $meta.LicenseNote) { $meta.LicenseNote } else { Get-ChocoLicenseNote $id } } | Where-Object { $_ }) | Select-Object -First 1
     $badge, $kind = if ($inTenant) { 'In tenant', 'ok' } elseif ($note) { 'Check license', 'warn' } else { '', 'ok' }
@@ -1588,6 +1618,7 @@ function Get-AppListRows {
     Update-Chips $rows
     if ($script:Category -eq 'Popular') { $rows = @($rows | Where-Object { $_.Popular }) }
     elseif ($script:Category -eq 'My apps') { $rows = @($rows | Where-Object { $_.Mine }) }
+    elseif ($script:Category -eq 'Not tested') { $rows = @($rows | Where-Object { (Get-RowTestState $_) -eq 'Not tested' }) }
     elseif ($script:Category -ne 'All') { $rows = @($rows | Where-Object { $_.Category -eq $script:Category }) }
     if ($script:SortMode -eq 'Downloads') { $rows = @($rows | Sort-Object -Property @{ Expression = { Get-AppDownloads $_ }; Descending = $true }, @{ Expression = { $_.Name } }) }
     return @($rows)
@@ -1705,7 +1736,7 @@ $script:Chips = @{}
 function Update-Chips($Rows) {
     # Category chips with the number of apps each one has in the current view; built once, counted on every change
     $cats = @($script:Catalog | ForEach-Object { $_.Category } | Where-Object { $_ } | Sort-Object -Unique)
-    $cats = @('Popular', 'My apps') + $cats + @('Other')
+    $cats = @('Popular', 'My apps', 'Not tested') + $cats + @('Other')
     if ($script:Chips.Count -eq 0) {
         foreach ($cat in @('All') + $cats) {
             $chip = New-Object System.Windows.Controls.RadioButton
@@ -1717,7 +1748,7 @@ function Update-Chips($Rows) {
         }
     }
     foreach ($cat in $script:Chips.Keys) {
-        $count = if ($cat -eq 'All') { @($Rows).Count } elseif ($cat -eq 'Popular') { @($Rows | Where-Object { $_.Popular }).Count } elseif ($cat -eq 'My apps') { @($Rows | Where-Object { $_.Mine }).Count } else { @($Rows | Where-Object { $_.Category -eq $cat }).Count }
+        $count = if ($cat -eq 'All') { @($Rows).Count } elseif ($cat -eq 'Popular') { @($Rows | Where-Object { $_.Popular }).Count } elseif ($cat -eq 'My apps') { @($Rows | Where-Object { $_.Mine }).Count } elseif ($cat -eq 'Not tested') { @($Rows | Where-Object { (Get-RowTestState $_) -eq 'Not tested' }).Count } else { @($Rows | Where-Object { $_.Category -eq $cat }).Count }
         $script:Chips[$cat].Content = "$cat  $count"
     }
 }
@@ -2359,7 +2390,7 @@ function Start-CustomTest([string]$PreviousMsi, [string]$PreviousStoreAppId) {
     $authArgs = if ($PreviousStoreAppId) { @{ NeedsAuth = $true } } else { @{} }   # the package store needs the sign-in
     $script:CustomTestKey = Get-CustomTestKey   # what this test is for (read again when it is done)
     [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name$(if ($PreviousMsi -or $PreviousStoreAppId) { " (update from the previous version)" })" -Pool $script:TestPool -Arguments @{ Msi = $script:CustomInfo.Path; Props = $props; Previous = $PreviousMsi; StoreApp = $PreviousStoreAppId; Icon = $script:CustomIconFile } @authArgs `
-        -Work 'param($Msi, $Props, $Previous, $StoreApp, $Icon) $p = @{ MsiPath = $Msi; Properties = $Props }; if ($Previous) { $p.PreviousMsiPath = $Previous }; if ($StoreApp) { $p.PreviousStoreAppId = $StoreApp }; if ($Icon) { $p.IconFile = $Icon }; Test-PackTuneCustomApp @p -AutoRun' -OnDone {
+        -Work 'param($Msi, $Props, $Previous, $StoreApp, $Icon) $p = @{ MsiPath = $Msi; Properties = $Props }; if ($Previous) { $p.PreviousMsiPath = $Previous }; if ($StoreApp) { $p.PreviousStoreAppId = $StoreApp }; if ($Icon) { $p.IconFile = $Icon }; $r = Test-PackTuneCustomApp @p -AutoRun; $r; if (-not $r -or $r.Verdict -ne ''Passed'') { Write-Error (''Sandbox test failed: '' + $(if ($r -and $r.Message) { $r.Message } else { ''no verdict'' })) }' -OnDone {
         param($Result, $Job)
         $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
         if ($outcome -and $outcome.Verdict -eq 'Passed') { $script:CustomTest = @{ Key = $script:CustomTestKey; UpdatePath = [bool]$outcome.UpdatePath } }
@@ -2368,9 +2399,8 @@ function Start-CustomTest([string]$PreviousMsi, [string]$PreviousStoreAppId) {
             $ui.TxtCustomDlgStatus.Text = if ($outcome -and $outcome.Verdict -eq 'Passed') { "Sandbox test passed$(if ($outcome.UpdatePath) { ' (including the update from the previous version)' }): Deploy is available." } elseif ($outcome) { "Sandbox test failed: $($outcome.Message)" } else { 'The sandbox test could not run: Deploy stays off.' }
             Update-CustomDeployGate
         } catch { }
-        if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Display)] the sandbox test could not run, see above." 'Error'; Show-Toast "Sandbox test of $($Job.Display) could not run: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" 'bad' 'Details' { Show-Page 'Activity' } }
-        elseif ($outcome.Verdict -eq 'Passed') { Write-UiLog "[$($Job.Display)] sandbox test passed." 'Success'; Show-Toast "$($Job.Display) passed." 'ok' }
-        else { Write-UiLog "[$($Job.Display)] sandbox test failed: $($outcome.Message)" 'Warning'; Show-Toast "Sandbox test failed: $($outcome.Message)" 'warn' }
+        # (a failed test is a failed job: logged and shown red by the window; only a passed one is done)
+        if ($Job.Status -eq 'succeeded' -and $outcome -and $outcome.Verdict -eq 'Passed') { Write-UiLog "[$($Job.Display)] sandbox test passed." 'Success'; Show-Toast "$($Job.Display) passed." 'ok' }
         Update-SandboxButtons
     })
     Show-SandboxStarted
@@ -2494,6 +2524,15 @@ function Start-StoreCheck {
         Update-Readiness
         Update-CustomRows
         if ($script:OpenDialog -eq 'DlgStore') { Update-StoreDialog }
+        if ($script:StoreState.State -eq 'Ready') { Start-TestSync }
+    })
+}
+function Start-TestSync {
+    # The sandbox test results other administrators (and earlier runs) kept in the package store
+    if (-not (Test-SignedIn) -or (Test-TaskRunning 'testsync') -or -not (Test-StoreReady)) { return }
+    [void](Start-UiTask -Kind 'testsync' -Title 'Reading the sandbox test results of the package store' -Display 'Sandbox tests' -Hidden -NeedsAuth -Pool $script:UserPool -Work 'Sync-PackTuneCatalogTests' -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'succeeded' -and [int](@($Result | Where-Object { $_ -is [int] }) | Select-Object -Last 1) -gt 0) { Update-TestTable; Update-AppList; Update-TenantRows }
     })
 }
 function Get-StoreReadinessItems {
@@ -2772,6 +2811,9 @@ function Show-AppDetails($Src, [switch]$Keep) {
         }
     }
     $ui.TxtDetailSources.Text = @($lines) -join "`n"
+    $testState = Get-UiTestState $source (Get-AppId $Src $source) (Get-RowVersion $Src $source)
+    $ui.TxtDetailTest.Text = Get-TestText $source (Get-AppId $Src $source) (Get-RowVersion $Src $source)
+    $ui.TxtDetailTest.Foreground = ConvertTo-Brush $(switch ($testState) { 'Passed' { '#0F5C1F' } 'Failed' { '#A11D1D' } default { '#5C5C5C' } })
     $summary = if ($meta -and $meta.Summary) { $meta.Summary } elseif ($meta -and $meta.Description) { $meta.Description } elseif ($meta -and $meta.Found) { '' } else { 'Package infos are still loading, or the source has none.' }
     $ui.TxtDetailSummary.Text = ([string]$summary -replace '\s+', ' ').Trim()
     $note = (Get-CardNote $Src)
@@ -3056,6 +3098,30 @@ Add-Click $ui.BtnDeploySchedule {
 Add-Click $ui.BtnDeployCancel { Close-Dialog }
 Add-Click $ui.BtnDeployGo { Start-Deploy }
 
+function Add-TestOverrideProtocol($Bad, [string]$Reason) {
+    # The override goes into the session protocol like any other action: what, why, who
+    try {
+        Update-ProtocolIdentity
+        $names = (@($Bad | ForEach-Object { "$($_.Title) $($_.Version)" }) -join ', ')
+        [void](Add-PackTuneProtocolAction -Protocol $script:Protocol -Category 'deploy' -Subject "deployed without passed sandbox test: $names" -Result 'ok' -Note "reason: $Reason; admin: $(Get-PackTuneAdminName)")
+        [void](Save-PackTuneProtocol -Protocol $script:Protocol -Language (Get-ProtocolLanguage))
+        Start-ProtocolSync
+    }
+    catch { Write-UiLog "The protocol entry of the override could not be saved: $($_.Exception.Message)" 'Warning' }
+}
+function Confirm-TestGate($Items) {
+    # Items: @{ Title; Source; Id; Version }. '' = every app has a passed sandbox test (no question), $null = cancelled, otherwise the reason typed for deploying anyway
+    $bad = @($Items | ForEach-Object { $_ | Add-Member -NotePropertyName State -NotePropertyValue (Get-UiTestState $_.Source $_.Id $_.Version) -Force -PassThru } | Where-Object { $_.State -ne 'Passed' })
+    if (-not $bad.Count) { return '' }
+    $lines = ($bad | ForEach-Object { $r = Get-UiTestRecord $_.Source $_.Id $_.Version; "- $($_.Title) $($_.Version): $($_.State)$(if ($r -and $r.cause) { " ($($r.cause))" })" }) -join "`n"
+    $text = "These apps have no passed sandbox test:`n`n$lines`n`nAn app that was not tested, or whose test failed, may break devices. Run Test in sandbox first, or deploy anyway: your reason is logged, kept in the protocol and written to the notes of the Intune app."
+    if (-not (Confirm-Action $text 'Not tested in the sandbox' 'Deploy without a passed test' 'Cancel' -AskReason)) { return $null }
+    $reason = [string]$script:ConfirmReason
+    if (-not $reason.Trim()) { return $null }
+    Write-UiLog "Deploying WITHOUT a passed sandbox test: $(($bad | ForEach-Object { "$($_.Title) $($_.Version) ($($_.State))" }) -join ', '). Reason: $reason. Admin: $(Get-PackTuneAdminName)." 'Warning'
+    Add-TestOverrideProtocol $bad $reason
+    return $reason
+}
 function Start-Deploy {
     $assignment = $script:AssignValues[[Math]::Max(0, $ui.CmbDeployAssign.SelectedIndex)]
     $policy = Read-PolicyControls 'Deploy'
@@ -3076,11 +3142,16 @@ function Start-Deploy {
     }
     if ($assignment -eq 'Required' -and -not (Confirm-Action "Required installs the $($todo.Count) app(s) automatically on every device of all users. Continue?" 'Required assignment' 'Continue' 'Cancel')) { return }
     if (@($todo | Where-Object { $_.Source -eq 'Winget' }).Count -and -not $script:ModuleState.Winget) { throw 'winget packages need the Microsoft.WinGet.Client module: install it under Settings > Components.' }
+    # The deploy gate: an app without a passed sandbox test goes out only after a confirmation with a typed reason
+    $gate = @($todo | ForEach-Object { [pscustomobject]@{ Title = $_.Title; Source = $_.Source; Id = $_.Id; Version = (Get-RowVersion $_.Src $_.Source); Key = $_.Key } })
+    $skipReason = Confirm-TestGate $gate
+    if ($null -eq $skipReason) { return }
     $schedule = if ($script:DeploySchedule) { (New-ChocoSchedule -Values $script:DeploySchedule -Base (Get-ChocoScheduleDefaults)) } else { $null }
     Update-UiToken
     $work = @'
-param($Id, $Source, $Assignment, $Architecture, $IconBase64, $UpdateMode, $GraceHours, $Version, $Schedule)
+param($Id, $Source, $Assignment, $Architecture, $IconBase64, $UpdateMode, $GraceHours, $Version, $Schedule, $SkipTestReason)
 $Params = @{ Assignment = $Assignment; Architecture = $Architecture; NoIconPrompt = $true; UpdateMode = $UpdateMode; GraceHours = $GraceHours; Version = $Version }
+if ($SkipTestReason) { $Params.SkipTestReason = $SkipTestReason }
 if ($IconBase64) { $Params.IconBase64 = $IconBase64 }
 if ($Schedule) { $Params.Schedule = $Schedule }
 if ($Source -eq 'Winget') { New-PackTuneWingetApp -WingetId $Id @Params }
@@ -3108,7 +3179,7 @@ else { New-PackTuneChocolateyApp -ChocoName $Id @Params }
             }
             if (-not @($script:Tasks | Where-Object { $_.Job.Kind -eq 'deploy' }).Count) { Start-TenantRefresh }
             Update-AppList
-        } -Arguments @{ Id = $item.Id; Source = $item.Source; Assignment = $assignment; Architecture = $script:Settings.Architecture; IconBase64 = $icon; UpdateMode = $policy.UpdateMode; GraceHours = $policy.GraceHours; Version = $version; Schedule = $schedule })
+        } -Arguments @{ Id = $item.Id; Source = $item.Source; Assignment = $assignment; Architecture = $script:Settings.Architecture; IconBase64 = $icon; UpdateMode = $policy.UpdateMode; GraceHours = $policy.GraceHours; Version = $version; Schedule = $schedule; SkipTestReason = $(if ($skipReason -and @($gate | Where-Object { $_.Key -eq $item.Key -and (Get-UiTestState $_.Source $_.Id $_.Version) -ne 'Passed' }).Count) { $skipReason } else { '' }) })
     }
     Write-UiLog "$($todo.Count) deployment(s) queued, assignment $assignment, updates: $(Format-UpdateText $policy.UpdateMode $policy.GraceHours)." 'Info'
     Clear-Selection
@@ -3564,6 +3635,11 @@ function Get-IntentText($App) {
     if ($i -contains 'required') { 'Required' } elseif ($i -contains 'available') { 'Available' } elseif ($i -contains 'uninstall') { 'Uninstall' } else { 'None' }
 }
 
+function Get-TenantAppTestVersion($App) {
+    # The version that is deployed: the pinned one, else the newest the source offers (what devices follow)
+    if ($App.Version) { return [string]$App.Version }
+    try { return [string]$script:Shared.Meta[(Get-MetaKey $App.Package $App.Source)].Version } catch { return '' }
+}
 function Update-TenantRows {
     param([switch]$Force)
     if ($null -eq $script:TenantApps) {
@@ -3602,7 +3678,7 @@ function Update-TenantRows {
         $count = $script:DeviceCounts[$app.Id]
         $isDep = $app.IsChocolatey -or $app.IsDependency
         $title = if ($app.IsOld) { "$($app.DisplayName) (old)" } elseif ($app.IsChocolatey) { 'Chocolatey' } else { $app.DisplayName }
-        $sub = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($app.IsDependency) { 'Dependency of all apps: Chocolatey and winget for SYSTEM' } else { if ($app.IsCustom) { "$(Get-SourceLabel $app.Source $app) $([char]0x00B7) your own application" } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source)" } }
+        $sub = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($app.IsDependency) { 'Dependency of all apps: Chocolatey and winget for SYSTEM' } else { if ($app.IsCustom) { "$(Get-SourceLabel $app.Source $app) $([char]0x00B7) your own application" } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source) $([char]0x00B7) Sandbox: $(Get-UiTestState $app.Source $app.Package (Get-TenantAppTestVersion $app))" } }
         if ($app.JustCreated) { $sub = "$sub $([char]0x00B7) just created, confirming in Intune ..." }
         $ok = if ($count -and -not $count.Error) { "$($count.Installed) installed" } elseif ($count -and $count.Error) { Get-ShortCountError $count.Error } elseif ($isDep) { '' } else { '...' }
         $bad = if ($count -and -not $count.Error) { @($(if ($count.Failed) { "$($count.Failed) failed" }), $(if ($count.Pending) { "$($count.Pending) pending" })) | Where-Object { $_ } | Select-Object -First 2 } else { '' }
@@ -3898,6 +3974,13 @@ function Update-TenantButtons {
     $ui.TxtTenantAppSub.Text = if ($app.IsOld) { 'Old dependency app, replaced by PackTune Runtime' } elseif ($isDep) { 'Dependency of every app, updated daily' } elseif ($app.IsCustom) { "$(Get-SourceLabel $app.Source $app) $([char]0x00B7) $(Get-IntentText $app)" } else { "$($app.Package) $([char]0x00B7) $(Get-SourceLabel $app.Source) $([char]0x00B7) $(Get-IntentText $app)" }
     Update-TenantSummary $app
     Update-TenantAssign $app
+    $noTest = $isDep -or [bool]$app.IsCustom
+    $ui.TxtTenantTest.Visibility = ConvertTo-Vis (-not $noTest)
+    if (-not $noTest) {
+        $tv = Get-TenantAppTestVersion $app
+        $ui.TxtTenantTest.Text = Get-TestText $app.Source $app.Package $tv
+        $ui.TxtTenantTest.Foreground = ConvertTo-Brush $(switch (Get-UiTestState $app.Source $app.Package $tv) { 'Passed' { '#0F5C1F' } 'Failed' { '#A11D1D' } default { '#5C5C5C' } })
+    }
     $ui.BoxTenantCustom.Visibility = ConvertTo-Vis ([bool]$app.IsCustom)
     $busy = Test-TaskRunning 'policy'
     $reading = (Test-TaskRunning 'tenant')
@@ -3951,12 +4034,19 @@ function Start-AppApply {
     # Rebuilds the package with the new settings and changes the app in Intune (in place or through supersedence); devices follow on their own
     param([Parameter(Mandatory)]$App, [Parameter(Mandatory)][string]$Version, [Parameter(Mandatory)][hashtable]$Policy, $Schedule)
     if (-not (Test-SignedIn)) { throw 'Sign in to Intune first (Sign in, top right).' }
+    # The deploy gate for a released version (a changed update policy alone needs no test)
+    $skipReason = ''
+    if ($Version -and $Version -ne 'latest' -and $Version -ne [string]$App.Version -and -not $App.IsCustom) {
+        $skipReason = Confirm-TestGate @([pscustomobject]@{ Title = $App.DisplayName; Source = $App.Source; Id = $App.Package; Version = $Version })
+        if ($null -eq $skipReason) { return }
+    }
     Update-UiToken
-    $arguments = @{ AppId = $App.Id; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours; Schedule = $Schedule }
+    $arguments = @{ AppId = $App.Id; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours; Schedule = $Schedule; SkipTestReason = $skipReason }
     $work = @'
-param($AppId, $Version, $UpdateMode, $GraceHours, $Schedule)
-if ($Schedule) { Update-PackTuneApp -AppId $AppId -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours -Schedule $Schedule }
-else { Publish-PackTuneRelease -AppId $AppId -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours }
+param($AppId, $Version, $UpdateMode, $GraceHours, $Schedule, $SkipTestReason)
+$Skip = @{}; if ($SkipTestReason) { $Skip.SkipTestReason = $SkipTestReason }
+if ($Schedule) { Update-PackTuneApp -AppId $AppId -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours -Schedule $Schedule @Skip }
+else { Publish-PackTuneRelease -AppId $AppId -Version $Version -UpdateMode $UpdateMode -GraceHours $GraceHours @Skip }
 '@
     $script:ApplyContext[[string]$App.DisplayName] = @{ App = $App; Version = $(if ($Version -eq 'latest') { '' } else { $Version }); Policy = $Policy }
     [void](Start-UiTask -Kind 'policy' -Title "Update settings of $($App.DisplayName): $(Format-UpdateText $Policy.UpdateMode $Policy.GraceHours), version $Version" -Display $App.DisplayName -Package $App.Package -NeedsAuth -Arguments $arguments -Work $work -OnDone {
@@ -4589,14 +4679,26 @@ function Start-PackageTest {
     if ($Source -eq 'Winget' -and -not $script:ModuleState.Winget) { throw 'winget packages need the Microsoft.WinGet.Client module: install it under Settings > Components.' }
     $name = if ($Title) { $Title } else { $Package }
     $arguments = @{ Package = $Package; Source = $Source; Version = $Version; UpdateMode = $Policy.UpdateMode; GraceHours = $Policy.GraceHours; FromVersion = $FromVersion }
-    $work = 'param($Package, $Source, $Version, $UpdateMode, $GraceHours, $FromVersion) $p = @{ ChocoName = $Package; Source = $Source; Version = $Version; UpdateMode = $UpdateMode; GraceHours = $GraceHours }; if ($FromVersion) { $p.FromVersion = $FromVersion }; Test-PackTunePackage @p -AutoRun'
+    # Only a passed verdict is a finished job: any other verdict ends as Failed (the cause is the first failed step) and is kept as the result of this version
+    $work = 'param($Package, $Source, $Version, $UpdateMode, $GraceHours, $FromVersion) $p = @{ ChocoName = $Package; Source = $Source; Version = $Version; UpdateMode = $UpdateMode; GraceHours = $GraceHours }; if ($FromVersion) { $p.FromVersion = $FromVersion }; $r = Test-PackTunePackage @p -AutoRun; $r; if (-not $r -or $r.Verdict -ne ''Passed'') { Write-Error (''Sandbox test failed: '' + $(if ($r -and $r.Message) { $r.Message } else { ''no verdict'' })) }'
     [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name$(if ($FromVersion) { " (update from $FromVersion)" })" -Package $Package -Pool $script:TestPool -Arguments $arguments -Work $work -OnDone {
         param($Result, $Job)
         $outcome = @($Result | Where-Object { $_.Verdict }) | Select-Object -First 1
-        if ($Job.Status -eq 'failed' -or -not $outcome) { Write-UiLog "[$($Job.Package)] the sandbox test could not run, see above." 'Error'; Show-Toast "Sandbox test of $($Job.Display) could not run: $(Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]))" 'bad' 'Details' { Show-Page 'Activity' } }
-        elseif ($outcome.Verdict -eq 'Passed') { Write-UiLog "[$($Job.Package)] sandbox test passed." 'Success'; Show-Toast "$($Job.Display) passed." 'ok' }
-        else { Write-UiLog "[$($Job.Package)] sandbox test failed: $($outcome.Message)" 'Warning'; Show-Toast "Sandbox test failed: $($outcome.Message)" 'warn' }
+        # Not finished at all (no verdict, timeout, sandbox error): kept as failed for this version too, so the app list and the deploy gate show it
+        if (-not $outcome -and $Job.Status -eq 'failed') {
+            try {
+                $a = $Job.Spec.Arguments
+                $tv = if ($a.Version -and $a.Version -ne 'latest') { [string]$a.Version } else { try { [string]$script:Shared.Meta[(Get-MetaKey $a.Package $a.Source)].Version } catch { '' } }
+                if ($tv) { $cause = Get-FriendlyCause (@($Job.Log | Where-Object { $_.Level -eq 'Error' } | Select-Object -Last 1 | ForEach-Object { $_.Text })[0]); [void](Save-PackTuneCatalogTest -Source $a.Source -Package $a.Package -Version $tv -Verdict Failed -Cause "the test did not finish: $cause") }
+            } catch { }
+        }
+        # (a failed job is already logged and shown as a red toast and a Failed row by the window)
+        if ($Job.Status -eq 'succeeded' -and $outcome -and $outcome.Verdict -eq 'Passed') { Write-UiLog "[$($Job.Package)] sandbox test passed." 'Success'; Show-Toast "$($Job.Display) passed." 'ok' }
+        Update-TestTable
+        Update-AppList
         Update-SelectionBar
+        if ($script:DetailRow) { Show-AppDetails $script:DetailRow -Keep }
+        Update-TenantRows
         Update-TenantButtons
     })
     Show-SandboxStarted

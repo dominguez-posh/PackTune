@@ -488,7 +488,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke '7-Zip icon converted from SVG' ($zip.hasIcon -and $zip.iconValid)
         Test-Smoke 'Scratch has the custom icon' ($scratch.hasIcon -and $scratch.iconValid)
         Test-Smoke 'apps assigned as available' (@($apps | Where-Object { $_.displayName -in '7-Zip', 'Scratch' -and $_.assignment -eq 'available' }).Count -eq 2)
-        Test-Smoke 'notes carry the package id and the update settings' ($zip.notes -match '^PoweredByPackTune;from=Chocolatey;package=7zip\.install;version=latest;update=Startup;grace=48;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$') $zip.notes
+        Test-Smoke 'notes carry the package id and the update settings' ($zip.notes -match '^PoweredByPackTune;from=Chocolatey;package=7zip\.install;version=latest;update=Startup;grace=48;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+(;testOverride=[a-z]+;\d{8};[A-Za-z0-9@._-]+)?$') $zip.notes
         $log = Get-SmokeLog
         Test-Smoke 'log shows both successes' (($log -match '\[7zip\.install\] created in Intune') -and ($log -match '\[scratch\] created in Intune'))
         Test-Smoke 'finished jobs are marked Done' (@($script:JobRows | Where-Object { $_['Status'] -eq 'Done' }).Count -ge 2) (@($script:JobRows | ForEach-Object { $_['Status'] }) -join ',')
@@ -509,7 +509,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
         Test-Smoke 'tenant lists the runtime app first, then the two apps' ($rows.Count -eq 3 -and $rows[0].Data.IsDependency) (($rows | ForEach-Object { $_['Title'] }) -join ', ')
         Test-Smoke 'subtitle counts apps and dependency apps' ($ui.TxtTenantCount.Text -like '2 apps and 1 dependency app*contoso*') $ui.TxtTenantCount.Text
         $zip = $rows | Where-Object { $_['Title'] -eq '7-Zip' }
-        Test-Smoke 'row shows package, source, version and assignment' ($zip['Sub'] -like '7zip.install*Chocolatey' -and $zip['Assigned'] -eq 'Available' -and $zip['Version'] -eq 'Always newest') ($zip['Sub'] + '|' + $zip['Assigned'] + '|' + $zip['Version'])
+        Test-Smoke 'row shows package, source, version and assignment' ($zip['Sub'] -like '7zip.install*Chocolatey*Sandbox: *' -and $zip['Assigned'] -eq 'Available' -and $zip['Version'] -eq 'Always newest') ($zip['Sub'] + '|' + $zip['Assigned'] + '|' + $zip['Version'])
         Test-Smoke 'On devices column from Intune''s install summary: 12 installed, 1 failed - 3 pending' ($zip['Ok'] -eq '12 installed' -and $zip['Bad'] -eq "1 failed $([char]0x00B7) 3 pending") ($zip['Ok'] + '|' + $zip['Bad'])
         Test-Smoke 'nav badge shows the devices with problems' ($ui.BadgeTenant.Visibility -eq 'Visible' -and $ui.TxtBadgeTenant.Text -like '*problem*') $ui.TxtBadgeTenant.Text
         $ui.LstTenant.SelectedItem = $zip
@@ -1159,7 +1159,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             1 {
                 if (-not (Test-Idle)) { return $false }
                 $app = Get-StoreApp $s.Package
-                Test-Smoke 'deployment carries update settings and schedule' ($app.notes -match 'update=Custom;grace=72;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+$' -and $app.notes -notmatch 'version=latest' -and $app.displayVersion -ne 'latest') $app.notes
+                Test-Smoke 'deployment carries update settings and schedule' ($app.notes -match 'update=Custom;grace=72;source=[^;]*;delay=\d+-\d+;cfg=[A-Za-z0-9_-]+(;testOverride=[a-z]+;\d{8};[A-Za-z0-9@._-]+)?$' -and $app.notes -notmatch 'version=latest' -and $app.displayVersion -ne 'latest') $app.notes
                 $cfg = ConvertFrom-PackTuneAppNotes $app.notes
                 Test-Smoke 'schedule reached the notes' ($cfg.Schedule.WindowFrom -eq '12:00' -and $cfg.Schedule.OnlyOnMains -and -not $cfg.Schedule.TriggerStart -and $cfg.Schedule.WindowDays -eq '12345') ($cfg.Schedule | ConvertTo-Json -Compress)
                 $install = Get-Content (Join-Path $script:WorkRoot "package\$($s.Package)\source\install.ps1") -Raw
@@ -1541,6 +1541,92 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $true
             }
 
+        } } }
+    @{ Name = 'sandbox verdict, test state in the list and the deploy gate'; Phase = 0; Do = {
+        param($s)
+        $verdictFile = Join-Path $env:LOCALAPPDATA 'fake-sandbox-verdict.txt'
+        $row = @($script:SourceRows | Where-Object { $_.ChocoId -eq 'putty.install' })[0]
+        $storeFile = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
+        switch ("$($s.Phase)") {
+            '0' {
+                if (-not (Test-Idle)) { return $false }
+                if (-not $row.ChocoVersion) { $row.ChocoVersion = '0.85.0' }
+                # PuTTY was deployed by an earlier step: take it out of the fake tenant so that it can be deployed again
+                ConvertTo-Json -InputObject @(Get-Content $storeFile -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -notlike '*package=putty.install;*' }) -Depth 6 | Set-Content $storeFile
+                $script:TenantPackages.Remove((Get-MetaKey 'putty.install' 'Chocolatey'))
+                # the sandbox steps before passed putty.install: start from nothing
+                Remove-Item (Get-PackTuneCatalogTestFile) -Force -ErrorAction SilentlyContinue; Update-TestTable
+                Test-Smoke 'a version nobody tested is Not tested, in the list and in the details' ((Get-RowTestState $row) -eq 'Not tested' -and (Get-TestText 'Chocolatey' 'putty.install' '0.85.0') -like '*Not tested*') (Get-RowTestState $row)
+                Set-Content $verdictFile 'Failed'
+                $script:Toasts.Clear()
+                Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Title 'PuTTY' -Version 'latest' -Policy @{ UpdateMode = 'Startup'; GraceHours = 48 }
+                $s.Phase = 1; return $false
+            }
+            '1' {
+                if (-not (Test-Idle 'test')) { return $false }
+                $jobRow = @($script:JobRows | Where-Object { $_['Title'] -eq 'Sandbox: PuTTY' } | Select-Object -First 1)[0]
+                Test-Smoke 'a failed verdict ends the sandbox test job as Failed in Activity, never Done' ($jobRow -and $jobRow['Status'] -eq 'Failed') ($jobRow['Status'])
+                Test-Smoke 'the log says failed with the first failed step, a red toast tells it' ((Get-SmokeLog) -match 'Sandbox test failed: Failed at step 2 of 5' -and (Get-SmokeLog) -notmatch 'PuTTY\] sandbox test passed' -and @($script:Toasts | Where-Object { $_.Kind -eq 'bad' -and $_.Text -like '*Failed at step 2 of 5*' }).Count -ge 1) (@($script:Toasts | ForEach-Object { "$($_.Kind): $($_.Text)" }) -join ' | ')
+                Test-Smoke 'the result is kept for exactly this version (Failed, with the cause)' ((Get-UiTestState 'Chocolatey' 'putty.install' '0.85.0') -eq 'Failed' -and (Get-UiTestRecord 'Chocolatey' 'putty.install' '0.85.0').cause -like '*step 2 of 5*') ((Get-UiTestRecord 'Chocolatey' 'putty.install' '0.85.0') | ConvertTo-Json -Compress)
+                Test-Smoke 'a newer version is Not tested again' ((Get-UiTestState 'Chocolatey' 'putty.install' '0.86.0') -eq 'Not tested')
+                $card = New-Object PackTune.Row; [void](Set-CardRow $card $row)
+                $tag = @($card.Items | Where-Object { $_['Text'] -like 'Sandbox:*' })[0]
+                Test-Smoke 'the app list shows a red badge Sandbox: Failed on the card' ($tag -and $tag['Text'] -eq 'Sandbox: Failed' -and $tag['Fg'] -eq '#A11D1D') ($tag['Text'])
+                Show-AppDetails $row
+                Test-Smoke 'the details show the last result with date and cause and keep the Test button' ($ui.TxtDetailTest.Text -like 'Sandbox test: Failed on*Failed at step 2 of 5*' -and $ui.BtnDetailTest.Visibility -eq 'Visible') $ui.TxtDetailTest.Text
+                $script:Category = 'Not tested'; $notTested = @(Get-AppListRows); $script:Category = 'All'
+                Test-Smoke 'the filter chip Not tested lists apps without a result, not the failed one' ($script:Chips.ContainsKey('Not tested') -and $notTested.Count -gt 0 -and @($notTested | Where-Object { $_.ChocoId -eq 'putty.install' }).Count -eq 0) $notTested.Count
+                # the deploy gate: blocked, the button stays clickable and asks
+                Clear-Selection; Set-AppSelected $row $true
+                Show-DeployDialog
+                foreach ($entry in $script:DeployCombos) { $entry.Combo.SelectedIndex = [array]::IndexOf($entry.Sources, 'Chocolatey') }
+                $script:ConfirmAsked = New-Object System.Collections.ArrayList
+                $script:ConfirmSmokeAnswer = $false
+                $before = @($script:Tasks | Where-Object { $_.Job.Kind -eq 'deploy' }).Count
+                Start-Deploy
+                $ask = @($script:ConfirmAsked | Where-Object { $_[0] -eq 'Not tested in the sandbox' })
+                Test-Smoke 'deploying an app whose test failed asks first, names the app and its state, and cancelling deploys nothing' ($ask.Count -eq 1 -and $ask[0][1] -like '*PuTTY*Failed*' -and @($script:Tasks | Where-Object { $_.Job.Kind -eq 'deploy' }).Count -eq $before) ($ask | ForEach-Object { $_[1] })
+                $script:ConfirmSmokeAnswer = $true; $script:ConfirmSmokeReason = 'pilot devices only'
+                $script:ConfirmAsked = New-Object System.Collections.ArrayList
+                Start-Deploy
+                $s.Phase = 2; return $false
+            }
+            '2' {
+                if (-not (Test-Idle)) { return $false }
+                $put = @(Get-Content $storeFile -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like '*package=putty.install;*' })
+                Test-Smoke 'override with a reason: the app is deployed and its Intune notes carry testOverride=<state>;<date>;<admin>' ($put.Count -eq 1 -and $put[0].notes -match ';testOverride=failed;\d{8};[A-Za-z0-9@._-]+$') (($put | ForEach-Object notes) -join ' | ')
+                Test-Smoke 'override: Activity and the day log say it, with app, reason and admin' ((Get-SmokeLog) -match 'Deploying WITHOUT a passed sandbox test: PuTTY 0\.85\.0 \(Failed\)\. Reason: pilot devices only\. Admin: ') ''
+                $entry = @($script:Protocol.Actions | Where-Object { $_.Subject -like 'deployed without passed sandbox test: PuTTY*' -and $_.Note -like '*pilot devices only*' })
+                Test-Smoke 'override: the protocol journal has the entry with reason and admin' ($entry.Count -eq 1 -and $entry[0].Note -like 'reason: pilot devices only; admin: *') (($entry | ConvertTo-Json -Compress))
+                # the passed path: no question at all
+                ConvertTo-Json -InputObject @(Get-Content $storeFile -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -notlike '*package=putty.install;*' }) -Depth 6 | Set-Content $storeFile
+                $script:TenantPackages.Remove((Get-MetaKey 'putty.install' 'Chocolatey'))
+                Set-Content $verdictFile 'Passed'
+                Start-PackageTest -Package 'putty.install' -Source 'Chocolatey' -Title 'PuTTY' -Version 'latest' -Policy @{ UpdateMode = 'Startup'; GraceHours = 48 }
+                $s.Phase = 3; return $false
+            }
+            '3' {
+                if (-not (Test-Idle 'test')) { return $false }
+                Test-Smoke 'a passed verdict is the only one that ends as Done, and it is Passed for this version' ((Get-UiTestState 'Chocolatey' 'putty.install' '0.85.0') -eq 'Passed' -and (Get-SmokeLog) -match 'sandbox test passed') (Get-UiTestState 'Chocolatey' 'putty.install' '0.85.0')
+                $card = New-Object PackTune.Row; [void](Set-CardRow $card $row)
+                $tag = @($card.Items | Where-Object { $_['Text'] -like 'Sandbox:*' })[0]
+                Test-Smoke 'the badge turns to Sandbox: Passed (green)' ($tag['Text'] -eq 'Sandbox: Passed' -and $tag['Fg'] -eq '#0F5C1F') ($tag['Text'])
+                Clear-Selection; Set-AppSelected $row $true
+                Show-DeployDialog
+                foreach ($entry in $script:DeployCombos) { $entry.Combo.SelectedIndex = [array]::IndexOf($entry.Sources, 'Chocolatey') }
+                $script:ConfirmAsked = New-Object System.Collections.ArrayList
+                Start-Deploy
+                $s.Phase = 4; return $false
+            }
+            '4' {
+                if (-not (Test-Idle)) { return $false }
+                $put = @(Get-Content $storeFile -Raw | ConvertFrom-Json | ForEach-Object { $_ } | Where-Object { $_.notes -like '*package=putty.install;*' })
+                Test-Smoke 'passed test: no question, deployed, no override in the notes' (@($script:ConfirmAsked | Where-Object { $_[0] -eq 'Not tested in the sandbox' }).Count -eq 0 -and $put.Count -eq 1 -and $put[0].notes -notmatch 'testOverride') (($put | ForEach-Object notes) -join ' | ')
+                $jobTenant = @($script:TenantRowList | Where-Object { $_['Title'] -eq 'PuTTY' })
+                Remove-Item $verdictFile -Force -ErrorAction SilentlyContinue
+                $script:ConfirmSmokeReason = $null
+                $true
+            }
         } } }
     @{ Name = 'settings'; Do = {
         Show-Page 'Settings'

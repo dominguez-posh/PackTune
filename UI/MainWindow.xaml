@@ -456,7 +456,7 @@
                                             <Button x:Name="BtnCustomIconRemove" Style="{StaticResource SmallButton}" Content="Remove" Visibility="Collapsed"/>
                                         </StackPanel>
                                         <Button x:Name="BtnDetailRemoveMine" Margin="0,18,0,0" Content="Remove from my apps" Tag="&#xE74D;" Visibility="Collapsed" ToolTip="Takes the app off this list only; nothing in Intune changes"/>
-                                        <StackPanel Orientation="Horizontal" Margin="0,18,0,0"><Button x:Name="BtnDetailTest" Content="Test in sandbox" Tag="&#xE768;"/><Button x:Name="BtnDetailTestMenu" Style="{StaticResource IconButton}" Margin="4,0,0,0" Content="&#xE70D;" ToolTip="More test options (update from the previous version)" AutomationProperties.Name="More test options"/></StackPanel>
+                                        <TextBlock x:Name="TxtDetailTest" Margin="0,18,0,0" TextWrapping="Wrap" FontSize="13" AutomationProperties.Name="Sandbox test result"/><StackPanel Orientation="Horizontal" Margin="0,6,0,0"><Button x:Name="BtnDetailTest" Content="Test in sandbox" Tag="&#xE768;"/><Button x:Name="BtnDetailTestMenu" Style="{StaticResource IconButton}" Margin="4,0,0,0" Content="&#xE70D;" ToolTip="More test options (update from the previous version)" AutomationProperties.Name="More test options"/></StackPanel>
                                         <TextBlock Style="{StaticResource Hint}" Margin="0,6,0,0" Text="Runs this app in a fresh Windows Sandbox. No sign-in needed, nothing is changed in Intune."/>
                                     </StackPanel>
                                 </ScrollViewer>
@@ -711,7 +711,7 @@
                                                 <Button x:Name="BtnTenantApply" Style="{StaticResource PrimaryButton}" Padding="14,9" Content="Apply in Intune"/>
                                                 <Grid Margin="0,8,0,0">
                                                     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                                                    <StackPanel Orientation="Horizontal"><Button x:Name="BtnTenantTest" Content="Test in sandbox" Padding="8,8"/><Button x:Name="BtnTenantTestMenu" Style="{StaticResource IconButton}" Margin="4,0,0,0" Content="&#xE70D;" ToolTip="More test options (update from the previous version)" AutomationProperties.Name="More test options"/></StackPanel>
+                                                    <StackPanel><TextBlock x:Name="TxtTenantTest" Margin="0,0,0,6" TextWrapping="Wrap" FontSize="13" AutomationProperties.Name="Sandbox test result of the deployed version"/><StackPanel Orientation="Horizontal"><Button x:Name="BtnTenantTest" Content="Test in sandbox" Padding="8,8"/><Button x:Name="BtnTenantTestMenu" Style="{StaticResource IconButton}" Margin="4,0,0,0" Content="&#xE70D;" ToolTip="More test options (update from the previous version)" AutomationProperties.Name="More test options"/></StackPanel></StackPanel>
                                                     <Button x:Name="BtnTenantOpen" Grid.Column="2" Content="Open in Intune" Padding="8,8"/>
                                                 </Grid>
                                                 <Button x:Name="BtnTenantRemove" Style="{StaticResource DangerGhost}" Content="Remove from Intune..." Margin="0,8,0,0"/>
@@ -1450,7 +1450,7 @@
                 <Grid>
                     <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
                     <TextBlock x:Name="ConfirmTitle" Margin="28,24,28,8" FontSize="20" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="360"><TextBlock x:Name="ConfirmText" Margin="28,0,28,20" TextWrapping="Wrap" Foreground="{StaticResource Text2}"/></ScrollViewer>
+                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}" MaxHeight="360"><StackPanel Margin="28,0,28,20"><TextBlock x:Name="ConfirmText" TextWrapping="Wrap" Foreground="{StaticResource Text2}"/><TextBlock x:Name="ConfirmInputLabel" Visibility="Collapsed" Text="Reason (required, goes into the log, the protocol and the app notes)" Style="{StaticResource FieldLabel}" Margin="0,14,0,4"/><TextBox x:Name="ConfirmInput" Visibility="Collapsed" MaxLength="120" AutomationProperties.Name="Reason for deploying without a passed test"/></StackPanel></ScrollViewer>
                     <Border Grid.Row="2" Style="{StaticResource DialogFooter}">
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
                             <Button x:Name="BtnConfirmNo" Content="No" Padding="18,8" Margin="0,0,10,0"/>
