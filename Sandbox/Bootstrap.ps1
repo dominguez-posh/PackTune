@@ -116,7 +116,8 @@ try {
             Copy-JobInput
             Save-Logs
             Set-JobStatus Running 'Ready'
-            Start-Process powershell.exe -ArgumentList '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', 'C:\PackTuneSandbox\Tools\Lab.ps1'
+            # The host stays running between tests (the next test reuses this sandbox) and starts the lab panel for each test
+            Start-Process powershell.exe -ArgumentList '-NoProfile', '-STA', '-ExecutionPolicy', 'Bypass', '-File', 'C:\PackTuneSandbox\Tools\LabHost.ps1'
         }
     }
 }

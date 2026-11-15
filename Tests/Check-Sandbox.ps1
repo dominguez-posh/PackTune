@@ -233,6 +233,7 @@ Set-PackTuneSandboxLauncher -Launcher {
     @{ State = 'Succeeded'; Step = 'Done'; Message = 'ok'; Result = @{ Verdict = 'Passed'; Notes = 'n' } } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $job 'status.json')
 }
 & $mod { $script:FakeProcs = @(111) }   # a sandbox process that was there before (not PackTune's)
+Set-PackTuneSandboxOption -Name KeepLabOpen -Value $false   # the default keeps the lab sandbox open for the next test (checked below)
 $labClose = Start-PackTuneWin32Lab -DisplayName 'Close App' -Scripts @{ 'Install.ps1' = 'exit 0'; 'Uninstall.ps1' = 'exit 0'; 'Detect.ps1' = 'x' } -AutoRun
 $stopped = & $mod { @($script:StopCalls) }; $left = & $mod { @($script:FakeProcs) }
 Test-Check 'close: after the verdict the sandbox PackTune started is closed, the result stays visible first' ($labClose.Verdict -eq 'Passed' -and (@($stopped) -join ',') -eq '222,223' -and (@($script:Logs | Where-Object { $_ -like '*sandbox closes in*' }).Count -eq 1) -and (@($script:Logs | Where-Object { $_ -like 'Windows Sandbox closed*' }).Count -eq 1))
@@ -244,6 +245,7 @@ $labKeep = Start-PackTuneWin32Lab -DisplayName 'Keep App' -Scripts @{ 'Install.p
 $stopped = & $mod { @($script:StopCalls) }
 Test-Check 'keep open: with the option nothing is closed and the log says the user has to close it' ($labKeep.Verdict -eq 'Passed' -and @($stopped).Count -eq 0 -and (@($script:Logs | Where-Object { $_ -like '*stays open as you asked*' }).Count -eq 1) -and (@(& $mod { $script:FakeProcs }) -join ',') -eq '222,223')
 Set-PackTuneSandboxOption -Name KeepOpen -Value $false
+Set-PackTuneSandboxOption -Name KeepLabOpen -Value $true
 & $mod { $script:FakeProcs = @() }
 $env:PACKTUNE_SANDBOX_KEEPOPEN = '1'
 $labEnv = Start-PackTuneWin32Lab -DisplayName 'Keep App 2' -Scripts @{ 'Install.ps1' = 'exit 0'; 'Uninstall.ps1' = 'exit 0'; 'Detect.ps1' = 'x' } -AutoRun
@@ -386,6 +388,67 @@ Test-Check 'lab panel: the running step updates the panel from its output and re
 $rtText = Get-Content (Join-Path $repo 'PackTune-Runtime.ps1') -Raw
 Test-Check 'runtime install: every sub-step prints a timed line (Chocolatey, App Installer download with size, dependencies, signature check, provisioning, registering, tasks)' ($rtText -match 'function Write-Step' -and $rtText -match 'Save-Download' -and ([regex]::Matches($rtText, 'Write-Step "')).Count -ge 15 -and $rtText -match 'checking the Microsoft signature' -and $rtText -match 'registering it for the system context' -and $rtText -match 'N1\} MB')
 Test-Check 'runtime install: no progress bar (ProgressPreference), and the random waits between attempts are short only in the lab (lab.flag)' ($rtText -match '\$ProgressPreference = "SilentlyContinue"' -and $rtText -match 'lab\.flag' -and $rtText -match 'if \(\$InLab\) \{ 5 \} else \{ Get-Random')
+# --- the reusable test sandbox: heartbeat, own session only, reuse, New sandbox, foreign sandbox
+Remove-Item (Join-Path $env:LOCALAPPDATA 'PackTune\Sandbox\lab-session.json') -Force -ErrorAction SilentlyContinue
+$script:Launches = 0; $script:Requests = 0
+Set-PackTuneSandboxLauncher -Launcher {
+    param($Path)
+    $dir = Split-Path $Path -Parent
+    if ($Path -like '*.wsb') {
+        $script:Launches++
+        $j = Get-Content (Join-Path $dir 'job.json') -Raw | ConvertFrom-Json
+        @{ Token = $j.SessionToken; Started = (Get-Date).ToString('o'); Updated = (Get-Date).ToString('o'); State = 'Idle'; Tests = 1 } | ConvertTo-Json | Set-Content (Join-Path $dir 'heartbeat.json')
+    }
+    else { $script:Requests++; $script:LastRequestDir = $dir }
+    @{ State = 'Succeeded'; Step = 'Done'; Message = 'ok'; Result = @{ Verdict = 'Passed'; Notes = 'n' } } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $dir 'status.json')
+}
+$scr = @{ 'Install.ps1' = 'exit 0'; 'Uninstall.ps1' = 'exit 0'; 'Detect.ps1' = 'x' }
+Test-Check 'reuse: without a lab sandbox there is no session' ($null -eq (Get-PackTuneLabSession))
+$t1 = Start-PackTuneWin32Lab -DisplayName 'First App' -Scripts $scr -AutoRun
+$s1 = Get-PackTuneLabSession
+$j1 = Get-Content (Join-Path $t1.JobPath 'job.json') -Raw | ConvertFrom-Json
+Test-Check 'reuse: the first test starts the sandbox, which is then alive (its heartbeat carries the token PackTune gave it) and stays open by default' ($script:Launches -eq 1 -and $s1 -and $s1.Tests -eq 1 -and $j1.Reusable -eq $true -and $j1.Reused -eq $false -and $j1.TestNumber -eq 1 -and $s1.Dir -eq $t1.JobPath)
+$t2 = Start-PackTuneWin32Lab -DisplayName 'Second App' -Scripts $scr -AutoRun
+$j2 = Get-Content (Join-Path $t2.JobPath 'job.json') -Raw | ConvertFrom-Json
+Test-Check 'reuse: the next test (another app) runs in the open sandbox: no new launch, its own folder in the session with a request, the job says reused, test 2' ($script:Launches -eq 1 -and $script:Requests -eq 1 -and $t2.JobPath -eq (Join-Path $s1.Dir 'tests\2') -and (Test-Path (Join-Path $t2.JobPath 'request.json')) -and $j2.Reused -eq $true -and $j2.TestNumber -eq 2 -and $j2.SessionStarted -eq $j1.SessionStarted -and $t2.Verdict -eq 'Passed')
+Test-Check 'reuse: the session counts the tests' ((Get-PackTuneLabSession).Tests -eq 2)
+$req = Get-Content (Join-Path $t2.JobPath 'request.json') -Raw | ConvertFrom-Json
+Test-Check 'reuse: the request names the test' ($req.Title -like 'Second App*')
+$hb = Join-Path $s1.Dir 'heartbeat.json'
+$beat = Get-Content $hb -Raw | ConvertFrom-Json; $beat.Updated = (Get-Date).AddMinutes(-5).ToString('o'); $beat | ConvertTo-Json | Set-Content $hb
+Test-Check 'heartbeat: one older than 30 seconds means the sandbox is gone (never attached to)' ($null -eq (Get-PackTuneLabSession))
+$t3 = Start-PackTuneWin32Lab -DisplayName 'Third App' -Scripts $scr -AutoRun
+Test-Check 'heartbeat: after a dead sandbox the next test starts a new one (test 1 of the new session)' ($script:Launches -eq 2 -and (Get-PackTuneLabSession).Tests -eq 1)
+$sf = Join-Path $env:LOCALAPPDATA 'PackTune\Sandbox\lab-session.json'
+$rec = Get-Content $sf -Raw | ConvertFrom-Json; $rec.OwnerPid = 4; $rec | ConvertTo-Json | Set-Content $sf
+Test-Check 'own sandbox only: a session of another process is not attached to' ($null -eq (Get-PackTuneLabSession))
+$rec.OwnerPid = [Diagnostics.Process]::GetCurrentProcess().Id; $rec | ConvertTo-Json | Set-Content $sf
+Test-Check 'own sandbox only: the same file with this process as owner is' ($null -ne (Get-PackTuneLabSession))
+$goodToken = $rec.Token
+$rec.Token = 'someone-elses-token'; $rec | ConvertTo-Json | Set-Content $sf
+Test-Check 'own sandbox only: a heartbeat with another token (a sandbox PackTune did not start) is not attached to' ($null -eq (Get-PackTuneLabSession))
+$rec.Token = $goodToken; $rec | ConvertTo-Json | Set-Content $sf
+$ls = Get-PackTuneLabSession
+Test-Check 'New sandbox: asks the lab sandbox of this PackTune to close and forgets it' ((Request-PackTuneNewLabSandbox) -and (Test-Path (Join-Path $ls.Dir 'newsandbox.request')) -and $null -eq (Get-PackTuneLabSession))
+$before = $script:Launches
+$t4 = Start-PackTuneWin32Lab -DisplayName 'Fourth App' -Scripts $scr -AutoRun
+Test-Check 'New sandbox: the next test starts a clean one' ($script:Launches -eq $before + 1)
+$env:PACKTUNE_SANDBOX_NEW = '1'
+$before = $script:Launches
+$t5 = Start-PackTuneWin32Lab -DisplayName 'Fifth App' -Scripts $scr -AutoRun
+Test-Check 'New sandbox: the menu choice "start the next test in a new sandbox" asks for a clean sandbox once' ($script:Launches -eq $before + 1 -and -not $env:PACKTUNE_SANDBOX_NEW)
+& $mod { $script:RealRunning = ${function:Test-PackTuneSandboxRunning}; function script:Test-PackTuneSandboxRunning { $true } }
+Remove-Item $sf -Force
+Test-Check 'foreign sandbox: one is open and PackTune has no live lab sandbox: it is foreign' (Test-PackTuneForeignSandbox)
+$before = $script:Launches
+$threw = ''; try { $null = Start-PackTuneWin32Lab -DisplayName 'Sixth App' -Scripts $scr -AutoRun } catch { $threw = $_.Exception.Message }
+Test-Check 'foreign sandbox: a test request says so clearly, never uses or closes it, and starts nothing' ($threw -like '*PackTune did not start*maybe yours*close it yourself*' -and $script:Launches -eq $before) $threw
+& $mod { Set-Item function:script:Test-PackTuneSandboxRunning $script:RealRunning }
+Set-PackTuneSandboxLauncher -Launcher $null
+Remove-Item $sf -Force -ErrorAction SilentlyContinue
+$labText = Get-Content (Join-Path $repo 'Sandbox\Lab.ps1') -Raw; $hostText = Get-Content (Join-Path $repo 'Sandbox\LabHost.ps1') -Raw; $bootText = Get-Content (Join-Path $repo 'Sandbox\Bootstrap.ps1') -Raw
+Test-Check 'lab inside: the host stays, writes the heartbeat with the token, takes requests, a New sandbox button and the request file shut the sandbox down' ($bootText -match 'LabHost.ps1' -and $hostText -match 'heartbeat.json' -and $hostText -match 'Token' -and $hostText -match 'request.json' -and $hostText -match 'newsandbox.request' -and $hostText -match 'shutdown.exe' -and $hostText -match 'New sandbox')
+Test-Check 'lab inside: the panel says "reused sandbox, started .., test n", cleans up a leftover installation once before the test, and a reusable sandbox is not shut down at the end' ($labText -match 'reused sandbox, started' -and $labText -match 'CleanedOnce' -and $labText -match 'already installed from an earlier test' -and $labText -match 'if \(\$job.Reusable\) \{ \$form.Close\(\); return \}' -and $labText -match 'btnNew')
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed) { "$script:Failed check(s) failed."; exit 1 }
 'All checks passed.'

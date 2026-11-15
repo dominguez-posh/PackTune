@@ -2754,6 +2754,8 @@ function Wait-PackTuneSandboxRelease {
     #>
     param([int]$Seconds = 60)
     if (-not (Get-Command Test-PackTuneSandboxRunning -ErrorAction SilentlyContinue) -or -not (Test-PackTuneSandboxRunning)) { return }
+    # The test lab's own sandbox (reused between tests) maps only its session folder: it does not hold the files of a package
+    if ((Get-Command Get-PackTuneLabSession -ErrorAction SilentlyContinue) -and (Get-PackTuneLabSession)) { return }
     Write-Host "Waiting for Windows Sandbox to close ..."
     $Waited = 0
     while ($Waited -lt $Seconds -and (Test-PackTuneSandboxRunning)) { Wait-PackTunePackaging 2; $Waited += 2 }

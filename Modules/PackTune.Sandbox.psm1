@@ -30,6 +30,10 @@ $script:Options = @{
     CloseDelaySeconds = 10
     ReleaseWaitSeconds = 60
     KeepOpen          = $false
+    # The test lab's sandbox stays open after a test and the next test (also for another app) reuses it; false closes it after every test
+    KeepLabOpen       = $true
+    # A lab sandbox counts as alive while its heartbeat file (written every few seconds from inside) is not older than this
+    HeartbeatSeconds  = 30
 }
 $script:SandboxOwned = $null                         # what PackTune launched: the sandbox processes that existed before, and when
 # The SDK signing tools: this NuGet package version and its SHA256 only (checked 2026-11-14: all 44 PE files of bin\*\x64
@@ -136,11 +140,61 @@ function Test-PackTuneSandboxRunning {
     [bool](Get-Process -Name 'WindowsSandboxRemoteSession', 'WindowsSandboxClient' -ErrorAction SilentlyContinue)
 }
 
+#region the reusable lab sandbox
+
+function Get-PackTuneLabSessionFile { Join-Path (Get-PackTuneSandboxWorkspace).Root 'lab-session.json' }
+
+function Save-PackTuneLabSession($Session) {
+    # What this PackTune process knows about the lab sandbox it started: folder, token, start, tests, the sandbox processes that existed before,
+    # and its own process (id and start time). Another PackTune process, or one started later, never attaches to it.
+    $Me = [Diagnostics.Process]::GetCurrentProcess()
+    $Record = [ordered]@{ Dir = $Session.Dir; Token = $Session.Token; Started = $Session.Started; Tests = [int]$Session.Tests; Before = @($Session.Before)
+        OwnerPid = $Me.Id; OwnerStart = $Me.StartTime.ToString('o') }
+    $Record | ConvertTo-Json | Set-Content -LiteralPath (Get-PackTuneLabSessionFile) -Encoding UTF8
+}
+
+function Get-PackTuneLabSession {
+    <#
+        The lab sandbox this PackTune process started and that is still alive: its heartbeat file (written from inside the sandbox every few seconds)
+        carries the token PackTune gave it and is not old, and a Windows Sandbox is running. $null otherwise. A sandbox PackTune did not start, one
+        of another PackTune process, or the user's own, is never returned.
+    #>
+    $File = Get-PackTuneLabSessionFile
+    if (-not (Test-Path -LiteralPath $File)) { return $null }
+    try { $Record = Get-Content -LiteralPath $File -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+    $Me = [Diagnostics.Process]::GetCurrentProcess()
+    if ([int]$Record.OwnerPid -ne $Me.Id -or [string]$Record.OwnerStart -ne $Me.StartTime.ToString('o')) { return $null }
+    $Beat = $null
+    try { $Beat = Get-Content -LiteralPath (Join-Path $Record.Dir 'heartbeat.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json } catch { }
+    if (-not $Beat -or [string]$Beat.Token -ne [string]$Record.Token) { return $null }
+    $Age = ((Get-Date) - [datetime]$Beat.Updated).TotalSeconds
+    if ($Age -gt $script:Options.HeartbeatSeconds) { return $null }
+    if (-not (Test-FakeLauncher) -and -not (Test-PackTuneSandboxRunning)) { return $null }
+    [pscustomobject]@{ Dir = [string]$Record.Dir; Token = [string]$Record.Token; Started = [string]$Record.Started; Tests = [int]$Record.Tests; Before = @($Record.Before); State = [string]$Beat.State }
+}
+
+function Test-PackTuneForeignSandbox {
+    # A Windows Sandbox is open that is not PackTune's live lab sandbox (the user's own, or one of an earlier PackTune): Windows runs only one at a time
+    [bool]((Test-PackTuneSandboxRunning) -and -not (Get-PackTuneLabSession))
+}
+
+function Request-PackTuneNewLabSandbox {
+    # "New sandbox": asks PackTune's own lab sandbox to shut down (the next test starts a clean one). Returns $true when there was one. Never touches another sandbox.
+    $Session = Get-PackTuneLabSession
+    if (-not $Session) { return $false }
+    New-Item -ItemType File -Path (Join-Path $Session.Dir 'newsandbox.request') -Force | Out-Null
+    Remove-Item -LiteralPath (Get-PackTuneLabSessionFile) -Force -ErrorAction SilentlyContinue
+    Write-SandboxLog 'The lab sandbox is asked to close; the next test starts in a new one.'
+    $true
+}
+
+#endregion
+
 function New-SandboxJob {
-    # A job folder with job.json (mapped into the sandbox); returns its path
-    param([Parameter(Mandatory = $true)][ValidateSet('Package', 'Lab')][string]$Mode, [string]$Name = 'sandbox', [hashtable]$Data = @{})
+    # A job folder with job.json (mapped into the sandbox); returns its path. -Path: a folder inside a running lab sandbox's session (a reused sandbox).
+    param([Parameter(Mandatory = $true)][ValidateSet('Package', 'Lab')][string]$Mode, [string]$Name = 'sandbox', [hashtable]$Data = @{}, [string]$Path)
     $Id = '{0:yyyyMMdd-HHmmss}-{1}-{2}' -f (Get-Date), $Mode.ToLower(), ($Name -replace '[^\w\.-]', '_')
-    $Path = Join-Path (Get-PackTuneSandboxWorkspace).Jobs $Id
+    if (-not $Path) { $Path = Join-Path (Get-PackTuneSandboxWorkspace).Jobs $Id }
     New-Item -ItemType Directory -Path (Join-Path $Path 'input'), (Join-Path $Path 'out') -Force | Out-Null
     $Job = [ordered]@{ Id = $Id; Mode = $Mode; Created = (Get-Date).ToString('o') }
     foreach ($Key in $Data.Keys) { $Job[$Key] = $Data[$Key] }
@@ -223,10 +277,13 @@ function Wait-PackTuneSandboxClosed {
 function Complete-SandboxJob {
     <#
         After the verdict: the result stays visible for CloseDelaySeconds, then the sandbox PackTune started is closed and its end is awaited,
-        so the mapped folders are free before anything is packaged. With KeepOpen it stays open (the user closes it).
+        so the mapped folders are free before anything is packaged. With KeepOpen it stays open (the user closes it). The test lab's sandbox
+        (-Lab) stays open by default (KeepLabOpen): the next test reuses it.
     #>
+    param([switch]$Lab)
     $Keep = $script:Options.KeepOpen -or $env:PACKTUNE_SANDBOX_KEEPOPEN -eq '1'
     if (-not $script:SandboxOwned) { return }
+    if ($Lab -and -not $Keep -and $script:Options.KeepLabOpen) { Write-SandboxLog 'The test sandbox stays open for the next test (it is reused; New sandbox starts a clean one).'; return }
     if ($Keep) { Write-SandboxLog 'The Windows Sandbox stays open as you asked: close it yourself before you deploy.'; return }
     Write-SandboxLog "Result received: the sandbox closes in $($script:Options.CloseDelaySeconds) seconds."
     if ($script:Options.CloseDelaySeconds -gt 0) { Start-Sleep -Seconds $script:Options.CloseDelaySeconds }
@@ -234,6 +291,7 @@ function Complete-SandboxJob {
     if ($Closed.Count -and -not (Wait-PackTuneSandboxClosed)) { Write-SandboxLog 'The Windows Sandbox is still closing; packaging waits for it.' 'Warning' }
     else { Write-SandboxLog 'Windows Sandbox closed.' }
     $script:SandboxOwned = $null
+    if ($Lab) { Remove-Item -LiteralPath (Get-PackTuneLabSessionFile) -Force -ErrorAction SilentlyContinue }
 }
 
 function Start-SandboxProcess {
@@ -818,7 +876,9 @@ function Start-PackTuneWin32Lab {
         # The dependency app (PackTune Runtime): its install.ps1 (and the other package files) in -RuntimeSourcePath, its detection as -RuntimeDetection.
         # The lab installs it first, as its own step, exactly like Intune does before the app; when it fails nothing else runs.
         [string]$RuntimeSourcePath, [string]$RuntimeDetection,
-        [switch]$AutoRun, [Nullable[bool]]$Networking, [int]$TimeoutMinutes
+        [switch]$AutoRun, [Nullable[bool]]$Networking, [int]$TimeoutMinutes,
+        # Starts this test in a new sandbox even when the lab sandbox of an earlier test is still open (also PACKTUNE_SANDBOX_NEW=1)
+        [switch]$NewSandbox
     )
     foreach ($Required in 'Install.ps1', 'Uninstall.ps1', 'Detect.ps1') { if (-not $Scripts.ContainsKey($Required)) { throw "The lab needs the script $Required." } }
     $HasPrevious = [bool]$PreviousScripts
@@ -827,8 +887,32 @@ function Start-PackTuneWin32Lab {
     if ($null -eq $Networking) { $Networking = [bool]$script:Options.Networking }
     $HasRuntime = [bool]$RuntimeSourcePath
     if ($HasRuntime -and -not ($RuntimeDetection -and (Test-Path -LiteralPath (Join-Path $RuntimeSourcePath 'install.ps1')))) { throw 'The runtime step needs install.ps1 in the runtime folder and its detection script.' }
+    # One sandbox at a time: the lab sandbox of an earlier test is reused; a sandbox PackTune did not start is never touched or used
+    $WantNew = $NewSandbox -or $env:PACKTUNE_SANDBOX_NEW -eq '1'
+    $env:PACKTUNE_SANDBOX_NEW = ''   # the menu item "Start the next test in a new sandbox" counts once
+    $Session = Get-PackTuneLabSession
+    if ($Session -and $WantNew) {
+        [void](Request-PackTuneNewLabSandbox)
+        $Until = (Get-Date).AddSeconds(60)
+        while (-not (Test-FakeLauncher) -and (Test-PackTuneSandboxRunning) -and (Get-Date) -lt $Until) { Start-Sleep -Seconds 2 }
+        $Session = $null
+    }
+    if (-not $Session -and (Test-PackTuneForeignSandbox)) {
+        throw 'A Windows Sandbox is open that PackTune did not start (maybe yours). Windows runs only one at a time and PackTune never uses or closes a sandbox it did not start: close it yourself, then try again.'
+    }
+    $Data = @{ AutoClose = $false; AutoRun = [bool]$AutoRun; DisplayName = $DisplayName; Version = $Version; HasPrevious = $HasPrevious; PreviousVersion = $PreviousVersion; HasRuntime = $HasRuntime; Reusable = $true }
     Write-SandboxLog 'Step 1 of 4: preparing the test (creating the sandbox files).'
-    $Job = New-SandboxJob -Mode Lab -Name $DisplayName -Data @{ AutoClose = $false; AutoRun = [bool]$AutoRun; DisplayName = $DisplayName; Version = $Version; HasPrevious = $HasPrevious; PreviousVersion = $PreviousVersion; HasRuntime = $HasRuntime }
+    if ($Session) {
+        $Number = [int]$Session.Tests + 1
+        $Data.Reused = $true; $Data.TestNumber = $Number; $Data.SessionStarted = $Session.Started
+        $Job = New-SandboxJob -Mode Lab -Name $DisplayName -Data $Data -Path (Join-Path $Session.Dir "tests\$Number")
+        Write-SandboxLog "Reusing the test sandbox (started $(([datetime]$Session.Started).ToString('HH:mm')), test $Number): no new sandbox to start."
+    }
+    else {
+        $Token = [guid]::NewGuid().ToString('N')
+        $Data.SessionToken = $Token; $Data.SessionStarted = (Get-Date).ToString('o'); $Data.TestNumber = 1; $Data.Reused = $false
+        $Job = New-SandboxJob -Mode Lab -Name $DisplayName -Data $Data
+    }
     $Source = Join-Path $Job 'input\source'
     New-Item -ItemType Directory -Path $Source -Force | Out-Null
     if ($SourcePath) { Copy-Item -Path (Join-Path $SourcePath '*') -Destination $Source -Recurse -Force }
@@ -847,13 +931,26 @@ function Start-PackTuneWin32Lab {
         foreach ($Name in $PreviousScripts.Keys) { Set-Content -Path (Join-Path $Previous $Name) -Value $PreviousScripts[$Name] -Encoding UTF8 }
     }
     Write-SandboxLog "Opening the test lab in Windows Sandbox for $DisplayName$(if ($Version) { " $Version" }): $(if ($HasRuntime) { 'dependency (PackTune Runtime), ' })detect, install$(if ($HasPrevious) { ' (previous version, then the update)' }), detect, uninstall, detect$(if (-not $AutoRun) { ', then report the result there' })."
-    $Wsb = New-SandboxConfig -JobPath $Job -Networking ([bool]$Networking) -NoToolchain
-    Write-SandboxLog 'Step 2 of 4: starting Windows Sandbox (the window opens in a moment).'
-    Start-SandboxProcess -WsbPath $Wsb
+    if ($Session) {
+        # The lab host inside the sandbox picks the test up (request.json last: everything else is in place), and counts it
+        @{ Title = "$DisplayName$(if ($Version) { " $Version" })"; Created = (Get-Date).ToString('o') } | ConvertTo-Json | Set-Content (Join-Path $Job 'request.json') -Encoding UTF8
+        $Record = Get-Content -LiteralPath (Get-PackTuneLabSessionFile) -Raw | ConvertFrom-Json
+        $Record.Tests = [int]$Record.Tests + 1
+        $Record | ConvertTo-Json | Set-Content -LiteralPath (Get-PackTuneLabSessionFile) -Encoding UTF8
+        $script:SandboxOwned = @{ Before = @($Session.Before); Started = [datetime]$Session.Started }
+        if ($script:Launcher) { & $script:Launcher (Join-Path $Job 'request.json') }
+        Write-SandboxLog 'Step 2 of 4: the open test sandbox takes the test.'
+    }
+    else {
+        $Wsb = New-SandboxConfig -JobPath $Job -Networking ([bool]$Networking) -NoToolchain
+        Write-SandboxLog 'Step 2 of 4: starting Windows Sandbox (the window opens in a moment).'
+        Start-SandboxProcess -WsbPath $Wsb
+        Save-PackTuneLabSession ([pscustomobject]@{ Dir = $Job; Token = $Token; Started = $Data.SessionStarted; Tests = 1; Before = @($script:SandboxOwned.Before) })
+    }
     Write-SandboxLog "Step 3 of 4: $(if ($AutoRun) { 'installing as SYSTEM, detecting and uninstalling in the sandbox' } else { 'waiting for your result in the sandbox window (Install, Detect, Uninstall run there as SYSTEM)' })"
     $Status = Wait-SandboxJob -JobPath $Job -TimeoutMinutes $TimeoutMinutes
     Write-SandboxLog 'Step 4 of 4: result received.'
-    Complete-SandboxJob
+    Complete-SandboxJob -Lab
     $Verdict = if ($Status.State -eq 'Succeeded') { 'Passed' } else { 'Failed' }
     Write-SandboxLog "Test lab result: $Verdict. $($Status.Message)" $(if ($Verdict -eq 'Passed') { 'Success' } else { 'Error' })
     [pscustomobject]@{ State = $Status.State; Verdict = $Verdict; Message = $Status.Message; Result = $Status.Result; JobPath = $Job }
@@ -861,7 +958,7 @@ function Start-PackTuneWin32Lab {
 
 #endregion
 
-Export-ModuleMember -Function Get-PackTuneLabRuntimeStep, Set-PackTuneSandboxLog, Set-PackTuneSandboxOption, Set-PackTuneSandboxLauncher, Get-PackTuneSandboxWorkspace, Test-PackTuneSandboxAvailable, Test-PackTuneSandboxRunning, Wait-PackTuneSandboxClosed,
+Export-ModuleMember -Function Get-PackTuneLabSession, Test-PackTuneForeignSandbox, Request-PackTuneNewLabSandbox, Get-PackTuneLabRuntimeStep, Set-PackTuneSandboxLog, Set-PackTuneSandboxOption, Set-PackTuneSandboxLauncher, Get-PackTuneSandboxWorkspace, Test-PackTuneSandboxAvailable, Test-PackTuneSandboxRunning, Wait-PackTuneSandboxClosed,
     ConvertTo-PackTuneMsixVersion, ConvertTo-PackTuneMsixPackageName, Get-PackTuneNextMsixVersion,
     Get-PackTuneToolchain, Get-PackTuneToolchainState, Update-PackTuneToolchain,
     Get-PackTuneMsixInfo, Get-PackTuneMsixIdentity, New-PackTuneSigningCertificate, Remove-PackTuneSigningCertificate, Invoke-PackTuneSigning,
