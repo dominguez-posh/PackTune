@@ -1724,6 +1724,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             }
             '1' {
                 if (-not (Test-Idle 'customlist')) { return $false }
+                Close-Dialog   # an earlier step may have left a dialog (Help) open over the page
                 $window.UpdateLayout()
                 $row = @($script:CustomRows | Where-Object { $_['Title'] -eq 'Keevault' })[0]
                 Test-Smoke 'custom list rows are In tenant rows: version, line with product code and test state, Available, install counts, own application' ($row['Version'] -eq '0.9.34' -and $row['Sub'] -like 'Custom MSI*{04AA7B8E-*Sandbox: *' -and $row['Assigned'] -eq 'Available' -and $row['Updates'] -eq 'Own application' -and $row['Ok'] -ne $null) (($row['Sub'], $row['Assigned'], $row['Ok']) -join ' | ')
@@ -1732,10 +1733,15 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 Test-Smoke 'the row is on screen as a list item' ($item -and $item.ActualHeight -gt 20) "$($item.ActualHeight)"
                 # hit test at the middle of the row: the list item must be what is under the pointer (no overlay, no bar on top)
                 $pt = $item.TranslatePoint((New-Object System.Windows.Point ($item.ActualWidth / 2), ($item.ActualHeight / 2)), $window)
-                $hit = [System.Windows.Media.VisualTreeHelper]::HitTest($window, $pt)
+                $params = New-Object System.Windows.Media.PointHitTestParameters $pt
+                $hitList = New-Object System.Collections.ArrayList
+                $filter = [System.Windows.Media.HitTestFilterCallback]{ param($o) if ($o -is [System.Windows.UIElement] -and (-not $o.IsVisible -or -not $o.IsHitTestVisible)) { [System.Windows.Media.HitTestFilterBehavior]::ContinueSkipSelfAndChildren } else { [System.Windows.Media.HitTestFilterBehavior]::Continue } }
+                $result = [System.Windows.Media.HitTestResultCallback]{ param($r) [void]$hitList.Add($r.VisualHit); [System.Windows.Media.HitTestResultBehavior]::Stop }
+                [System.Windows.Media.VisualTreeHelper]::HitTest($window, $filter, $result, $params)
+                $hit = [pscustomobject]@{ VisualHit = $hitList[0] }
                 $v = if ($hit) { $hit.VisualHit } else { $null }
                 while ($v -and $v -isnot [System.Windows.Controls.ListBoxItem]) { $v = [System.Windows.Media.VisualTreeHelper]::GetParent($v) }
-                Test-Smoke 'hit test: the pointer over the Keevault row reaches its list item' ($v -ne $null -and [object]::ReferenceEquals($v.DataContext, $row)) "hit $($hit.VisualHit) item $($v) ctx $($v.DataContext.Title) pt $($pt)"
+                Test-Smoke 'hit test: the pointer over the Keevault row reaches its list item' ($v -ne $null -and [object]::ReferenceEquals($v.DataContext, $row)) "hit $($hit.VisualHit.Name)/$($hit.VisualHit.Text) path $((& { $x = $hit.VisualHit; $o = @(); while ($x -and $o.Count -lt 14) { $o += $x.GetType().Name + $(if ($x.Name) { ':' + $x.Name }); $x = [System.Windows.Media.VisualTreeHelper]::GetParent($x) }; $o -join ' < ' })) pt $($pt)"
                 # a real left click on the item (the event the mouse raises)
                 $ui.LstCustom.SelectedItem = $null
                 $e = New-Object System.Windows.Input.MouseButtonEventArgs ([System.Windows.Input.Mouse]::PrimaryDevice, 0, [System.Windows.Input.MouseButton]::Left)
