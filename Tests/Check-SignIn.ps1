@@ -63,6 +63,20 @@ Test-Check 'download: the right package, but files other than the pinned ones ar
 $m = Get-Thrown { & $mod { param($c) Install-PackTuneWebView2Sdk -CacheFolder $c } $cache }
 $marker = Get-Content (Join-Path $cache 'webview2-sdk.json') -Raw | ConvertFrom-Json
 Test-Check 'download: pinned package and files -> installed, version recorded' (-not $m -and $marker.Version -eq $pin.Version -and $null -eq (& $mod { param($c) Test-PackTuneWebView2Sdk -CacheFolder $c } $cache)) $m
+# The native loader (loaded later by the runtime) is checked like the others: writable by others = not loaded
+$loaderFile = Join-Path $cache 'WebView2Loader.dll'
+$acl = Get-Acl $loaderFile; $everyone = New-Object Security.AccessControl.FileSystemAccessRule((New-Object Security.Principal.SecurityIdentifier 'S-1-1-0'), 'Modify', 'Allow')
+$acl.AddAccessRule($everyone); Set-Acl $loaderFile $acl
+$p = & $mod { param($c) Test-PackTuneWebView2Sdk -CacheFolder $c } $cache
+Test-Check 'permissions: WebView2Loader.dll writable by others is not loaded (all three files are checked)' ($p -like '*can be changed by others*WebView2Loader.dll*') $p
+$acl = Get-Acl $loaderFile; [void]$acl.RemoveAccessRuleAll($everyone); Set-Acl $loaderFile $acl
+# Literal paths: [ ] in a folder name are no wildcards
+$lit = Join-Path $work 'c[ab]'; $sib = Join-Path $work 'ca'
+New-Item -ItemType Directory -Path $sib -Force | Out-Null; [void][IO.Directory]::CreateDirectory($lit); [IO.File]::WriteAllText((Join-Path $lit 'f.txt'), 'x')
+& $mod { param($p) Remove-PackTuneTree -Path $p } $lit
+Test-Check 'literal paths: a folder named c[ab] is removed, the folder ca stays' (-not [IO.Directory]::Exists($lit) -and (Test-Path -LiteralPath $sib))
+$code = ($src -split "`n" | Where-Object { $_ -notmatch '^\s*#' -and $_ -match 'Remove-Item' }) -join "`n"
+Test-Check 'no Remove-Item without -LiteralPath in the sign-in module' (@($src -split "`n" | Where-Object { $_ -notmatch '^\s*#' -and $_ -match 'Remove-Item ' -and $_ -notmatch 'Remove-Item -LiteralPath' }).Count -eq 0) $code
 [IO.File]::AppendAllText((Join-Path $cache 'Microsoft.Web.WebView2.Wpf.dll'), 'x')
 $p = & $mod { param($c) Test-PackTuneWebView2Sdk -CacheFolder $c } $cache
 Test-Check 'every load: a changed file of the pinned version is not loaded' ($p -like '*Wpf.dll is missing or not signed by Microsoft*' -or $p -like '*Wpf.dll is not the pinned file*') $p
@@ -99,6 +113,20 @@ $fresh = Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGu
 & $mod { Clear-PackTuneSignInLeftovers }
 Test-Check 'leftovers of earlier runs are removed at start, a profile of a running sign-in stays' (-not (Test-Path $old) -and (Test-Path $fresh))
 Remove-Item $fresh -Recurse -Force
+# Links are removed themselves, never followed: a junction in the profile to a folder outside keeps that folder's files
+$outside = Join-Path $work 'outside'; New-Item -ItemType Directory -Path $outside -Force | Out-Null
+$keep = Join-Path $outside 'keep.txt'; 'keep' | Set-Content $keep
+$tmp3 = Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path (Join-Path $tmp3 'Default') -Force | Out-Null
+New-Item -ItemType Junction -Path (Join-Path $tmp3 'Default\link') -Value $outside | Out-Null
+$ok = & $mod { param($f) Remove-PackTuneTempProfile -Folder $f } $tmp3
+Test-Check 'junction in a temporary profile: the link goes, the folder it points to keeps its files' ($ok -and -not (Test-Path -LiteralPath $tmp3) -and (Test-Path -LiteralPath $keep)) "ok=$ok"
+# Only names PackTuneSignIn-<32 hex>
+$wrong = Join-Path ([IO.Path]::GetTempPath()) 'PackTuneSignIn-not-a-profile'; New-Item -ItemType Directory -Path $wrong -Force | Out-Null
+(Get-Item $wrong).LastWriteTime = (Get-Date).AddHours(-2)
+& $mod { Clear-PackTuneSignInLeftovers }
+$threw = $false; try { & $mod { param($f) Remove-PackTuneTempProfile -Folder $f } $wrong | Out-Null } catch { $threw = $_.Exception.Message -like 'Not a temporary sign-in profile*' }
+Test-Check 'only PackTuneSignIn-<32 hex> folders are deleted (leftover cleanup and the profile cleanup)' ((Test-Path -LiteralPath $wrong) -and $threw)
+Remove-Item -LiteralPath $wrong -Recurse -Force
 Test-Check 'the sign-in window deletes its temporary profile through Remove-PackTuneTempProfile (after the browser ended)' ($src -match 'Remove-PackTuneTempProfile -Folder \$userData -BrowserPid \$ctx\.BrowserPid' -and $src -match 'try \{ Clear-PackTuneSignInLeftovers \} catch')
 
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue

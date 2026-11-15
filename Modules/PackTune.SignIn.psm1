@@ -74,8 +74,11 @@ function Test-PackTuneWebView2Sdk {
         if (-not (Test-PackTuneMicrosoftSigned $f)) { return "$name is missing or not signed by Microsoft" }
         if ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne $script:WebView2DllSha256[$name]) { return "$name is not the pinned file of version $($script:WebView2SdkVersion)" }
     }
-    $risk = @(Get-PackTuneWriteRisk -Path (Join-Path $CacheFolder 'Microsoft.Web.WebView2.Core.dll') -Root $CacheFolder)
-    if ($risk.Count) { return "the folder can be changed by others: $($risk[0])" }
+    # Every file that is loaded (the native loader too, it is loaded later by the runtime) and the folder
+    foreach ($name in $script:WebView2DllSha256.Keys) {
+        $risk = @(Get-PackTuneWriteRisk -Path (Join-Path $CacheFolder $name) -Root $CacheFolder)
+        if ($risk.Count) { return "the folder can be changed by others: $($risk[0])" }
+    }
     $null
 }
 
@@ -95,7 +98,7 @@ function Install-PackTuneWebView2Sdk {
         $got = (Get-FileHash -LiteralPath $nupkg -Algorithm SHA256).Hash
         if ($got -ne $script:WebView2NupkgSha256) { throw "The downloaded WebView2 SDK $version is not the pinned package (SHA256 $got); nothing was installed." }
         Add-Type -AssemblyName System.IO.Compression.FileSystem
-        if (Test-Path $CacheFolder) { Remove-Item $CacheFolder -Recurse -Force }
+        Remove-PackTuneTree -Path $CacheFolder
         New-Item -ItemType Directory -Path $CacheFolder -Force | Out-Null
         $wanted = @{
             'lib/net462/Microsoft.Web.WebView2.Core.dll' = 'Microsoft.Web.WebView2.Core.dll'
@@ -108,7 +111,7 @@ function Install-PackTuneWebView2Sdk {
     }
     finally { Remove-Item -LiteralPath $nupkg -Force -ErrorAction SilentlyContinue }
     $problem = Test-PackTuneWebView2Sdk -CacheFolder $CacheFolder
-    if ($problem) { Remove-Item $CacheFolder -Recurse -Force -ErrorAction SilentlyContinue; throw "The WebView2 SDK $version was not installed: $problem." }
+    if ($problem) { try { Remove-PackTuneTree -Path $CacheFolder } catch { }; throw "The WebView2 SDK $version was not installed: $problem." }
     ([ordered]@{ Version = $version } | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $CacheFolder 'webview2-sdk.json') -Encoding UTF8
 }
 
@@ -125,7 +128,7 @@ function Get-PackTuneWebView2 {
         if ([string]$marker.Version -ne $script:WebView2SdkVersion) { Install-PackTuneWebView2Sdk -CacheFolder $CacheFolder }
         $problem = Test-PackTuneWebView2Sdk -CacheFolder $CacheFolder
         if ($problem) {
-            Remove-Item $CacheFolder -Recurse -Force -ErrorAction SilentlyContinue
+            try { Remove-PackTuneTree -Path $CacheFolder } catch { }
             throw "The WebView2 SDK in $CacheFolder failed its check ($problem) and was removed. Sign in again to download it fresh from NuGet."
         }
         Add-Type -Path (Join-Path $CacheFolder 'Microsoft.Web.WebView2.Core.dll')
@@ -301,16 +304,37 @@ function Get-PackTuneSessionFolder {
 }
 
 $script:SignInEnvironments = @{}
+$script:TempProfileName = '^PackTuneSignIn-[0-9a-f]{32}$'   # the only names the temporary-profile cleanup deletes
+
+function Remove-PackTuneTree {
+    <#
+    Deletes a folder tree WITHOUT following links: a symbolic link or junction (reparse point) is removed itself, never
+    what it points to (the recursive delete of older Windows PowerShell 5.1 builds can follow junctions). Literal paths
+    only (no wildcards). Throws when something is locked, so callers can retry.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if (-not $item) { return }
+    if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        if ($item.PSIsContainer) { [IO.Directory]::Delete($item.FullName, $false) } else { [IO.File]::Delete($item.FullName) }
+        return
+    }
+    if (-not $item.PSIsContainer) { $item.Attributes = 'Normal'; [IO.File]::Delete($item.FullName); return }
+    foreach ($child in @(Get-ChildItem -LiteralPath $item.FullName -Force -ErrorAction Stop)) { Remove-PackTuneTree -Path $child.FullName }
+    $item.Attributes = 'Directory'
+    [IO.Directory]::Delete($item.FullName, $false)
+}
 
 function Remove-PackTuneTempProfile {
     <# Deletes a temporary sign-in profile (cookies) once its WebView2 browser process has ended; retries while files are locked. #>
     param([Parameter(Mandatory)][string]$Folder, [int]$BrowserPid, [int]$WaitSeconds = 10, [int]$Tries = 20, [int]$DelayMs = 250)
+    if ((Split-Path $Folder -Leaf) -notmatch $script:TempProfileName) { throw "Not a temporary sign-in profile: $Folder" }
     if ($BrowserPid) {
         try { $p = Get-Process -Id $BrowserPid -ErrorAction Stop; [void]$p.WaitForExit($WaitSeconds * 1000) } catch { }
     }
     for ($i = 0; $i -lt $Tries; $i++) {
         if (-not (Test-Path -LiteralPath $Folder)) { return $true }
-        try { Remove-Item -LiteralPath $Folder -Recurse -Force -ErrorAction Stop; return $true } catch { Start-Sleep -Milliseconds $DelayMs }
+        try { Remove-PackTuneTree -Path $Folder; return $true } catch { Start-Sleep -Milliseconds $DelayMs }
     }
     Write-SignInLog "The temporary sign-in profile $Folder could not be deleted yet; it is removed at the next start." 'Warning'
     $false
@@ -320,8 +344,8 @@ function Clear-PackTuneSignInLeftovers {
     <# Temporary sign-in profiles of earlier runs (%TEMP%\PackTuneSignIn-*) that are older than a sign-in can take. #>
     param([int]$OlderThanMinutes = 30)
     $cut = (Get-Date).AddMinutes(-$OlderThanMinutes)
-    foreach ($d in @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'PackTuneSignIn-*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cut })) {
-        try { Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction Stop } catch { }
+    foreach ($d in @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'PackTuneSignIn-*' -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $script:TempProfileName -and $_.LastWriteTime -lt $cut })) {
+        try { Remove-PackTuneTree -Path $d.FullName } catch { }
     }
 }
 # Leftovers of earlier runs go at the start (best effort: a profile still in use stays)
@@ -383,7 +407,7 @@ function Clear-PackTuneSession {
     param([Parameter(Mandatory)][string]$UserDataFolder)
     Close-PackTuneSessionHold -Clear
     for ($i = 0; $i -lt 5; $i++) {
-        try { if (Test-Path $UserDataFolder) { Remove-Item $UserDataFolder -Recurse -Force -ErrorAction Stop }; return $true }
+        try { Remove-PackTuneTree -Path $UserDataFolder; return $true }
         catch { Start-Sleep -Milliseconds 300 }
     }
     $false   # still locked by the browser process; the cookies were deleted above
