@@ -106,7 +106,7 @@ function New-LabPlan {
     # The steps of a run, in the order Intune goes through them: detection before the install (a detected app is not installed
     # at all), install, detection, with a previous version the update path (previous version in, detected, update, detected),
     # uninstall, detection. Target tells which package folder the step uses: 'previous' or 'new'.
-    param([string]$Version = '', [string]$PreviousVersion = '', [bool]$HasPrevious = $false)
+    param([string]$Version = '', [string]$PreviousVersion = '', [bool]$HasPrevious = $false, [bool]$HasRuntime = $false)
     $steps = New-Object System.Collections.ArrayList
     $add = {
         param($Kind, $Target, $Title, $Expect, $ExpectDetected)
@@ -114,6 +114,9 @@ function New-LabPlan {
             State = 'NotRun'; ExitCode = $null; Detected = $null; Detail = ''; Output = ''; Seconds = $null; User = ''; Screenshot = ''; Finding = '' })
     }
     $first = if ($HasPrevious) { 'previous' } else { 'new' }
+    # Like on a device: the dependency app (PackTune Runtime: Chocolatey and winget for SYSTEM) goes in first, with its own detection. When it fails,
+    # nothing else runs: the app would only wait for a winget that is not there.
+    if ($HasRuntime) { & $add 'Runtime' 'runtime' 'Dependency: PackTune Runtime' 'success code, detected' $null }
     & $add 'Detect' $first 'Detect before the install' 'not detected' $false
     if ($HasPrevious) {
         & $add 'Install' 'previous' "Install the previous version$(if ($PreviousVersion) { " $PreviousVersion" })" 'success code' $null
@@ -145,14 +148,17 @@ function Set-LabStepResult {
         $Step.Detected = $detected
         $Step.State = if ($detected -eq $Step.ExpectDetected) { 'Passed' } else { 'Failed' }
         $Step.Detail = "Expected: $($Step.Expect). Actual: $(if ($detected) { 'detected' } else { 'not detected' }) (exit code $($Result.ExitCode))$took."
-        if ($Step.State -eq 'Failed' -and $Step.Index -eq 1 -and $detected) {
+        if ($Step.State -eq 'Failed' -and $Step.Title -eq 'Detect before the install' -and $detected) {
             $Step.Finding = 'Already detected before the install: Intune would skip the install.'
             $Step.Detail = "Expected: not detected. Actual: detected (exit code $($Result.ExitCode))$took. Already detected: Intune would skip the install."
         }
     }
     else {
         $Step.State = if (Test-LabSuccessCode $Result.ExitCode) { 'Passed' } else { 'Failed' }
-        $Step.Detail = "Expected: $($Step.Expect). Actual: exit code $($Result.ExitCode)$took$(if ($Result.User) { " as $($Result.User)" })" + $(switch ($Result.ExitCode) { 3010 { ' (soft reboot required)' } 1641 { ' (hard reboot initiated)' } default { '' } }) + '.'
+        # The dependency step: what its install printed last is the cause (the exit code alone says little)
+        $Tail = ''
+        if ($Step.Kind -eq 'Runtime' -and $Step.State -eq 'Failed' -and $Result.Output) { $Tail = ' Last output: ' + ((@(([string]$Result.Output -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -Last 2) -join ' | ') -replace '\s+', ' ') }
+        $Step.Detail = "Expected: $($Step.Expect). Actual: exit code $($Result.ExitCode)$took$(if ($Result.User) { " as $($Result.User)" })" + $(switch ($Result.ExitCode) { 3010 { ' (soft reboot required)' } 1641 { ' (hard reboot initiated)' } default { '' } }) + '.' + $Tail
     }
     $Step
 }

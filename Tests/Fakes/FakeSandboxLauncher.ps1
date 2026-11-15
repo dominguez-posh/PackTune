@@ -9,6 +9,7 @@ $dest = Join-Path $lab ('{0:D2}-{1}' -f $n, $info.Mode)
 New-Item -ItemType Directory -Path $dest -Force | Out-Null
 Copy-Item (Join-Path $job 'job.json') $dest
 if (Test-Path (Join-Path $job 'input\source')) { Copy-Item (Join-Path $job 'input\source') (Join-Path $dest 'source') -Recurse }
+if (Test-Path (Join-Path $job 'input\source-runtime')) { Copy-Item (Join-Path $job 'input\source-runtime') (Join-Path $dest 'source-runtime') -Recurse }
 Set-Content -Path (Join-Path $dest 'started.txt') -Value (Get-Date).ToString('o')
 # A check can make the next tests fail: %LOCALAPPDATA%\fake-sandbox-verdict.txt holds Failed
 $fail = (Test-Path (Join-Path $env:LOCALAPPDATA 'fake-sandbox-verdict.txt')) -and ((Get-Content (Join-Path $env:LOCALAPPDATA 'fake-sandbox-verdict.txt') -Raw).Trim() -eq 'Failed')

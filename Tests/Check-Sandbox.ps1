@@ -271,6 +271,23 @@ Test-Check 'lab with a previous version: the job says so, the previous scripts a
 $threw = $false; try { $null = Start-PackTuneWin32Lab -DisplayName 'x' -Scripts @{ 'Install.ps1' = ''; 'Uninstall.ps1' = ''; 'Detect.ps1' = '' } -PreviousScripts @{ 'Install.ps1' = '' } } catch { $threw = $_.Exception.Message -like '*previous version needs*' }
 Test-Check 'lab: the previous version needs its three scripts too' $threw
 Set-PackTuneSandboxLauncher -Launcher $null
+# --- the dependency step: PackTune Runtime goes in first, like in Intune, and stops the run when it fails
+$rtSource = Join-Path $work 'rt-source'; New-Item -ItemType Directory -Path $rtSource -Force | Out-Null; 'runtime install' | Set-Content (Join-Path $rtSource 'install.ps1'); 'runtime tray' | Set-Content (Join-Path $rtSource 'tray.ps1')
+Set-PackTuneSandboxLauncher -Launcher {
+    param($WsbPath)
+    $job = Split-Path $WsbPath -Parent
+    $script:JobSeen = @{ Path = $job; Info = (Get-Content (Join-Path $job 'job.json') -Raw | ConvertFrom-Json) }
+    @{ State = 'Succeeded'; Step = 'Done'; Message = 'ok'; Result = @{ Verdict = 'Passed'; Notes = 'n' } } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $job 'status.json')
+}
+$null = Start-PackTuneWin32Lab -DisplayName 'Check App' -Version '1.0' -SourcePath $labSource -Scripts @{ 'Install.ps1' = 'exit 0'; 'Uninstall.ps1' = 'exit 0'; 'Detect.ps1' = 'x' } -RuntimeSourcePath $rtSource -RuntimeDetection 'Write-Output runtime-detect' -AutoRun
+$rtDir = Join-Path $script:JobSeen.Path 'input\source-runtime'
+Test-Check 'lab with the runtime: the job says so, install.ps1 and the other runtime files, its detection and the step script are their own folder' ($script:JobSeen.Info.HasRuntime -eq $true -and (Get-Content (Join-Path $rtDir 'install.ps1') -Raw) -match 'runtime install' -and (Test-Path (Join-Path $rtDir 'tray.ps1')) -and (Get-Content (Join-Path $rtDir 'Detect.ps1') -Raw) -match 'runtime-detect' -and (Get-Content (Join-Path $rtDir 'Runtime.ps1') -Raw) -match "'install.ps1'" -and (Get-Content (Join-Path $rtDir 'Runtime.ps1') -Raw) -match "'Detect.ps1'")
+$stepText = Get-PackTuneLabRuntimeStep
+$errs = $null; [void][Management.Automation.Language.Parser]::ParseInput($stepText, [ref]$null, [ref]$errs)
+Test-Check 'the runtime step script is valid, ASCII, runs install.ps1 then Detect.ps1 and ends with the detection''s verdict' ($errs.Count -eq 0 -and $stepText -notmatch '[^\x00-\x7F]' -and $stepText.IndexOf("'install.ps1'") -lt $stepText.IndexOf("'Detect.ps1'") -and $stepText -match 'exit \$Code')
+$threw = ''; try { $null = Start-PackTuneWin32Lab -DisplayName 'x' -Scripts @{ 'Install.ps1' = ''; 'Uninstall.ps1' = ''; 'Detect.ps1' = '' } -RuntimeSourcePath $work } catch { $threw = $_.Exception.Message }
+Test-Check 'the runtime step needs install.ps1 and the detection' ($threw -like '*runtime step needs*') $threw
+Set-PackTuneSandboxLauncher -Launcher $null
 
 # --- the sequence of the lab and its verdict (Sandbox\LabShared.ps1, the same functions the lab panel uses)
 . (Join-Path $repo 'Sandbox\LabShared.ps1')
@@ -337,6 +354,20 @@ Test-Check 'restore: the subkeys of a key that does not exist are an empty list'
 $plan = @(Get-MsixRestorePlan -Path $basePkg -InstallRoot 'C:\Program Files\PackTune.Check')
 Test-Check 'restore: files of VFS go to their real location, metadata is skipped' (($plan | Where-Object Name -eq 'VFS/ProgramFilesX64/Check/app.exe').Target -eq (Join-Path $env:ProgramFiles 'Check\app.exe') -and ($plan | Where-Object Name -eq 'AppxManifest.xml').Kind -eq 'Skip')
 
+$withRt = @(New-LabPlan -Version '1.0' -HasRuntime $true)[0]
+Test-Check 'plan with the runtime: its own visible first step "Dependency: PackTune Runtime", then detect, install, detect, uninstall, detect' ($withRt.Count -eq 6 -and $withRt[0].Title -eq 'Dependency: PackTune Runtime' -and $withRt[0].Kind -eq 'Runtime' -and $withRt[0].Target -eq 'runtime' -and $withRt[1].Title -eq 'Detect before the install' -and (@($withRt | ForEach-Object Index) -join ',') -eq '1,2,3,4,5,6')
+$withRtUpd = @(New-LabPlan -Version '2.0' -PreviousVersion '1.0' -HasPrevious $true -HasRuntime $true)[0]
+Test-Check 'plan with the runtime and a previous version: the runtime is still the first step only' ($withRtUpd.Count -eq 8 -and $withRtUpd[0].Kind -eq 'Runtime' -and @($withRtUpd | Where-Object Kind -eq 'Runtime').Count -eq 1)
+$p = @(New-LabPlan -Version '1.0' -HasRuntime $true)[0]
+$rtFail = [pscustomobject]@{ ExitCode = 61002; Output = "winget not found yet, waiting`nwinget.exe not found (App Installer is missing)`nPackTune Runtime install.ps1 exit code 61002"; StdOut = ''; Seconds = 12; User = 'SYSTEM' }
+$ran = Invoke-FakeRun $p ({ param($s) $rtFail })
+$sum = Get-LabSummary $p
+Test-Check 'runtime fails: the run stops at once at step 1 with the exit code and the last output as the cause, no later step ran' ((@($ran) -join ',') -eq '1' -and $p[0].State -eq 'Failed' -and $p[1].State -eq 'NotRun' -and $sum.Verdict -eq 'Failed' -and $sum.Message -like 'Failed at step 1 of 6 (Dependency: PackTune Runtime)*61002*Last output:*exit code 61002*') $sum.Message
+$p = @(New-LabPlan -Version '1.0' -HasRuntime $true)[0]
+$ran = Invoke-FakeRun $p ({ param($s) switch ($s.Kind) { 'Detect' { if ($s.ExpectDetected) { New-FakeResult 0 'found' } else { New-FakeResult 1 '' } } default { New-FakeResult 0 'PackTune Runtime detection: ready' } } })
+Test-Check 'runtime passes: all six steps run and the verdict is Passed' ((@($ran) -join ',') -eq '1,2,3,4,5,6' -and (Get-LabSummary $p).Verdict -eq 'Passed')
+$p = @(New-LabPlan -Version '1.0' -HasRuntime $true)[0]; [void](Set-LabStepResult -Step $p[1] -Result (New-FakeResult 0 'found'))
+Test-Check 'already detected before the install is still recognised with the runtime step in front' ($p[1].State -eq 'Failed' -and $p[1].Finding -like 'Already detected*')
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed) { "$script:Failed check(s) failed."; exit 1 }
 'All checks passed.'

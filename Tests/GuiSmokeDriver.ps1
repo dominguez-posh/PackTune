@@ -1486,7 +1486,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             1 {
                 if (-not (Test-Idle 'test')) { return $false }
                 $first = Join-Path $lab '01-Lab'
-                Test-Smoke 'Chocolatey test ran in the lab' ((Test-Path (Join-Path $first 'started.txt')) -and ((Get-Content (Join-Path $first 'job.json') -Raw | ConvertFrom-Json).DisplayName -like '*(Chocolatey)') -and (Test-Path (Join-Path $first 'source\choco-app.ps1')))
+                Test-Smoke 'Chocolatey test ran in the lab' ((Test-Path (Join-Path $first 'started.txt')) -and ((Get-Content (Join-Path $first 'job.json') -Raw | ConvertFrom-Json).DisplayName -like '*(Chocolatey)') -and (Test-Path (Join-Path $first 'source\choco-app.ps1')) -and (Test-Path (Join-Path $first 'source-runtime\install.ps1')))
                 Test-Smoke 'result in a toast and the log' ((Get-SmokeLog) -match 'sandbox test passed' -and @($script:Toasts | Where-Object { $_.Text -like '*passed*' }).Count -ge 1)
                 Test-Smoke 'live steps on the job (preparing, starting Windows Sandbox, waiting / installing, result)' ((Get-JobLog) -match 'Step 1 of 4: preparing' -and (Get-JobLog) -match 'Step 2 of 4: starting Windows Sandbox' -and (Get-JobLog) -match 'Step 3 of 4' -and (Get-JobLog) -match 'Step 4 of 4: result received') (Get-JobLog)
                 Test-Smoke 'buttons back to Test in sandbox after the result' (($ui.BtnDetailTest, $ui.BtnTenantTest, $ui.BtnCustomTest | Where-Object { $_.Content -eq 'Test in sandbox' }).Count -eq 3)
@@ -1504,7 +1504,10 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $second = Join-Path $lab '02-Lab'
                 $source = Join-Path $second 'source'
                 Test-Smoke 'winget test from the details panel ran in the lab' ((Test-Path (Join-Path $second 'started.txt')) -and ((Get-Content (Join-Path $second 'job.json') -Raw | ConvertFrom-Json).DisplayName -like '*(Winget)'))
-                Test-Smoke 'winget test sets up winget first' ((Get-Content (Join-Path $source 'Install.ps1') -Raw) -match 'Repair-WinGetPackageManager')
+                $rtDir = Join-Path $second 'source-runtime'
+                Test-Smoke 'winget test: the PackTune Runtime goes in first as its own lab step, with the real install.ps1 and detection of the runtime app' ((Get-Content (Join-Path $second 'job.json') -Raw | ConvertFrom-Json).HasRuntime -eq $true -and (Test-Path (Join-Path $rtDir 'install.ps1')) -and (Test-Path (Join-Path $rtDir 'tray.ps1')) -and (Test-Path (Join-Path $rtDir 'Runtime.ps1')) -and (Get-Content (Join-Path $rtDir 'Detect.ps1') -Raw) -match 'PackTune\\Runtime\\ready\.txt' -and (Get-Content (Join-Path $rtDir 'install.ps1') -Raw) -match 'Add-AppxProvisionedPackage')
+                Test-Smoke 'winget test: the lab has no winget bootstrap of its own (no PowerShell 7 only Repair-WinGetPackageManager), the package runs as deployed' ((Get-Content (Join-Path $source 'Install.ps1') -Raw) -notmatch 'Repair-WinGetPackageManager|Install-Module|Install-PackageProvider' -and (Get-Content (Join-Path $source 'Install.ps1') -Raw) -match 'choco-app.ps1')
+                Test-Smoke 'winget test: lab.flag shortens the wait for winget in the lab only (the script is the deployed one)' ((Test-Path (Join-Path $source 'lab.flag')) -and (Get-Content (Join-Path $source 'choco-app.ps1') -Raw) -match 'lab.flag' -and (Get-Content (Join-Path $source 'choco-app.ps1') -Raw) -match '\$WaitRounds')
                 foreach ($file in Get-ChildItem $source -Filter '*.ps1') {
                     $errors = $null
                     [void][System.Management.Automation.Language.Parser]::ParseFile($file.FullName, [ref]$null, [ref]$errors)

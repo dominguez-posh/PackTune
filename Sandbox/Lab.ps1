@@ -18,6 +18,7 @@ $OutDir = Join-Path $JobDir 'out'
 $LabOut = Join-Path $OutDir 'lab'
 $Source = Join-Path $LocalDir 'input\source'
 $PreviousSource = Join-Path $LocalDir 'input\source-previous'
+$RuntimeSource = Join-Path $LocalDir 'input\source-runtime'
 $ShotDir = Join-Path $env:TEMP 'packtune\labshots'
 New-Item -ItemType Directory $ShotDir -Force | Out-Null
 $job = Get-Content (Join-Path $JobDir 'job.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -27,10 +28,10 @@ $script:Closing = $false
 $script:Queue = New-Object System.Collections.ArrayList
 
 $hasPrevious = [bool]$job.HasPrevious
-$steps = @(New-LabPlan -Version $job.Version -PreviousVersion $job.PreviousVersion -HasPrevious $hasPrevious)[0]
+$steps = @(New-LabPlan -Version $job.Version -PreviousVersion $job.PreviousVersion -HasPrevious $hasPrevious -HasRuntime ([bool]$job.HasRuntime))[0]
 # Intune runs the commands from the package folder; detection scripts run 64-bit in the system context
 $ps = '"%SystemRoot%\sysnative\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File'
-$commands = @{ Install = "$ps "".\Install.ps1"""; Uninstall = "$ps "".\Uninstall.ps1"""; Detect = "$ps "".\Detect.ps1""" }
+$commands = @{ Install = "$ps "".\Install.ps1"""; Uninstall = "$ps "".\Uninstall.ps1"""; Detect = "$ps "".\Detect.ps1"""; Runtime = "$ps "".\Runtime.ps1""" }
 
 # ---------------------------------------------------------------- panel
 $C = @{
@@ -59,7 +60,7 @@ $info = New-LabLabel 'Run the steps one by one, or all at once. They run as SYST
 $form.Controls.Add($info)
 $rows = @{}
 foreach ($s in $steps) {
-    $y = 74 + ($s.Index - 1) * 40
+    $y = 74 + ($s.Index - 1) * 34
     $num = New-LabLabel "$($s.Index)" 16 $y 28 28 10 $C.Text
     $title = New-LabLabel $s.Title 52 ($y + 3) 330 24 10.5
     $chip = New-LabLabel 'not run' 390 ($y + 3) 220 24 9.5 $C.Text
@@ -70,7 +71,7 @@ foreach ($s in $steps) {
 }
 $output = New-Object System.Windows.Forms.TextBox
 $output.Multiline = $true; $output.ReadOnly = $true; $output.ScrollBars = 'Vertical'; $output.Font = New-Object System.Drawing.Font('Consolas', 9.5)
-$output.Location = New-Object System.Drawing.Point(16, 366); $output.Size = New-Object System.Drawing.Size(740, 160)
+$output.Location = New-Object System.Drawing.Point(16, (74 + $steps.Count * 34 + 8)); $output.Size = New-Object System.Drawing.Size(740, 160)
 $form.Controls.Add($output)
 $btnAll = New-LabButton 'Run all steps' $C.Primary 16 540 240 44
 $btnFail = New-LabButton 'Report failure' $C.Danger 270 540 240 44
@@ -135,7 +136,7 @@ function Start-LabStep([int]$Index) {
     $s.State = 'Running'; $s.Output = ''; $s.Detail = ''
     Set-StepView $s
     $info.Text = "Running step $($s.Index): $($s.Title) ..."
-    try { $script:Running = @{ Step = $s; Handle = (Start-LabCommand -CommandLine $commands[$s.Kind] -WorkingDirectory $(if ($s.Target -eq 'previous') { $PreviousSource } else { $Source }) -AsSystem) } }
+    try { $script:Running = @{ Step = $s; Handle = (Start-LabCommand -CommandLine $commands[$s.Kind] -WorkingDirectory $(switch ($s.Target) { 'previous' { $PreviousSource } 'runtime' { $RuntimeSource } default { $Source } }) -AsSystem) } }
     catch {
         $script:Running = $null
         $s.State = 'Failed'; $s.Detail = 'The step could not be started'; $s.Output = $_.Exception.Message

@@ -312,9 +312,10 @@ function Get-PackTuneRuntimeRevision([string]$Notes) {
     if ($Notes -match 'runtimeRevision=(\d+)') { return [int]$Matches[1] }
     return 0
 }
-function New-PackTuneRuntimePackage {
-    # The package of the runtime app (install, update and tray script, detection with the revision): for the creation and the update
-    $WorkPath = New-PackTuneWorkFolder -Name "_packtune-runtime"
+function Write-PackTuneRuntimeFiles {
+    # The content of the runtime app (install, update and tray script in <WorkPath>\source, the detection with the revision next to it): the one
+    # source of the Intune package and of the sandbox test lab, so the lab runs exactly what goes to Intune. Returns the detection file.
+    param([Parameter(Mandatory = $true)][string]$WorkPath)
     $SourcePath = Join-Path $WorkPath "source"
     $Scripts = Get-PackTuneRuntimeScripts
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $Scripts.Install -Encoding ASCII
@@ -322,6 +323,12 @@ function New-PackTuneRuntimePackage {
     Set-Content -Path (Join-Path $SourcePath "tray.ps1") -Value $Scripts.Tray -Encoding ASCII
     $DetectionFile = Join-Path $WorkPath "detection.ps1"
     Set-Content -Path $DetectionFile -Value $Scripts.Detection -Encoding ASCII
+    return $DetectionFile
+}
+function New-PackTuneRuntimePackage {
+    # The package of the runtime app (install, update and tray script, detection with the revision): for the creation and the update
+    $WorkPath = New-PackTuneWorkFolder -Name "_packtune-runtime"
+    $DetectionFile = Write-PackTuneRuntimeFiles -WorkPath $WorkPath
     [pscustomobject]@{ Package = (New-PackTunePackage -WorkPath $WorkPath); DetectionFile = $DetectionFile }
 }
 
