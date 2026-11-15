@@ -94,6 +94,30 @@ function Stop-LabCommand {
     elseif ($Handle.Process -and -not $Handle.Process.HasExited) { & taskkill.exe /PID $Handle.Process.Id /T /F 2>&1 | Out-Null }
 }
 
+function Get-LabLastLines {
+    # The last lines a running step printed (stdout, then stderr), from the files of its command handle: what the lab shows while it works
+    param([Parameter(Mandatory = $true)]$Handle, [int]$Count = 8)
+    $lines = @()
+    foreach ($name in 'stdout.txt', 'stderr.txt') {
+        $p = Join-Path $Handle.Dir $name
+        if (Test-Path -LiteralPath $p) { try { $lines += @(Get-Content -LiteralPath $p -Tail $Count -ErrorAction Stop | Where-Object { $_ -and $_.Trim() }) } catch { } }
+    }
+    @($lines | Select-Object -Last $Count)
+}
+
+function Get-LabProgressLine {
+    # One line for the job log and the panel: step, what it printed last, time; after QuietLimitSeconds without new output it says it is still
+    # working (and since when), so there is never silence
+    param([int]$Index, [int]$Count, [string]$Title, [double]$ElapsedSeconds, [string]$LastLine = '', [double]$QuietSeconds = 0, [int]$QuietLimitSeconds = 180)
+    $time = '{0:00}:{1:00}' -f [math]::Floor($ElapsedSeconds / 60), [int]($ElapsedSeconds % 60)
+    $last = ([string]$LastLine -replace '\s+', ' ').Trim()
+    if ($last.Length -gt 110) { $last = $last.Substring(0, 107) + '...' }
+    $head = "Step $Index of ${Count}: $Title"
+    if ($QuietSeconds -ge $QuietLimitSeconds) { return "$head - still working, no new output for $([math]::Floor($QuietSeconds / 60)) min$(if ($last) { ", last: $last" }) ($time)" }
+    if ($last) { return "$head - $last ($time)" }
+    "$head - running ($time)"
+}
+
 function Test-LabSuccessCode {
     # The Intune default return codes: 0 and 1707 success, 3010 soft reboot, 1641 hard reboot (all count as installed)
     param([int]$ExitCode, [int[]]$SuccessCodes = @(0, 1707, 3010, 1641))

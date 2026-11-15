@@ -368,6 +368,24 @@ $ran = Invoke-FakeRun $p ({ param($s) switch ($s.Kind) { 'Detect' { if ($s.Expec
 Test-Check 'runtime passes: all six steps run and the verdict is Passed' ((@($ran) -join ',') -eq '1,2,3,4,5,6' -and (Get-LabSummary $p).Verdict -eq 'Passed')
 $p = @(New-LabPlan -Version '1.0' -HasRuntime $true)[0]; [void](Set-LabStepResult -Step $p[1] -Result (New-FakeResult 0 'found'))
 Test-Check 'already detected before the install is still recognised with the runtime step in front' ($p[1].State -eq 'Failed' -and $p[1].Finding -like 'Already detected*')
+# --- progress while a step runs: the last lines, the time, and "still working" instead of silence
+$hd = Join-Path $work 'handle'; New-Item -ItemType Directory -Path $hd -Force | Out-Null
+(1..12 | ForEach-Object { "line $_" }) | Set-Content (Join-Path $hd 'stdout.txt'); 'warn text' | Set-Content (Join-Path $hd 'stderr.txt')
+$tail = @(Get-LabLastLines ([pscustomobject]@{ Dir = $hd }) 4)
+Test-Check 'progress: the last lines of a running step come from its stdout and stderr files' ($tail.Count -eq 4 -and $tail[-1] -eq 'warn text' -and $tail[0] -eq 'line 10') ($tail -join '|')
+Test-Check 'progress: no output files yet is an empty tail, no error' (@(Get-LabLastLines ([pscustomobject]@{ Dir = (Join-Path $work 'nothing') })).Count -eq 0)
+$l1 = Get-LabProgressLine -Index 1 -Count 6 -Title 'Dependency: PackTune Runtime' -ElapsedSeconds 125 -LastLine '[10:00:01 +61s] AppInstaller.msixbundle: 12.0 MB of 27.0 MB (44%)'
+Test-Check 'progress line: step, what it printed last, minutes and seconds' ($l1 -eq 'Step 1 of 6: Dependency: PackTune Runtime - [10:00:01 +61s] AppInstaller.msixbundle: 12.0 MB of 27.0 MB (44%) (02:05)') $l1
+$l2 = Get-LabProgressLine -Index 1 -Count 6 -Title 'Dependency: PackTune Runtime' -ElapsedSeconds 400 -LastLine 'App Installer: provisioning it for all users' -QuietSeconds 200
+Test-Check 'progress line: after 3 minutes without new output it says still working, since when, and the last thing it did' ($l2 -like '*still working, no new output for 3 min, last: App Installer: provisioning*(06:40)') $l2
+$l3 = Get-LabProgressLine -Index 2 -Count 6 -Title 'Detect' -ElapsedSeconds 3
+Test-Check 'progress line: a step that printed nothing yet says it is running, never nothing' ($l3 -eq 'Step 2 of 6: Detect - running (00:03)') $l3
+Test-Check 'progress line: a very long last line is cut' ((Get-LabProgressLine -Index 1 -Count 1 -Title 't' -ElapsedSeconds 1 -LastLine ('x' * 400)).Length -lt 160)
+$labText = Get-Content (Join-Path $repo 'Sandbox\Lab.ps1') -Raw
+Test-Check 'lab panel: the running step updates the panel from its output and reports to PackTune through status.json' ($labText -match 'Update-StepProgress' -and $labText -match "Write-JobStatus 'Running' \`$line" -and $labText -match 'Get-LabLastLines')
+$rtText = Get-Content (Join-Path $repo 'PackTune-Runtime.ps1') -Raw
+Test-Check 'runtime install: every sub-step prints a timed line (Chocolatey, App Installer download with size, dependencies, signature check, provisioning, registering, tasks)' ($rtText -match 'function Write-Step' -and $rtText -match 'Save-Download' -and ([regex]::Matches($rtText, 'Write-Step "')).Count -ge 15 -and $rtText -match 'checking the Microsoft signature' -and $rtText -match 'registering it for the system context' -and $rtText -match 'N1\} MB')
+Test-Check 'runtime install: no progress bar (ProgressPreference), and the random waits between attempts are short only in the lab (lab.flag)' ($rtText -match '\$ProgressPreference = "SilentlyContinue"' -and $rtText -match 'lab\.flag' -and $rtText -match 'if \(\$InLab\) \{ 5 \} else \{ Get-Random')
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed) { "$script:Failed check(s) failed."; exit 1 }
 'All checks passed.'

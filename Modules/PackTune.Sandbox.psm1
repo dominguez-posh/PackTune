@@ -771,17 +771,32 @@ function Get-PackTuneLabRuntimeStep {
     # The step "Dependency: PackTune Runtime" of the lab: the install.ps1 of the runtime app as Intune runs it (SYSTEM, 64-bit PowerShell), then its
     # detection script; the step passes when the install gives a success code and the detection says detected. It only sequences the two real scripts.
     return @'
-# Lab step: install the PackTune Runtime like Intune (install.ps1 as SYSTEM), then run its detection rule.
+# Lab step: install the PackTune Runtime like Intune (install.ps1 as SYSTEM), then run its detection rule. Every part prints a timed line, the
+# detection is bounded (3 minutes) and says what is busy while it runs: the row never stays "running" without a word.
 $ErrorActionPreference = 'Continue'
 $PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+function Write-LabLine([string]$Text) { Write-Output ('[{0:HH:mm:ss}] {1}' -f (Get-Date), $Text) }
 & $PowerShell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'install.ps1')
 $Code = $LASTEXITCODE
-Write-Output "PackTune Runtime install.ps1 exit code $Code"
+Write-LabLine "PackTune Runtime install.ps1 exit code $Code"
 if ($Code -notin 0, 1707, 3010, 1641) { exit $Code }
-$Out = & $PowerShell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Detect.ps1')
-$Detected = $LASTEXITCODE
-if ($Detected -ne 0 -or -not ([string]$Out).Trim()) { Write-Output "PackTune Runtime detection: not detected (exit code $Detected)"; exit 1 }
-Write-Output "PackTune Runtime detection: $(([string]$Out).Trim())"
+Write-LabLine 'Detecting the PackTune Runtime (its detection script) ...'
+$Started = Get-Date
+$OutFile = Join-Path $env:TEMP 'packtune-runtime-detect.txt'
+$Process = Start-Process -FilePath $PowerShell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'Detect.ps1') -PassThru -NoNewWindow -RedirectStandardOutput $OutFile
+$null = $Process.Handle   # keeps the exit code readable after the wait (Start-Process -PassThru quirk)
+while (-not $Process.WaitForExit(10000)) {
+    $Seconds = [int]((Get-Date) - $Started).TotalSeconds
+    $Busy = (@(Get-Process | Sort-Object CPU -Descending | Select-Object -First 3 | ForEach-Object { $_.ProcessName }) -join ', ')
+    Write-LabLine "Detection still running ($Seconds s); busiest processes: $Busy"
+    if ($Seconds -ge 180) { try { $Process.Kill() } catch { }; Write-LabLine 'PackTune Runtime detection: timed out after 3 minutes'; exit 1 }
+}
+$Process.WaitForExit()
+$Detected = $Process.ExitCode
+$Out = if (Test-Path -LiteralPath $OutFile) { (Get-Content -LiteralPath $OutFile -Raw) } else { '' }
+Write-LabLine "Detection finished after $([int]((Get-Date) - $Started).TotalSeconds) s"
+if ($Detected -ne 0 -or -not ([string]$Out).Trim()) { Write-LabLine "PackTune Runtime detection: not detected (exit code $Detected)"; exit 1 }
+Write-LabLine "PackTune Runtime detection: $(([string]$Out).Trim())"
 exit 0
 '@
 }
@@ -831,7 +846,7 @@ function Start-PackTuneWin32Lab {
         if ($PreviousSourcePath) { Copy-Item -Path (Join-Path $PreviousSourcePath '*') -Destination $Previous -Recurse -Force }
         foreach ($Name in $PreviousScripts.Keys) { Set-Content -Path (Join-Path $Previous $Name) -Value $PreviousScripts[$Name] -Encoding UTF8 }
     }
-    Write-SandboxLog "Opening the test lab in Windows Sandbox for $DisplayName$(if ($Version) { " $Version" }): detect, install$(if ($HasPrevious) { ' (previous version, then the update)' }), detect, uninstall, detect$(if (-not $AutoRun) { ', then report the result there' })."
+    Write-SandboxLog "Opening the test lab in Windows Sandbox for $DisplayName$(if ($Version) { " $Version" }): $(if ($HasRuntime) { 'dependency (PackTune Runtime), ' })detect, install$(if ($HasPrevious) { ' (previous version, then the update)' }), detect, uninstall, detect$(if (-not $AutoRun) { ', then report the result there' })."
     $Wsb = New-SandboxConfig -JobPath $Job -Networking ([bool]$Networking) -NoToolchain
     Write-SandboxLog 'Step 2 of 4: starting Windows Sandbox (the window opens in a moment).'
     Start-SandboxProcess -WsbPath $Wsb

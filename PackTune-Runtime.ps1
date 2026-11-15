@@ -18,9 +18,10 @@ $script:RuntimeMarker = "PackTuneRuntimeApp"
 $script:OldWingetRuntimeName = "winget runtime"
 $script:OldWingetRuntimeMarker = "WingetRuntimeApp"
 # Raised when the install, update or detection script of the runtime app changes (part of its detection)
-$script:RuntimeRevision = 5
+$script:RuntimeRevision = 6
 # One line per revision: what changes on the devices (shown with "Update available"); add a line when the revision is raised
-$script:RuntimeChanges = @{ 5 = "Tray agent for update notifications on the devices (one per user session); the logon task runs in parallel on multi-session hosts." }
+$script:RuntimeChanges = @{ 5 = "Tray agent for update notifications on the devices (one per user session); the logon task runs in parallel on multi-session hosts."
+    6 = "Faster App Installer download (no progress bar slowing it down) and a log that shows every sub-step with its time." }
 
 #region scripts
 
@@ -58,6 +59,39 @@ if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProces
 $Revision = '__REVISION__'
 $LogId = "_packtune-runtime"
 $LogTag = if ($Uninstall) { "uninstall" } else { "install" }
+# Windows PowerShell 5.1 draws a progress bar for Invoke-WebRequest and Expand-Archive that slows a download of 100 MB down by a factor of 10 or
+# more: off. Every sub-step prints one line with the time (the lab and the log show what the script is doing and how long each part took).
+$ProgressPreference = "SilentlyContinue"
+$Clock = [Diagnostics.Stopwatch]::StartNew()
+# lab.flag only exists in the sandbox test lab (put there by the lab): the random waits between download attempts are short there, the logic is the same
+$InLab = Test-Path -LiteralPath "$PSScriptRoot\lab.flag"
+function Write-Step([string]$Text) { Write-Output ("[{0:HH:mm:ss} +{1}s] {2}" -f (Get-Date), [int]$Clock.Elapsed.TotalSeconds, $Text) }
+function Save-Download([string]$Url, [string]$Path) {
+    # A download with its progress in the output: file name, size and percent every few seconds (Invoke-WebRequest says nothing until it is done)
+    $Name = Split-Path -Path $Path -Leaf
+    $Started = Get-Date
+    $Request = [Net.HttpWebRequest]::Create($Url)
+    $Request.UserAgent = "PackTune"; $Request.Timeout = 60000; $Request.ReadWriteTimeout = 60000
+    if ($Request.Proxy) { $Request.Proxy.Credentials = [Net.CredentialCache]::DefaultCredentials }
+    $Response = $Request.GetResponse()
+    $In = $null; $Out = $null
+    try {
+        $Total = [int64]$Response.ContentLength
+        $In = $Response.GetResponseStream(); $Out = [IO.File]::Create($Path)
+        $Buffer = New-Object byte[] 1048576
+        $Done = [int64]0; $Last = Get-Date
+        Write-Step ("{0}: download starts{1}" -f $Name, $(if ($Total -gt 0) { " ({0:N1} MB)" -f ($Total / 1MB) } else { "" }))
+        while (($Read = $In.Read($Buffer, 0, $Buffer.Length)) -gt 0) {
+            $Out.Write($Buffer, 0, $Read); $Done += $Read
+            if (((Get-Date) - $Last).TotalSeconds -ge 5) {
+                $Last = Get-Date
+                Write-Step ("{0}: {1:N1} MB{2}" -f $Name, ($Done / 1MB), $(if ($Total -gt 0) { " of {0:N1} MB ({1}%)" -f ($Total / 1MB), [int](100 * $Done / $Total) } else { "" }))
+            }
+        }
+    }
+    finally { if ($Out) { $Out.Dispose() }; if ($In) { $In.Dispose() }; $Response.Close() }
+    Write-Step ("{0}: downloaded {1:N1} MB in {2} s" -f $Name, ((Get-Item -LiteralPath $Path).Length / 1MB), [int]((Get-Date) - $Started).TotalSeconds)
+}
 
 __COMMON__
 
@@ -101,9 +135,11 @@ if ($Uninstall) {
 ### wait, the device lock is held per attempt only (not while waiting)
 $Choco = Join-Path $env:ProgramData "chocolatey\bin\choco.exe"
 $DownloadUrl = '__DOWNLOADURL__'
+Write-Step "Chocolatey: $(if (Test-Path -LiteralPath $Choco) { 'is there already' } else { 'not there, installing it' })"
 if (-not (Test-Path -LiteralPath $Choco)) {
     if ($DownloadUrl) { $env:chocolateyDownloadUrl = $DownloadUrl }
     for ($Attempt = 1; $Attempt -le 4 -and -not (Test-Path -LiteralPath $Choco); $Attempt++) {
+        Write-Step "Chocolatey: download and install, attempt $Attempt of 4"
         if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; Stop-Transcript | Out-Null; exit (Get-LockExitCode) }
         try {
             Set-ExecutionPolicy Bypass -Scope Process -Force
@@ -111,14 +147,20 @@ if (-not (Test-Path -LiteralPath $Choco)) {
         }
         catch { Write-Output "Chocolatey attempt $Attempt failed: $($_.Exception.Message)" }
         finally { Exit-DeploymentLock }
-        if (-not (Test-Path -LiteralPath $Choco) -and $Attempt -lt 4) { Start-Sleep -Seconds (Get-Random -Minimum 60 -Maximum 300) }
+        if (-not (Test-Path -LiteralPath $Choco) -and $Attempt -lt 4) {
+            $Pause = if ($InLab) { 5 } else { Get-Random -Minimum 60 -Maximum 300 }
+            Write-Step "Chocolatey: attempt $Attempt did not work (the community repository allows only a few downloads per minute), waiting $Pause s$(if ($InLab) { ' (short in the lab)' })"
+            Start-Sleep -Seconds $Pause
+        }
     }
 }
 if (-not (Test-Path -LiteralPath $Choco)) { Write-Output "Chocolatey installation failed"; Write-DeviceLog "Chocolatey installation failed"; Stop-Transcript | Out-Null; exit $PTExit.ChocoMissing }
+Write-Step "Chocolatey: checking that it runs"
 & $Choco --version | Out-Host
 if ($LASTEXITCODE -ne 0) { Write-Output "choco.exe does not run (exit code $LASTEXITCODE)"; Write-DeviceLog "choco.exe does not run"; Stop-Transcript | Out-Null; exit $PTExit.RuntimeBroken }
 
 ### Part 2: winget (App Installer) for SYSTEM
+Write-Step "App Installer (winget): looking at the device"
 if (-not (Enter-DeploymentLock)) { Write-Output "Another choco or winget installation is still running"; Stop-Transcript | Out-Null; exit (Get-LockExitCode) }
 try {
     $Arch = if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { "arm64" } else { "x64" }
@@ -151,34 +193,77 @@ try {
         Protect-Folder $Work
         $Bundle = Join-Path $Work "AppInstaller.msixbundle"
         $Zip = Join-Path $Work "dependencies.zip"
-        Invoke-WebRequest -Uri "$Release/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" -OutFile $Bundle -UseBasicParsing
-        Invoke-WebRequest -Uri "$Release/DesktopAppInstaller_Dependencies.zip" -OutFile $Zip -UseBasicParsing
+        Write-Step "App Installer: downloading the bundle from $Release"
+        Save-Download "$Release/Microsoft.DesktopAppInstaller_8wekyb3d8bbwe.msixbundle" $Bundle
+        Write-Step "App Installer: downloading the dependencies"
+        Save-Download "$Release/DesktopAppInstaller_Dependencies.zip" $Zip
+        Write-Step "App Installer: unpacking the dependencies"
         Expand-Archive -LiteralPath $Zip -DestinationPath (Join-Path $Work "dependencies") -Force
         $Dependencies = @(Get-ChildItem -Path (Join-Path $Work "dependencies\$Arch") -Filter "*.appx" -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+        Write-Step "App Installer: checking the Microsoft signature of $(1 + $Dependencies.Count) files"
         foreach ($File in @($Bundle) + $Dependencies) { Assert-MicrosoftSigned $File }
-        Write-Output "Installing App Installer with $($Dependencies.Count) dependencies"
+        Write-Step "App Installer: provisioning it for all users with $($Dependencies.Count) dependencies"
         if ($Dependencies.Count -gt 0) { Add-AppxProvisionedPackage -Online -PackagePath $Bundle -DependencyPackagePath $Dependencies -SkipLicense | Out-Null }
         else { Add-AppxProvisionedPackage -Online -PackagePath $Bundle -SkipLicense | Out-Null }
+        Remove-ItemSafely $Work
+        Write-Step "App Installer: provisioned"
+    }
+
+    function Install-VcRedist {
+        # winget.exe for SYSTEM needs the Visual C++ runtime in System32 (the packaged VCLibs are only visible to packaged apps): a device
+        # that has none ("winget does not start", exit code 0xC0000135 = a DLL is missing) gets Microsoft's redistributable, signature checked
+        $Work = Join-Path $RuntimeRoot "download-vc"
+        if (Test-Path -LiteralPath $Work) { Remove-ItemSafely $Work }
+        Protect-Folder $Work
+        $Installer = Join-Path $Work $(if ($Arch -eq "arm64") { "vc_redist.arm64.exe" } else { "vc_redist.x64.exe" })
+        Write-Step "Visual C++ runtime: downloading it from Microsoft (aka.ms/vs/17/release)"
+        Save-Download "https://aka.ms/vs/17/release/$(Split-Path -Path $Installer -Leaf)" $Installer
+        Write-Step "Visual C++ runtime: checking the Microsoft signature"
+        Assert-MicrosoftSigned $Installer
+        Write-Step "Visual C++ runtime: installing it silently (up to 10 minutes)"
+        $Process = Start-Process -FilePath $Installer -ArgumentList "/install", "/quiet", "/norestart" -PassThru
+        $Limit = (Get-Date).AddMinutes(10)
+        while (-not $Process.WaitForExit(15000) -and (Get-Date) -lt $Limit) { Write-Step "Visual C++ runtime: the installer is still running ($([int]((Get-Date) - $Process.StartTime).TotalSeconds) s; Windows Installer is slow in a fresh sandbox)" }
+        if (-not $Process.HasExited) { try { $Process.Kill() } catch { }; Write-Step "Visual C++ runtime: the installer did not finish in 10 minutes and was stopped" }
+        else { Write-Step "Visual C++ runtime: installer exit code $($Process.ExitCode) after $([int]((Get-Date) - $Process.StartTime).TotalSeconds) s" }
         Remove-ItemSafely $Work
     }
 
     $Winget = Get-Winget
     if (-not $Winget) {
-        Write-Output "App Installer not found, installing it"
-        try { Install-AppInstaller } catch { Write-Output "App Installer could not be provisioned: $($_.Exception.Message)" }
+        Write-Step "App Installer not found, installing it"
+        try { Install-AppInstaller } catch { Write-Step "App Installer could not be provisioned: $($_.Exception.Message)" }
         # Registered for the system context as well (no error when it already is)
-        try { Add-AppxPackage -RegisterByFamilyName -MainPackage "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe" -ErrorAction Stop } catch { Write-Output "Registration: $($_.Exception.Message)" }
-        for ($Wait = 0; -not $Winget -and $Wait -lt 12; $Wait++) { Start-Sleep -Seconds 10; $Winget = Get-Winget }
+        Write-Step "App Installer: registering it for the system context"
+        try { Add-AppxPackage -RegisterByFamilyName -MainPackage "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe" -ErrorAction Stop }
+        catch {
+            $Reason = $_.Exception.Message
+            Write-Step "Registration: $(($Reason -split "`r?`n")[0])"
+            # The cause behind "Deployment operation failed": the log of the deployment (its ActivityId is in the message)
+            if ($Reason -match "ActivityId\]?\s+([0-9a-fA-F-]{36})") {
+                try { Get-AppPackageLog -ActivityID $Matches[1] -ErrorAction Stop | Where-Object { $_.Message } | Select-Object -First 4 | ForEach-Object { Write-Step ("  deployment log: " + (([string]$_.Message -replace "\s+", " ").Trim())) } }
+                catch { Write-Step "  deployment log not available: $($_.Exception.Message)" }
+            }
+        }
+        for ($Wait = 0; -not $Winget -and $Wait -lt 12; $Wait++) { Write-Step "App Installer: waiting for winget.exe to appear ($($Wait + 1) of 12, 10 s each)"; Start-Sleep -Seconds 10; $Winget = Get-Winget }
     }
     if (-not $Winget) { Write-Output "winget.exe not found (App Installer is missing)"; Write-DeviceLog "winget.exe not found"; Stop-Transcript | Out-Null; exit $PTExit.WingetMissing }
-    Write-Output "Using $Winget"
+    Write-Step "Using $Winget"
 
     # winget must start for SYSTEM; if not, dependencies are missing
+    Write-Step "winget: checking that it starts for SYSTEM"
     & $Winget --version | Out-Host
+    if ($LASTEXITCODE -eq -1073741515) {
+        Write-Step "winget does not start (exit code ${LASTEXITCODE}: a DLL is missing, the Visual C++ runtime)"
+        try { Install-VcRedist } catch { Write-Step "Visual C++ runtime could not be installed: $($_.Exception.Message)" }
+        Write-Step "winget: checking that it starts for SYSTEM"
+        & $Winget --version | Out-Host
+    }
     if ($LASTEXITCODE -ne 0) {
-        Write-Output "winget does not start (exit code $LASTEXITCODE), installing App Installer and its dependencies again"
-        try { Install-AppInstaller } catch { Write-Output "App Installer could not be provisioned: $($_.Exception.Message)" }
+        Write-Step "winget does not start (exit code $LASTEXITCODE), installing App Installer and its dependencies again"
+        try { Install-AppInstaller } catch { Write-Step "App Installer could not be provisioned: $($_.Exception.Message)" }
         $Winget = Get-Winget
+        Write-Step "winget: checking that it starts for SYSTEM"
         & $Winget --version | Out-Host
         if ($LASTEXITCODE -ne 0) { Write-Output "winget still does not start"; Write-DeviceLog "winget does not start"; Stop-Transcript | Out-Null; exit $PTExit.RuntimeBroken }
     }
@@ -186,6 +271,7 @@ try {
 finally { Exit-DeploymentLock }
 
 ### One daily task updates Chocolatey and App Installer (SYSTEM); detection does not depend on it
+Write-Step "Tasks: registering the daily update and the tray agent"
 try {
     Remove-Item -LiteralPath (Join-Path $RuntimeRoot "update.ps1") -Force -ErrorAction SilentlyContinue
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot "update.ps1") -Destination $RuntimeRoot -Force -ErrorAction Stop
@@ -218,6 +304,7 @@ Remove-OldToolFolder "Winget\Runtime"
 # The marker of this script version for the detection rule
 Write-ProtectedFile (Join-Path $RuntimeRoot "ready.txt") $Revision
 Write-DeviceLog "PackTune Runtime ready: choco $Choco, winget $Winget"
+Write-Step "PackTune Runtime is ready (total $([int]$Clock.Elapsed.TotalSeconds) s)"
 Stop-Transcript | Out-Null
 exit 0
 '@

@@ -3151,6 +3151,8 @@ function Test-PackTunePackage {
     $RuntimeWork = New-PackTuneWorkFolder -Name "test-runtime"
     $RuntimeDetection = Write-PackTuneRuntimeFiles -WorkPath $RuntimeWork
     $RuntimeSource = Join-Path $RuntimeWork "source"
+    # Only in the lab: the random waits of the runtime install between download attempts are short (the logic stays the real one)
+    Set-Content -LiteralPath (Join-Path $RuntimeSource "lab.flag") -Value "PackTune test lab" -Encoding ASCII
     $LabInstall = @'
 # Win32 Test Lab: the package as deployed (the PackTune Runtime went in as the step before, like in Intune)
 & "$PSScriptRoot\choco-app.ps1"
