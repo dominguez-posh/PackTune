@@ -139,6 +139,7 @@
                 <StackPanel Grid.Column="1" VerticalAlignment="Center" Margin="0,0,12,0">
                     <TextBlock Text="{Binding [Title]}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                     <TextBlock Text="{Binding [Sub]}" FontSize="12" Foreground="{StaticResource MutedText}" TextTrimming="CharacterEllipsis"/>
+                    <TextBlock Text="{Binding [Loading]}" FontSize="12" Foreground="{StaticResource Primary}" TextTrimming="CharacterEllipsis"/>
                 </StackPanel>
                 <StackPanel Grid.Column="2" VerticalAlignment="Center">
                     <Border Style="{StaticResource Pill}" Background="{Binding [KindBg]}" HorizontalAlignment="Left"><TextBlock Text="{Binding [Kind]}" FontSize="12" FontWeight="SemiBold" Foreground="{Binding [KindFg]}"/></Border>
@@ -223,7 +224,15 @@
 
     <Grid x:Name="RootGrid">
         <Grid>
-            <Grid.RowDefinitions><RowDefinition Height="52"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <Grid.RowDefinitions><RowDefinition Height="52"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+
+            <!-- Busy bar: what runs in the background, indeterminate; a click opens Activity -->
+            <Border x:Name="BoxBusy" Grid.Row="2" Visibility="Collapsed" Background="{StaticResource AccentFaint}" BorderBrush="#D6E6F7" BorderThickness="0,1,0,0" Cursor="Hand" ToolTip="Open Activity" AutomationProperties.Name="Background work, open Activity">
+                <StackPanel>
+                    <ProgressBar x:Name="PbBusy" IsIndeterminate="True" Height="3" BorderThickness="0" Background="Transparent"/>
+                    <TextBlock x:Name="TxtBusy" Margin="20,4,20,5" FontSize="12" Foreground="{StaticResource Text2}" TextTrimming="CharacterEllipsis"/>
+                </StackPanel>
+            </Border>
 
             <!-- Title row -->
             <Grid Grid.Row="0">
@@ -543,6 +552,8 @@
                                         <TextBox x:Name="TxtCustomUpgrade" Style="{StaticResource SelectableText}" FontFamily="{StaticResource MonoFont}" FontSize="12"/>
                                         <TextBlock Text="Assigned" Style="{StaticResource FieldLabel}" Margin="0,12,0,4"/>
                                         <TextBlock x:Name="TxtCustomAssigned" TextWrapping="Wrap"/>
+                                        <TextBlock x:Name="TxtCustomTest" Margin="0,20,0,0" TextWrapping="Wrap" FontSize="13" AutomationProperties.Name="Sandbox test result"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,6,0,0"><Button x:Name="BtnCustomPanelTest" Content="Test in sandbox" Tag="&#xE768;"/><Button x:Name="BtnCustomPanelTestMenu" Style="{StaticResource IconButton}" Margin="4,0,0,0" Content="&#xE70D;" ToolTip="More test options (update from the previous version)" AutomationProperties.Name="More test options"/></StackPanel>
                                         <Button x:Name="BtnCustomNewVersion" Margin="0,20,0,0" Content="New version ..." Tag="&#xE898;"/>
                                         <TextBlock x:Name="TxtCustomVersionHint" Style="{StaticResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap" Text="Pick a newer MSI: a new app is created that supersedes this one on the devices."/>
                                         <TextBlock x:Name="TxtCustomStore" Style="{StaticResource Hint}" Margin="0,14,0,0" TextWrapping="Wrap"/>

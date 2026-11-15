@@ -697,6 +697,7 @@ function Update-Busy {
     $ui.TxtBadgeActivity.Text = [string]$running.Count
     $ui.BadgeActivity.Visibility = ConvertTo-Vis ($running.Count -gt 0)
     $ui.BtnInstallModule.IsEnabled = -not (Test-TaskRunning 'components')
+    Update-BusyBar
     Update-SignInButton
     Update-SelectionBar
     Update-TenantButtons
@@ -705,6 +706,34 @@ function Update-Busy {
     $script:LastVisibleTasks = $running.Count
 }
 $script:LastVisibleTasks = 0
+$script:StuckMinutes = 5                                  # a background read that runs longer is stopped, logged and shown (sandbox tests, deployments and the like are long by nature)
+$script:StuckKinds = 'customlist', 'tenant', 'counts', 'status', 'statuscheck', 'assignread', 'testsync', 'storecheck', 'versions', 'failedlist', 'deps', 'meta', 'icons', 'popular'
+function Update-BusyBar {
+    # One slim bar at the bottom: what runs in the background (with a count when several); a click opens Activity
+    $run = @($script:Tasks | Where-Object { $_.Job.Status -in 'queued', 'running' -and $_.Job.Kind -notin 'protocolsync', 'protocolhistory' })
+    if (-not $run.Count) { $ui.BoxBusy.Visibility = 'Collapsed'; return }
+    $first = [string]$run[0].Job.Title
+    $first = if ($first.Length -gt 90) { $first.Substring(0, 90) } else { $first }
+    $ui.TxtBusy.Text = "$first ...$(if ($run.Count -gt 1) { "  (+$($run.Count - 1) more)" })"
+    $ui.BoxBusy.Visibility = 'Visible'
+}
+$ui.BoxBusy.Add_MouseLeftButtonUp({ try { Show-Page 'Activity' } catch { } })
+function Stop-StuckTasks {
+    foreach ($task in @($script:Tasks)) {
+        $j = $task.Job
+        if ($j.Kind -notin $script:StuckKinds -or $j.Status -ne 'running' -or -not $j.Started) { continue }
+        if (((Get-Date) - [datetime]$j.Started).TotalMinutes -lt $script:StuckMinutes) { continue }
+        $j.Log.Add(@{ Level = 'Error'; Text = "The task did not finish within $($script:StuckMinutes) minutes and was stopped. Try again; if it keeps happening, check the network and the sign-in."; Time = (Get-Date).ToString('HH:mm:ss') }) | Out-Null
+        $j.HadError = $true; $j.Status = 'failed'; $j.Finished = Get-Date
+        try { [void]$task.PS.BeginStop($null, $null) } catch { }
+        [void]$script:Tasks.Remove($task)
+        Update-JobRow $j
+        Write-UiLog "[$($j.Display)] did not finish within $($script:StuckMinutes) minutes and was stopped." 'Error'
+        if (-not $task.Hidden -or $j.Kind -ne 'meta') { Show-Toast "$($j.Display): did not finish in time and was stopped." 'bad' 'Details' { Show-Page 'Activity' } }
+        if ($task.OnDone) { try { & $task.OnDone @() $j } catch { Show-Error $_.Exception.Message } }
+        Update-Busy
+    }
+}
 
 function Update-SignInButton {
     # While the browser sign-in waits, the button cancels it; only the button that applies is enabled
@@ -727,6 +756,7 @@ $timer.Add_Tick({
             if ($task.Handle.IsCompleted) { Complete-UiTask $task } else { Update-JobRow $task.Job }
         }
         Update-Toasts
+        if ($script:Tick % 8 -eq 0) { Stop-StuckTasks; Update-BusyBar }
         if ($script:Tick % 8 -eq 0) { Step-GraphRetry }
         if ($script:Tick % 4 -eq 0) { Step-StepBindings }
         # App cards fill up while the feed lookups run
@@ -1934,6 +1964,8 @@ function Get-IntentsText($Intents) {
 }
 function Test-StoreReady { [bool]($script:StoreState -and $script:StoreState.State -eq 'Ready') }
 function Update-CustomRows {
+    # The list is rebuilt by every refresh (counts, store check, assignment change ...): the selected app stays selected, so the panel does not close under the person's click
+    $keepId = if ($ui.LstCustom.SelectedItem) { [string]$ui.LstCustom.SelectedItem.Data.Id } else { '' }
     $script:CustomRows.Clear()
     $apps = @($script:CustomApps | Where-Object { $_ })
     foreach ($a in $apps) {
@@ -1943,7 +1975,7 @@ function Update-CustomRows {
         $colors = if ($newer) { $script:PillColors['gray'] } else { $script:PillColors['info'] }
         $row = New-Row (@{
             Data = $a; Title = $a.DisplayName; Sub = "$($a.Publisher)  $([char]0x00B7)  $($a.ProductCode)"; Kind = $kind; KindBg = $colors[0]; KindFg = $colors[1]
-            Assigned = (Get-IntentsText $a.Intents)
+            Assigned = (Get-IntentsText $a.Intents); Loading = $(if (-not $script:DeviceCounts.ContainsKey([string]$a.Id) -and (Test-TaskRunning 'counts')) { 'Reading install counts ...' } else { '' })
         } + (Get-TileStyle $a.DisplayName))
         $script:CustomRows.Add($row)
     }
@@ -1965,6 +1997,10 @@ function Update-CustomRows {
         # coming from In tenant: select that app as soon as the list has it
         $pending = @($script:CustomRows | Where-Object { $_.Data.Id -eq $script:CustomPendingSelect }) | Select-Object -First 1
         if ($pending) { $ui.LstCustom.SelectedItem = $pending; $script:CustomPendingSelect = $null }
+    }
+    if ($keepId -and -not $ui.LstCustom.SelectedItem) {
+        $again = @($script:CustomRows | Where-Object { $_.Data.Id -eq $keepId }) | Select-Object -First 1
+        if ($again) { $ui.LstCustom.SelectedItem = $again }
     }
     if ($ui.LstCustom.SelectedItem) { $ui.BtnCustomNewVersion.IsEnabled = $ready; $ui.BtnCustomExport.IsEnabled = $ready -and [bool]$ui.LstCustom.SelectedItem.Data.Manifest }
 }
@@ -1992,6 +2028,75 @@ function Update-CustomRemoveState($App) {
     $c = $script:DeviceCounts[[string]$App.Id]
     $ui.BtnCustomSetUninstall.Visibility = ConvertTo-Vis ([bool]($c -and -not $c.Error -and [int]$c.Installed -gt 0) -and @([string]$App.Intents -split ',') -notcontains 'uninstall')
 }
+function Get-CustomPreviousApp($App) {
+    # The newest older version of the same application in the tenant (the previous version of an update test)
+    @($script:CustomApps | Where-Object { $_ -and $_.AppId -eq $App.AppId -and $_.Id -ne $App.Id -and (Compare-SourceVersion $App.Version $_.Version) -eq 1 } | Sort-Object { try { [version]$_.Version } catch { [version]'0.0' } } -Descending) | Select-Object -First 1
+}
+function Update-CustomPanelTest($App) {
+    $state = Get-UiTestState 'Custom' ([string]$App.AppId) ([string]$App.Version)
+    $ui.TxtCustomTest.Text = (Get-TestText 'Custom' ([string]$App.AppId) ([string]$App.Version))
+    $ui.TxtCustomTest.Foreground = ConvertTo-Brush $(switch ($state) { 'Passed' { '#0F5C1F' } 'Failed' { '#A11D1D' } default { '#5C5C5C' } })
+    $busy = Test-TaskRunning 'test'
+    $blocker = Get-SandboxBlocker
+    $can = ($App.Kind -eq 'msi') -and (Test-StoreReady) -and $App.Manifest -and -not $blocker
+    $tip = if ($App.Kind -ne 'msi') { 'A captured application is tested when it is captured (Capture, test and deploy).' } elseif (-not (Test-StoreReady)) { 'The stored MSI is needed: set up the package store first' } elseif ($blocker) { $blocker } elseif ($busy) { 'A sandbox test is running (Windows Sandbox runs one at a time).' } else { $null }
+    Set-SandboxButtonBusy $ui.BtnCustomPanelTest $busy ([bool]$can) $tip
+    $ui.BtnCustomPanelTestMenu.IsEnabled = [bool]$can -and -not $busy
+}
+function Start-CustomPanelTest($App, [bool]$Update) {
+    if (-not $App -or (Block-SandboxStart)) { return }
+    $prev = if ($Update) { Get-CustomPreviousApp $App } else { $null }
+    if ($Update -and -not $prev) { Show-Toast 'There is no previous version of this application in the tenant.' 'warn'; return }
+    Update-UiToken
+    $work = @'
+param($AppId, $Version, $PrevVersion)
+$tmp = Join-Path ([IO.Path]::GetTempPath()) ('packtune-paneltest-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+try {
+    $e = Export-PackTuneCustomApp -AppId $AppId -Version $Version -Destination (Join-Path $tmp 'new')
+    $msi = Get-ChildItem -LiteralPath $e.InstallerFolder -Filter *.msi -Recurse -File | Select-Object -First 1
+    if (-not $msi) { throw "The stored version $Version holds no MSI." }
+    $p = @{ MsiPath = $msi.FullName }
+    if ($PrevVersion) {
+        $q = Export-PackTuneCustomApp -AppId $AppId -Version $PrevVersion -Destination (Join-Path $tmp 'old')
+        $pm = Get-ChildItem -LiteralPath $q.InstallerFolder -Filter *.msi -Recurse -File | Select-Object -First 1
+        if (-not $pm) { throw "The stored version $PrevVersion holds no MSI." }
+        $p.PreviousMsiPath = $pm.FullName
+    }
+    $r = Test-PackTuneCustomApp @p -AutoRun
+    [void](Save-PackTuneCatalogTest -Source Custom -Package $AppId -Version $Version -Verdict $(if ($r.Verdict -eq 'Passed') { 'Passed' } else { 'Failed' }) -Cause $(if ($r.Verdict -eq 'Passed') { '' } else { [string]$r.Message }) -UpdatePath ([bool]$PrevVersion))
+    $r
+    if ($r.Verdict -ne 'Passed') { Write-Error ('Sandbox test failed: ' + $r.Message) }
+}
+finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
+'@
+    $name = [string]$App.DisplayName
+    [void](Start-UiTask -Kind 'test' -Title "Sandbox test of ${name}: the lab plays detect, install, detect, uninstall, detect in the sandbox and reports the result" -Display "Sandbox: $name$(if ($Update) { ' (update from the previous version)' })" -NeedsAuth -Pool $script:TestPool -Arguments @{ AppId = [string]$App.AppId; Version = [string]$App.Version; PrevVersion = $(if ($prev) { [string]$prev.Version } else { '' }) } -Work $work -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'succeeded') { Write-UiLog "[$($Job.Display)] sandbox test passed." 'Success'; Show-Toast "$($Job.Display) passed." 'ok' }
+        Update-TestTable
+        $cur = Get-SelectedCustomApp
+        if ($cur) { Update-CustomPanelTest $cur }
+        Update-SandboxButtons
+    })
+    Show-SandboxStarted
+    Update-CustomPanelTest $App
+}
+Add-Click $ui.BtnCustomPanelTest { Start-CustomPanelTest (Get-SelectedCustomApp) $false }
+Add-Click $ui.BtnCustomPanelTestMenu {
+    $app = Get-SelectedCustomApp
+    if (-not $app) { return }
+    $menu = New-Object System.Windows.Controls.ContextMenu
+    $script:PanelMenuActions = @{}
+    foreach ($item in @(@('Test installation', $false), @('Test update from the previous version', $true))) {
+        $mi = New-Object System.Windows.Controls.MenuItem; $mi.Header = $item[0]
+        if ($item[1] -and -not (Get-CustomPreviousApp $app)) { $mi.IsEnabled = $false; $mi.ToolTip = 'There is no previous version of this application in the tenant.' }
+        $script:PanelMenuActions[$mi] = [bool]$item[1]
+        $mi.Add_Click({ param($src) try { Start-CustomPanelTest (Get-SelectedCustomApp) $script:PanelMenuActions[$src] } catch { Show-Error $_.Exception.Message } })
+        [void]$menu.Items.Add($mi)
+    }
+    $script:LastMenu = $menu
+    $menu.PlacementTarget = $ui.BtnCustomPanelTestMenu; $menu.Placement = 'Bottom'; $menu.IsOpen = $true
+}
 function Show-CustomDetails($App) {
     $ui.PanelCustomDetails.Visibility = if ($App) { 'Visible' } else { 'Collapsed' }
     if (-not $App) { return }
@@ -2010,6 +2115,7 @@ function Show-CustomDetails($App) {
     $ui.TxtCustomStore.Text = if ($App.Manifest) { "Kept in the package store (manifest $($App.Manifest.Substring(0, 16))...$(if ($App.Manifest.Length -lt 64) { ', short anchor of the first release: record the full one with Set-PackTuneCustomManifestAnchor' }))." } elseif ($isMsix) { 'No manifest in the notes: not kept in the package store.' } else { 'Not kept in the package store (none was set up when it was deployed).' }
     $ui.BtnCustomExport.IsEnabled = [bool]$App.Manifest -and (Test-StoreReady)
     Update-CustomRemoveState $App
+    Update-CustomPanelTest $App
     $ui.BtnCustomExport.ToolTip = if (Test-StoreReady) { $null } else { 'Set up the package store first' }
 }
 $ui.LstCustom.Add_SelectionChanged({
@@ -4630,6 +4736,7 @@ function Update-SandboxButtons {
     $isDep = $app -and ($app.IsChocolatey -or $app.IsDependency)
     Set-SandboxButtonBusy $ui.BtnTenantTest $busy ([bool]$app -and -not $isDep -and -not $blocker) $tip
     Set-SandboxButtonBusy $ui.BtnCustomTest $busy ([bool]$script:CustomInfo) $tip
+    try { $ca = Get-SelectedCustomApp; if ($ca -and $script:CurrentPage -eq 'Custom') { Update-CustomPanelTest $ca } } catch { }
     $ui.BtnDetailTestMenu.IsEnabled = $ui.BtnDetailTest.IsEnabled -or ($detail -and -not $busy -and -not $blocker)
     $ui.BtnTenantTestMenu.IsEnabled = $ui.BtnTenantTest.IsEnabled
     $ui.BtnCustomTestMenu.IsEnabled = $ui.BtnCustomTest.IsEnabled

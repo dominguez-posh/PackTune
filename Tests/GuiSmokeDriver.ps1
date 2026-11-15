@@ -1635,6 +1635,57 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $true
             }
         } } }
+    @{ Name = 'custom panel opens and stays open, test state, busy bar, stuck task'; Phase = 0; Do = {
+        param($s)
+        $storePath = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
+        switch ("$($s.Phase)") {
+            '0' {
+                if (-not (Test-Idle)) { return $false }
+                $apps = @(Get-Content $storePath -Raw | ConvertFrom-Json | ForEach-Object { $_ })
+                $apps += [pscustomobject]@{ id = 'panel-msi-1'; displayName = 'Panel Tool'; publisher = 'Smoke Corp'; description = 'x'; createdDateTime = (Get-Date).ToString('o')
+                    notes = 'PoweredByPackTune;custom=msi;app=panel-tool-1a2b3c4d;ver=0.9.34;product={CCCCCCCC-0000-0000-0000-000000000001};upgrade={CCCCCCCC-1111-1111-1111-111111111111};manifest=0123456789abcdef'
+                    displayVersion = '0.9.34'; assignment = 'available'; assignments = @([pscustomobject]@{ Type = '#microsoft.graph.allLicensedUsersAssignmentTarget'; Intent = 'available' }); dependencies = @(); supersedence = @() }
+                ConvertTo-Json -InputObject @($apps) -Depth 6 | Set-Content $storePath
+                Remove-Item (Get-PackTuneCatalogTestFile) -Force -ErrorAction SilentlyContinue; Update-TestTable
+                $script:CustomApps = $null
+                Show-Page 'Custom'
+                $s.Phase = 1; return $false
+            }
+            '1' {
+                if (-not (Test-Idle 'customlist')) { return $false }
+                $row = @($script:CustomRows | Where-Object { $_['Title'] -eq 'Panel Tool' })[0]
+                $ui.LstCustom.SelectedItem = $row
+                Test-Smoke 'custom app: the click opens the panel, with Test in sandbox and the state Not tested' ($ui.PanelCustomDetails.Visibility -eq 'Visible' -and $ui.BtnCustomPanelTest.Visibility -eq 'Visible' -and $ui.TxtCustomTest.Text -like '*Not tested*' -and $ui.BtnCustomPanelTestMenu.Visibility -eq 'Visible') $ui.TxtCustomTest.Text
+                # background refreshes rebuild the list: the selection and the panel stay
+                Update-CustomRows; Update-CustomRows
+                Test-Smoke 'a refresh of the list keeps the selected app and its panel open (the click is not lost)' ($ui.LstCustom.SelectedItem -and $ui.LstCustom.SelectedItem.Data.Id -eq 'panel-msi-1' -and $ui.PanelCustomDetails.Visibility -eq 'Visible')
+                [void](Save-PackTuneCatalogTest -Source Custom -Package 'panel-tool-1a2b3c4d' -Version '0.9.34' -Verdict Failed -Cause 'Failed at step 2 of 5: Install exited with 1603')
+                Update-TestTable; Show-CustomDetails $ui.LstCustom.SelectedItem.Data
+                Test-Smoke 'custom panel shows the failed test with its cause' ($ui.TxtCustomTest.Text -like 'Sandbox test: Failed*step 2 of 5*' -and $ui.TxtCustomTest.Foreground.Color.ToString() -eq '#FFA11D1D') $ui.TxtCustomTest.Text
+                [void](Save-PackTuneCatalogTest -Source Custom -Package 'panel-tool-1a2b3c4d' -Version '0.9.34' -Verdict Passed)
+                Update-TestTable; Show-CustomDetails $ui.LstCustom.SelectedItem.Data
+                Test-Smoke 'custom panel shows Passed after a passed test' ($ui.TxtCustomTest.Text -like 'Sandbox test: Passed*')
+                # busy bar: a slow background read shows what runs, with a count
+                $null = Start-UiTask -Kind 'versions' -Title 'Loading details of Panel Tool' -Hidden -Work 'Start-Sleep -Seconds 60'
+                $null = Start-UiTask -Kind 'failedlist' -Title 'Reading install counts' -Hidden -Work 'Start-Sleep -Seconds 60'
+                Update-BusyBar
+                Test-Smoke 'busy bar: visible with the first task and the count of the others' ($ui.BoxBusy.Visibility -eq 'Visible' -and $ui.TxtBusy.Text -like 'Loading details of Panel Tool*+1 more*') $ui.TxtBusy.Text
+                $script:CustomApps | Out-Null
+                $s.Phase = 2; return $false
+            }
+            '2' {
+                # a task that does not finish is stopped, logged and shown
+                $script:StuckMinutes = 0
+                Start-Sleep -Milliseconds 800
+                Stop-StuckTasks; Start-Sleep -Milliseconds 800; Stop-StuckTasks
+                $script:StuckMinutes = 5
+                Test-Smoke 'stuck tasks are stopped, the day log says so, a red toast tells it' ((Get-SmokeLog) -match 'Loading details of Panel Tool\] did not finish within' -and @($script:Toasts | Where-Object { $_.Kind -eq 'bad' -and $_.Text -like '*did not finish in time*' }).Count -ge 1 -and -not (Test-TaskRunning 'versions')) (Get-SmokeLog)
+                Update-BusyBar
+                Test-Smoke 'busy bar is gone when nothing runs' ($ui.BoxBusy.Visibility -eq 'Collapsed')
+                Show-Page 'Apps'
+                return $true
+            }
+        } } }
     @{ Name = 'settings'; Do = {
         Show-Page 'Settings'
         Test-Smoke 'settings show the tenant and the preferred source' ($ui.TxtTenantId.Text -eq 'contoso.onmicrosoft.com' -and $ui.CmbPreferredSource.SelectedItem -eq 'Chocolatey') "$($ui.TxtTenantId.Text) / $($ui.CmbPreferredSource.SelectedItem)"
