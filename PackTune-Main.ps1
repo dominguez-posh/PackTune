@@ -152,7 +152,11 @@ function Get-PackTuneSettings {
     foreach ($Key in $script:DefaultSettings.Keys) { $Settings[$Key] = $script:DefaultSettings[$Key] }
     if (Test-Path $script:SettingsPath) {
         try {
-            $Saved = Get-Content -Path $script:SettingsPath -Raw | ConvertFrom-Json
+            $Saved = $null
+            for ($Try = 1; $Try -le 20 -and -not $Saved; $Try++) {
+                try { $Saved = [IO.File]::ReadAllText($script:SettingsPath).TrimStart([char]0xFEFF) | ConvertFrom-Json }
+                catch [System.IO.IOException] { if ($Try -eq 20) { throw }; Start-Sleep -Milliseconds 50 }
+            }
             foreach ($Property in $Saved.PSObject.Properties) {
                 if ($Settings.Contains($Property.Name)) { $Settings[$Property.Name] = $Property.Value }
             }
@@ -224,7 +228,19 @@ function Save-PackTuneSettings {
     }
 
     New-Item -Path $script:WorkRoot -ItemType Directory -Force | Out-Null
-    $Clean | ConvertTo-Json | Set-Content -Path $script:SettingsPath -Encoding UTF8
+    # Written next to the file and moved over it, retried while another reader (a task starting up, a virus scanner) holds the file:
+    # a half-written file is never seen, and a short lock does not lose the change
+    $Text = $Clean | ConvertTo-Json
+    $Temp = "$($script:SettingsPath).$([guid]::NewGuid().ToString('N').Substring(0, 8)).tmp"
+    for ($Try = 1; $Try -le 20; $Try++) {
+        try {
+            [IO.File]::WriteAllText($Temp, $Text, (New-Object Text.UTF8Encoding $true))
+            if (Test-Path -LiteralPath $script:SettingsPath) { [IO.File]::Replace($Temp, $script:SettingsPath, [NullString]::Value) } else { [IO.File]::Move($Temp, $script:SettingsPath) }
+            break
+        }
+        catch [System.IO.IOException] { if ($Try -eq 20) { throw }; Start-Sleep -Milliseconds 50 }
+        finally { if (Test-Path -LiteralPath $Temp) { Remove-Item -LiteralPath $Temp -Force -ErrorAction SilentlyContinue } }
+    }
     $script:Settings = [pscustomobject]$Clean
     return $script:Settings
 }#Validates and saves the settings
