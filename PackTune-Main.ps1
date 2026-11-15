@@ -677,7 +677,7 @@ function Connect-PackTune {
 }#Connects to the Intune Graph API with an Entra ID app registration (sign-in in the browser)
 
 function Invoke-PackTunePkceSignIn {
-    # (Modules\Keevault.psm1 has its own Invoke-PackTuneBrowserSignIn for the embedded WebView2 sign-in)
+    # (Modules\PackTune.SignIn.psm1 has its own Invoke-PackTuneBrowserSignIn for the embedded WebView2 sign-in)
     param(
         [Parameter(Mandatory = $true)][string]$TenantID,
         [Parameter(Mandatory = $true)][string]$ClientID,

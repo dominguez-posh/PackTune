@@ -2027,7 +2027,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 [void](Get-EmbeddedToken -TenantID 'contoso.onmicrosoft.com' -ClientID '14d82eec-204b-4c2f-b7e8-296a70dab67e' -Scopes @('Application.ReadWrite.All'))
                 Test-Smoke 'setup / store grant sign-in of a Keevault run also goes through Keevault' ($script:KvCalls.Count -eq 2 -and $script:KvCalls[1][1] -eq '14d82eec-204b-4c2f-b7e8-296a70dab67e' -and $script:EmbeddedCalls.Count -eq $before)
                 $script:KeevaultSignInOverride = $null; $script:FirstSignInHow = $savedHow
-                $src = Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..\Modules\Keevault.psm1') -Raw
+                $src = Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..\Modules\PackTune.SignIn.psm1') -Raw
                 Test-Smoke 'Keevault window: passkey shim injected and cookies/process logged before the navigation' ($src -match 'AddScriptToExecuteOnDocumentCreatedAsync\(\$script:PasskeyShimScript\)' -and $src -match 'cookies before the navigation' -and $src -match 'Navigate\(\$url\)')
                 Test-Smoke 'normal sign-in uses the PackTune app registration (settings ClientID), the setup client only for creating one' ((Get-SmokeLog) -match 'Sign-in request \(PackTune app registration\): client id 11111111-2222-3333-4444-555555555555' -and $script:EmbeddedCalls[0][1] -eq $script:Settings.ClientID -and $script:EmbeddedCalls[0][1] -ne '14d82eec-204b-4c2f-b7e8-296a70dab67e')
                 # One CoreWebView2Environment per profile folder, shared by every window and the keep-alive (real WebView2 when the runtime is there)
@@ -2037,7 +2037,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                     $e1 = Get-PackTuneEnvironment $envFolder; $e2 = Get-PackTuneEnvironment $envFolder
                     Test-Smoke 'one CoreWebView2Environment per profile folder, reused by the next window and the keep-alive' ([object]::ReferenceEquals($e1, $e2) -and $e1.UserDataFolder -eq $envFolder) "$($e1.UserDataFolder)"
                 }
-                $kvSrc = Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..\Modules\Keevault.psm1') -Raw
+                $kvSrc = Get-Content (Join-Path (Split-Path $env:PACKTUNE_SMOKE) '..\Modules\PackTune.SignIn.psm1') -Raw
                 Test-Smoke 'windows and keep-alive take the shared environment; no window can stay blank (watchdog, start errors surface)' ($kvSrc -match 'EnsureCoreWebView2Async\(\$environment\)' -and $kvSrc -match 'EnsureCoreWebView2Async\(\$holdEnv\)' -and $kvSrc -match 'did not initialize in time' -and $kvSrc -notmatch 'CoreWebView2CreationProperties')
                 Test-Smoke 'sign-in diagnostics in the log: client id, prompt, hint, folder, scopes (no tokens)' ((Get-SmokeLog) -match 'Sign-in request \(PackTune app registration\): client id 11111111.*prompt default.*login_hint sent.*user data folder:.*first sign-in of this run:.*scopes:' -and (Get-SmokeLog) -notmatch 'refresh-Embedded|access_token')
                 Test-Smoke 'normal sign-in uses the embedded window by default' ($script:LastSignInPath -eq 'embedded' -and $script:EmbeddedCalls.Count -eq 1 -and $script:EmbeddedCalls[0][0] -eq 'contoso.onmicrosoft.com' -and $script:EmbeddedCalls[0][1] -eq $script:Settings.ClientID) ($script:EmbeddedCalls | ConvertTo-Json -Compress)

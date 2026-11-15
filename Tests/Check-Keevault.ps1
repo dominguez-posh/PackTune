@@ -2,9 +2,8 @@
 .SYNOPSIS
     Security checks of Modules\Keevault.psm1, which also runs elevated (AVDTune on multi-session hosts):
     (1) Keevault is started as Node only from this user's installation (or Program Files), a running Keevault counts only
-    in this session and for this user, files writable by others / wrong signature / wrong pinned hash are refused;
-    (2) the cached WebView2 SDK is checked (Microsoft signature, hashes of the checked download, permissions) on every load,
-    fail closed; (3) temporary sign-in profiles are deleted after the browser has ended (with retries), leftovers at start.
+    in this session and for this user, files writable by others / wrong signature / wrong pinned hash are refused.
+    The sign-in itself (WebView2 SDK, temporary profiles) is checked in Tests\Check-SignIn.ps1.
     No Keevault is started, nothing is downloaded, no tenant.
 .EXAMPLE
     powershell -NoProfile -ExecutionPolicy Bypass -File .\Tests\Check-Keevault.ps1
@@ -74,55 +73,9 @@ Test-Check 'pinned publisher: an unsigned Keevault.exe is refused' ($m -like '*n
 Set-KeevaultTrust -Publisher @()
 $src = Get-Content (Join-Path $repo 'Modules\Keevault.psm1') -Raw
 Test-Check 'Connect-KeevaultMcp checks the trust before it starts Keevault as Node' ($src -match "Assert-KeevaultTrust \`$kv\s+\`$psi = New-Object System\.Diagnostics\.ProcessStartInfo")
-
-# --- (2) WebView2 SDK on every load: stand-ins signed by Microsoft (System.Management.Automation.dll, renamed)
-$sma = [System.Management.Automation.PSObject].Assembly.Location
-$cache = Join-Path $env:LOCALAPPDATA 'PackTune\WebView2'; New-Item -ItemType Directory -Path $cache -Force | Out-Null
-$names = 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.Wpf.dll', 'WebView2Loader.dll'
-foreach ($n in $names) { Copy-Item $sma (Join-Path $cache $n) }
-$p = & $mod { param($c) Test-PackTuneWebView2Sdk -CacheFolder $c } $cache
-Test-Check 'no record of a checked download: not loaded' ($p -like '*no record*') $p
-$hashes = [ordered]@{}; foreach ($n in $names) { $hashes[$n] = (Get-FileHash (Join-Path $cache $n) -Algorithm SHA256).Hash }
-([ordered]@{ Version = '1.0.0'; Sha256 = $hashes } | ConvertTo-Json) | Set-Content (Join-Path $cache 'webview2-sdk.json')
-$p = & $mod { param($c) Test-PackTuneWebView2Sdk -CacheFolder $c } $cache
-Test-Check 'signed by Microsoft and the files of the checked download: loaded' ($null -eq $p) $p
-$hashes['Microsoft.Web.WebView2.Wpf.dll'] = '11' * 32
-([ordered]@{ Version = '1.0.0'; Sha256 = $hashes } | ConvertTo-Json) | Set-Content (Join-Path $cache 'webview2-sdk.json')
-$p = & $mod { param($c) Test-PackTuneWebView2Sdk -CacheFolder $c } $cache
-Test-Check 'another (still Microsoft-signed) file than the checked one: not loaded' ($p -like '*Wpf.dll is not the file of the checked download*') $p
-Copy-Item $exe (Join-Path $cache 'WebView2Loader.dll') -Force
-$hashes['Microsoft.Web.WebView2.Wpf.dll'] = (Get-FileHash (Join-Path $cache 'Microsoft.Web.WebView2.Wpf.dll') -Algorithm SHA256).Hash
-$hashes['WebView2Loader.dll'] = (Get-FileHash (Join-Path $cache 'WebView2Loader.dll') -Algorithm SHA256).Hash
-([ordered]@{ Version = '1.0.0'; Sha256 = $hashes } | ConvertTo-Json) | Set-Content (Join-Path $cache 'webview2-sdk.json')
-$p = & $mod { param($c) Test-PackTuneWebView2Sdk -CacheFolder $c } $cache
-Test-Check 'an unsigned DLL: not loaded' ($p -like '*WebView2Loader.dll is missing or not signed by Microsoft*') $p
-$m = Get-Thrown { Get-PackTuneWebView2 -CacheFolder $cache }
-Test-Check 'Get-PackTuneWebView2 fails closed: the SDK is removed, the message says to sign in again' ($m -like '*failed its check*removed*Sign in again*' -and -not (Test-Path $cache)) $m
-Test-Check 'look-alike signer names do not pass the Microsoft check' ('CN=x, O=Microsoft Corporation Evil, C=US' -notmatch '(^|,\s*)O=Microsoft Corporation(\s*,|$)' -and 'CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond' -match '(^|,\s*)O=Microsoft Corporation(\s*,|$)')
-
-# --- (3) temporary sign-in profiles
-$tmp = Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path (Join-Path $tmp 'Default\Network') -Force | Out-Null
-$cookie = Join-Path $tmp 'Default\Network\Cookies'; 'cookie' | Set-Content $cookie
-# A browser stand-in holds the cookie file for 1.5 seconds (a process this check starts and waits for)
-$holder = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', "`$f = [IO.File]::Open('$cookie', 'Open', 'Read', 'None'); Start-Sleep -Milliseconds 1500; `$f.Close()"
-Start-Sleep -Milliseconds 600
-$ok = & $mod { param($f) Remove-PackTuneTempProfile -Folder $f -BrowserPid 0 -Tries 30 -DelayMs 200 } $tmp
-Test-Check 'temporary profile: deleted with retries once the browser released the files' ($ok -and -not (Test-Path $tmp)) "ok=$ok"
-$holder.WaitForExit(); $holder.Dispose()
-$tmp2 = Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $tmp2 | Out-Null
-$browser = Start-Process powershell.exe -PassThru -WindowStyle Hidden -ArgumentList '-NoProfile', '-Command', 'Start-Sleep -Milliseconds 1200'
-$t0 = Get-Date
-$ok = & $mod { param($f, $p) Remove-PackTuneTempProfile -Folder $f -BrowserPid $p } $tmp2 $browser.Id
-Test-Check 'temporary profile: deleted after the browser process has ended (waited for it)' ($ok -and -not (Test-Path $tmp2) -and $browser.HasExited -and ((Get-Date) - $t0).TotalMilliseconds -ge 900) ((Get-Date) - $t0).TotalMilliseconds
-$browser.Dispose()
-$old = Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $old | Out-Null
-(Get-Item $old).LastWriteTime = (Get-Date).AddHours(-2)
-$fresh = Join-Path ([IO.Path]::GetTempPath()) ('PackTuneSignIn-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $fresh | Out-Null
-& $mod { Clear-PackTuneSignInLeftovers }
-Test-Check 'leftovers of earlier runs are removed at start, a profile of a running sign-in stays' (-not (Test-Path $old) -and (Test-Path $fresh))
-Remove-Item $fresh -Recurse -Force
-Test-Check 'the sign-in window deletes its temporary profile through Remove-PackTuneTempProfile (after the browser ended)' ($src -match 'Remove-PackTuneTempProfile -Folder \$userData -BrowserPid \$ctx\.BrowserPid' -and $src -match 'try \{ Clear-PackTuneSignInLeftovers \} catch')
+# Keevault builds on the sign-in module (one shared instance) and passes its functions on
+$signin = Get-Module -All PackTune.SignIn
+Test-Check 'Keevault uses the sign-in module and passes on its functions (callers that import only Keevault keep working)' ($signin -and (Get-Command Invoke-PackTuneBrowserSignIn).Module.Name -in 'Keevault', 'PackTune.SignIn' -and (Get-Command Connect-PackTuneWithKeevault).Module.Name -eq 'Keevault' -and $src -notmatch 'function Invoke-PackTuneBrowserSignIn')
 
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed) { "$script:Failed check(s) failed."; exit 1 }
