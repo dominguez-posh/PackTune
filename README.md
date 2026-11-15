@@ -94,6 +94,16 @@ A fresh Windows Sandbox plays the package through the paths Intune takes, as SYS
 
 Every step shows exit code, duration, expected and actual. The buttons per step stay in the lab window, **Run all steps** plays them in order and stops at the first unexpected result. Started from PackTune the lab runs by itself (`-AutoRun`); the summary is Passed, or Failed at step N with the cause.
 
+### Sandbox test result and the deploy gate
+
+Every sandbox test of a catalog app leaves a result for exactly that source, package, version and architecture: **Passed**, **Failed** (with the first failed step as the cause) or, for a version nobody tested, **Not tested** (a newer version is Not tested again). Only a passed verdict ends the test job as *Done*; a failed one, no verdict, a timeout or a sandbox error ends it as *Failed* (red in Activity, with the cause in the log and a red toast).
+
+- **Apps list**: each card shows *Sandbox: Passed / Failed / Not tested*; the chip *Not tested* lists the apps without a result; the details show the last result with date and cause and the Test button. **In tenant** shows the state of the deployed version in the row and in the panel.
+- **Gate**: deploying (single or several apps) or releasing a version of a catalog app that is Not tested or Failed opens a confirmation. It lists the apps with their state and needs a typed reason and the explicit button *Deploy without a passed test*. The override is logged in Activity and the day log, written to the protocol (*deployed without passed sandbox test: apps, reason, admin*) and to the notes of the Intune app (`testOverride=<state>;<date>;<admin>`). A passed test asks nothing.
+- **Command line**: the same rule in the backend. `New-PackTuneChocolateyApp`, `New-PackTuneWingetApp`, `Update-PackTuneApp` and `Publish-PackTuneRelease` refuse an app without a passed test unless `-SkipTestReason "<text>"` is given (logged and written to the notes the same way). A changed update policy alone needs no test.
+- **Where results live**: `%LOCALAPPDATA%\PackTune\sandbox-tests.json` and, when the package store is set up, the folder `SandboxTests` of its library (read at start, the newer record of a key wins).
+- **Custom applications** keep their own hard gate (test of exactly the built package, no override): see *Custom applications*.
+
 ### Review and deploy
 
 ![Review and deploy](docs/screenshots/deploy.png)
@@ -369,6 +379,7 @@ Run in Windows PowerShell 5.1 from the repository folder. None of them contacts 
 - `Tests\Check-StoreSite.ps1`: the standard store site (address from the initial domain, discovery found / no access / missing, the one-time setup against a fake Graph with polling, members, library and grant, the conflicts).
 - `Tests\Check-Sandbox.ps1`: the sandbox module without a sandbox (the lab sequence and its stop-on-unexpected verdict, fake launcher, a real single-use certificate that is removed again, fake signtool, toolchain hashes, entry point rules, registry restore of the update capture). `Tests\Check-Custom.ps1`, `Check-CustomMsix.ps1`, `Check-Store.ps1`: custom applications (MSI read from a Property table, the device scripts, certificate per version made and removed around the capture, deployment, new version, export, delete) and the package store against a fake SharePoint in memory (upload sessions, manifest, tamper tests, zip slip). `Tests\Spike-MsixWin32.ps1` runs the MSIX install, detect, failed-update restore, update and uninstall scripts as SYSTEM in Windows Sandbox.
 - `Tests\Check-ExitCodes.ps1`: the exit code table (unique, clear of Intune's defaults), the codes in the generated device scripts, what the device helpers make of choco and winget results, the causes in PackTune and the insight module, the README table, the device script revision.
+- `Tests\Check-TestGate.ps1`: the test results per version, the backend gate for deploy, winget and release, the override notes, the package store copy and sync.
 - `Tests\Check-PreExisting.ps1`: software that was on the device before PackTune (detection with test keys under `HKCU` and a temp folder: machine-wide MSI and EXE, per-user copies, the record, adoption, the uninstall decision for both settings, the status script flags and what the device table reads from them, the setting in policy, fingerprint and notes, the generated install scripts).
 - `Tests\Check-Sources.ps1`: recommended source, source filter, deployment per source, PackTune Runtime dependency and migration, release by supersedence or in place.
 

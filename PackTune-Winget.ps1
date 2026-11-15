@@ -532,7 +532,9 @@ function New-PackTuneWingetApp {
         [string]$Version,
         [string]$IconFile,
         [string]$IconBase64,
-        [switch]$NoIconPrompt
+        [switch]$NoIconPrompt,
+        # Deploys an app that has no passed sandbox test (not tested, or failed) anyway: the reason is logged and written to the app notes
+        [string]$SkipTestReason
     )
 
     begin {
@@ -580,6 +582,9 @@ function New-PackTuneWingetApp {
                         $Version
                     }
                 }
+                # The deploy gate: only a version with a passed sandbox test goes out, otherwise only with a reason
+                $TestOverride = Assert-PackTuneCatalogTested -Source Winget -Package $Id -Version $(if ($PinnedVersion) { $PinnedVersion } else { [string]$Infos.Version }) -Architecture $Architecture -SkipTestReason $SkipTestReason
+                if ($TestOverride) { Write-Warning $TestOverride.Text }
                 $Policy = New-PackTuneAppPolicy -Package $Id -Version $PinnedVersion -UpdateMode $UpdateMode -GraceHours $GraceHours `
                     -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes -Schedule $Schedule -UninstallScope $UninstallScope
                 Write-Host ("Version: {0}, updates: {1}" -f $(if ($PinnedVersion) { $PinnedVersion } else { "always the latest" }), (Format-PackTuneUpdateMode $Policy))
@@ -603,7 +608,7 @@ function New-PackTuneWingetApp {
                     Description          = $Description
                     Publisher            = $(if ($Infos.Authors) { $Infos.Authors } else { "-" })
                     AppVersion           = $(if ($PinnedVersion) { $PinnedVersion } else { "latest" })
-                    Notes                = ConvertTo-PackTuneAppNotes -Policy $Policy -Marker $script:WingetMarker
+                    Notes                = ConvertTo-PackTuneAppNotes -Policy $Policy -Marker $script:WingetMarker -ExtraNotes $(if ($TestOverride) { $TestOverride.Note })
                     InstallExperience    = "system"
                     RestartBehavior      = "suppress"
                     DetectionRule        = $DetectionRule

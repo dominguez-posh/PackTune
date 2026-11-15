@@ -19,6 +19,8 @@ function Test-Check([string]$Name, $Ok, $Detail) {
 }
 
 . (Join-Path $repo 'PackTune-Main.ps1')
+# The deploy gate (tested sandbox result or a reason) has its own checks in Check-TestGate.ps1; here the deployment paths are the subject
+function Assert-PackTuneCatalogTested { $null }
 Import-Module IntuneWin32App -Force
 
 # Signed in (fake token), stand-ins for everything that would reach the network

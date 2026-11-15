@@ -147,7 +147,9 @@ function Publish-PackTuneSupersedingApp {
         # Exact version, or "latest" to follow the newest version again
         [string]$Version,
         [ValidateSet("Off", "Startup", "Custom")][string]$UpdateMode,
-        [ValidateRange(1, 2160)][int]$GraceHours
+        [ValidateRange(1, 2160)][int]$GraceHours,
+        # Releases a version that has no passed sandbox test anyway: the reason is logged and written to the app notes
+        [string]$SkipTestReason
     )
     $Old = Invoke-IntuneModule { Get-IntuneWin32App -ID $AppId }
     if ($null -eq $Old) { throw "App $AppId was not found in Intune" }
@@ -160,6 +162,13 @@ function Publish-PackTuneSupersedingApp {
     if ($NewVersion -eq "latest") { $NewVersion = "" }
     if ($NewVersion -and ($NewVersion -notin $(if ($IsWinget) { Get-WingetPackageVersions -WingetId $Package } else { Get-ChocoPackageVersions -ChocoName $Package }))) {
         throw "Version $NewVersion of $Package does not exist on $(if ($IsWinget) { 'the winget source' } else { $script:Settings.MetadataFeed })"
+    }
+    # The deploy gate for a released version (a changed update policy alone needs no test)
+    $TestOverride = $null
+    if ($NewVersion -and $NewVersion -ne $Current.Version) {
+        $OldArchitecture = ConvertTo-PackTuneArchitecture $Old
+        $TestOverride = Assert-PackTuneCatalogTested -Source $(if ($IsWinget) { "Winget" } else { "Chocolatey" }) -Package $Package -Version $NewVersion -Architecture $(if ($OldArchitecture) { $OldArchitecture } else { $script:Settings.Architecture }) -SkipTestReason $SkipTestReason
+        if ($TestOverride) { Write-Warning $TestOverride.Text }
     }
     $NewMode = if ($UpdateMode) { $UpdateMode } else { $Current.UpdateMode }
     $NewGrace = if ($PSBoundParameters.ContainsKey("GraceHours")) { $GraceHours } else { $Current.GraceHours }
@@ -191,7 +200,7 @@ function Publish-PackTuneSupersedingApp {
         Description          = $(if ($Old.description) { $Old.description } else { $Old.displayName })
         Publisher            = $(if ($Old.publisher) { $Old.publisher } else { "-" })
         AppVersion           = $(if ($NewVersion) { $NewVersion } else { "latest" })
-        Notes                = ConvertTo-PackTuneAppNotes -Policy $Policy -Marker $(if ($IsWinget) { $script:WingetMarker } else { $script:AppMarker })
+        Notes                = ConvertTo-PackTuneAppNotes -Policy $Policy -Marker $(if ($IsWinget) { $script:WingetMarker } else { $script:AppMarker }) -ExtraNotes $(if ($TestOverride) { $TestOverride.Note })
         InstallExperience    = "system"
         RestartBehavior      = "suppress"
         DetectionRule        = $DetectionRule
@@ -223,14 +232,16 @@ function Publish-PackTuneRelease {
         [string]$Version,
         [ValidateSet("Off", "Startup", "Custom")][string]$UpdateMode,
         [ValidateRange(1, 2160)][int]$GraceHours,
-        [ValidateSet("Auto", "InPlace", "Supersedence")][string]$Path = "Auto"
+        [ValidateSet("Auto", "InPlace", "Supersedence")][string]$Path = "Auto",
+        # Releases a version that has no passed sandbox test anyway: the reason is logged and written to the app notes
+        [string]$SkipTestReason
     )
     Assert-PackTunePrerequisites
     Assert-PackTuneConnection
     Update-PackTuneToken
     $Way = if ($Path -eq "Auto") { Get-PackTuneReleasePath -AppId $AppId } else { $Path }
     $Arguments = @{ AppId = $AppId }
-    foreach ($Name in "Version", "UpdateMode", "GraceHours") { if ($PSBoundParameters.ContainsKey($Name)) { $Arguments[$Name] = $PSBoundParameters[$Name] } }
+    foreach ($Name in "Version", "UpdateMode", "GraceHours", "SkipTestReason") { if ($PSBoundParameters.ContainsKey($Name)) { $Arguments[$Name] = $PSBoundParameters[$Name] } }
     if ($Way -eq "Supersedence") {
         $NewId = Publish-PackTuneSupersedingApp @Arguments
         return [pscustomobject]@{ Path = "Supersedence"; AppId = $NewId; OldAppId = $AppId }

@@ -535,7 +535,7 @@ function ConvertTo-PackTuneAppNotes {
         grace, source, delay: older tool versions still read them), then ";cfg=" with the whole schedule as
         versioned compact JSON (base64url). ConvertFrom-PackTuneAppNotes is the only reader.
     #>
-    param([Parameter(Mandatory = $true)]$Policy, [string]$Marker = $script:AppMarker)
+    param([Parameter(Mandatory = $true)]$Policy, [string]$Marker = $script:AppMarker, [string]$ExtraNotes)
     $Version = if ($Policy.Version) { $Policy.Version } else { "latest" }
     # The marker only says the source here (callers pass the old constants); what is written is the current marker
     $From = if ($Marker -eq $script:WingetMarker -or $Marker -match 'from=winget') { "Winget" } else { "Chocolatey" }
@@ -544,6 +544,8 @@ function ConvertTo-PackTuneAppNotes {
     if ($Policy.Schedule) { $Notes += ";cfg=$(ConvertTo-ChocoScheduleCfg $Policy.Schedule)" }
     # Only the non-default value is written: "remove also a pre-existing installation" on uninstall
     if ($Policy.UninstallScope -eq "All") { $Notes += ";uninstall=all" }
+    # Written by the deploy gate when an app went out without a passed sandbox test: testOverride=<state>;<date>;<admin>
+    if ($ExtraNotes) { $Notes += ";$ExtraNotes" }
     if ($Notes.Length -ge $script:NotesMaxLength) { throw "The notes of the app would be $($Notes.Length) characters long (limit used: $($script:NotesMaxLength)). Shorten the package source or the process names." }
     return $Notes
 }#Notes of the Intune app (read back by ConvertFrom-PackTuneAppNotes)
@@ -2836,7 +2838,9 @@ function New-PackTuneChocolateyApp {
         [string]$Version,
         [string]$IconFile,
         [string]$IconBase64,
-        [switch]$NoIconPrompt
+        [switch]$NoIconPrompt,
+        # Deploys an app that has no passed sandbox test (not tested, or failed) anyway: the reason is logged and written to the app notes
+        [string]$SkipTestReason
     )
 
     begin {
@@ -2895,6 +2899,9 @@ function New-PackTuneChocolateyApp {
                         $Version
                     }
                 }
+                # The deploy gate: only a version with a passed sandbox test goes out, otherwise only with a reason
+                $TestOverride = Assert-PackTuneCatalogTested -Source Chocolatey -Package $Name -Version $(if ($PinnedVersion) { $PinnedVersion } else { [string]$Infos.Version }) -Architecture $Architecture -SkipTestReason $SkipTestReason
+                if ($TestOverride) { Write-Warning $TestOverride.Text }
                 $Policy = New-PackTuneAppPolicy -Package $Name -Version $PinnedVersion -UpdateMode $UpdateMode -GraceHours $GraceHours `
                     -PackageSource $PackageSource -UpdateDelayMinMinutes $UpdateDelayMinMinutes -UpdateDelayMaxMinutes $UpdateDelayMaxMinutes -Schedule $Schedule -UninstallScope $UninstallScope
                 Write-Host ("Version: {0}, updates: {1}" -f $(if ($PinnedVersion) { $PinnedVersion } else { "always the latest" }), (Format-PackTuneUpdateMode $Policy))
@@ -2916,7 +2923,7 @@ function New-PackTuneChocolateyApp {
                     Description          = $Infos.Description
                     Publisher            = $(if ($Infos.Authors) { $Infos.Authors } else { "-" })
                     AppVersion           = $(if ($PinnedVersion) { $PinnedVersion } else { "latest" })
-                    Notes                = ConvertTo-PackTuneAppNotes $Policy
+                    Notes                = ConvertTo-PackTuneAppNotes $Policy -ExtraNotes $(if ($TestOverride) { $TestOverride.Note })
                     InstallExperience    = "system"
                     RestartBehavior      = "suppress"
                     DetectionRule        = $DetectionRule
@@ -3016,7 +3023,9 @@ function Update-PackTuneApp {
         # PackTune / All: what an uninstall removes (see New-PackTuneAppPolicy); without it the value of the app stays
         [ValidateSet("PackTune", "All")][string]$UninstallScope,
         # Schedule values to change (hashtable of New-ChocoSchedule values, may be partial); the others stay as they are
-        $Schedule
+        $Schedule,
+        # Releases a version that has no passed sandbox test anyway: the reason is logged and written to the app notes
+        [string]$SkipTestReason
     )
     Assert-PackTunePrerequisites
     Assert-PackTuneConnection
@@ -3033,6 +3042,12 @@ function Update-PackTuneApp {
     if ($NewVersion -eq "latest") { $NewVersion = "" }
     if ($NewVersion -and ($NewVersion -notin $(if ($IsWinget) { Get-WingetPackageVersions -WingetId $Package } else { Get-ChocoPackageVersions -ChocoName $Package }))) {
         throw "Version $NewVersion of $Package does not exist on $(if ($IsWinget) { 'the winget source' } else { $script:Settings.MetadataFeed })"
+    }
+    # The deploy gate for a released version (a changed update policy alone needs no test)
+    $TestOverride = $null
+    if ($NewVersion -and $NewVersion -ne $Current.Version) {
+        $TestOverride = Assert-PackTuneCatalogTested -Source $(if ($IsWinget) { "Winget" } else { "Chocolatey" }) -Package $Package -Version $NewVersion -Architecture $(if (ConvertTo-PackTuneArchitecture $App) { ConvertTo-PackTuneArchitecture $App } else { $script:Settings.Architecture }) -SkipTestReason $SkipTestReason
+        if ($TestOverride) { Write-Warning $TestOverride.Text }
     }
     $NewMode = if ($UpdateMode) { $UpdateMode } else { $Current.UpdateMode }
     $NewGrace = if ($PSBoundParameters.ContainsKey("GraceHours")) { $GraceHours } else { $Current.GraceHours }
@@ -3061,7 +3076,7 @@ function Update-PackTuneApp {
     Invoke-IntuneModule { Update-IntuneWin32AppPackageFile -ID $AppId -FilePath $IntuneWinFile.Path } | Out-Null
     Write-Host "Updating detection rule, version and notes"
     $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }
-    $Notes = ConvertTo-PackTuneAppNotes -Policy $Policy -Marker $(if ($IsWinget) { $script:WingetMarker } else { $script:AppMarker })
+    $Notes = ConvertTo-PackTuneAppNotes -Policy $Policy -Marker $(if ($IsWinget) { $script:WingetMarker } else { $script:AppMarker }) -ExtraNotes $(if ($TestOverride) { $TestOverride.Note })
     Invoke-IntuneModule { Set-IntuneWin32App -ID $AppId -DetectionRule @($DetectionRule) -Notes $Notes -AppVersion $(if ($NewVersion) { $NewVersion } else { "latest" }) } | Out-Null
     Write-Host "Done: devices apply it at their next Intune check (or startup)."
     $AppId
@@ -3173,7 +3188,13 @@ exit $LASTEXITCODE
     Write-Host "Opening the test lab in Windows Sandbox for $($Info.Title): detect, install$(if ($FromVersion) { " (version $FromVersion first, then the update)" }), detect, uninstall, detect"
     $Result = Start-PackTuneWin32Lab -DisplayName "$($Info.Title) ($Source)" -Version $(if ($Version) { $Version } else { $Info.Version }) -SourcePath $LabFiles -AutoRun:$AutoRun @LabParams
     Write-Host "Test result: $($Result.Verdict). $($Result.Message)"
-    [pscustomobject]@{ Package = $Package; Source = $Source; Verdict = $Result.Verdict; Message = $Result.Message; JobPath = $Result.JobPath }
+    # Kept per source, package, version and architecture: the app list shows it and the deploy gate reads it
+    $TestedVersion = if ($Version -and $Version -ne "latest") { $Version } else { [string]$Info.Version }
+    if ($TestedVersion) {
+        try { $null = Save-PackTuneCatalogTest -Source $Source -Package $Package -Version $TestedVersion -Verdict $(if ($Result.Verdict -eq "Passed") { "Passed" } else { "Failed" }) -Cause $(if ($Result.Verdict -eq "Passed") { "" } else { [string]$Result.Message }) -UpdatePath ([bool]$FromVersion) }
+        catch { Write-Warning "The test result could not be kept: $($_.Exception.Message)" }
+    }
+    [pscustomobject]@{ Package = $Package; Source = $Source; Version = $TestedVersion; Verdict = $Result.Verdict; Message = $Result.Message; JobPath = $Result.JobPath }
 }#Tests a package in Windows Sandbox (test lab of PackTune)
 
 function Get-PackTuneTenantApps {
@@ -3274,6 +3295,7 @@ function New-PackTuneAppFromCatalog {
 . (Join-Path $PSScriptRoot "PackTune-Tray.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Release.ps1")
 . (Join-Path $PSScriptRoot "PackTune-ExitCodes.ps1")
+. (Join-Path $PSScriptRoot "PackTune-TestGate.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Custom.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Store.ps1")
 . (Join-Path $PSScriptRoot "PackTune-Protocol.ps1")
@@ -3286,9 +3308,11 @@ Import-Module (Join-Path $PSScriptRoot "Modules\PackTune.Sandbox.psm1") -Force -
 
 # Tenant insight (import of existing apps, install status): own module, gets the functions it needs from here
 Import-Module (Join-Path $PSScriptRoot "Modules\TenantInsight.psm1") -Force -Global
+# An import recreates apps another tenant (or an export) already runs: no sandbox test of this tenant exists, so each is deployed with a reason that is written to its notes
 Set-TenantInsightHooks -Markers @{ Tool = $script:AppMarker; Winget = $script:WingetMarker; ChocolateyApp = $script:ChocoAppMarker; PackTune = $script:ToolMarker } `
     -ConvertFromNotes ${function:ConvertFrom-PackTuneAppNotes} -ConvertToNotes ${function:ConvertTo-PackTuneAppNotes} -NewPolicy ${function:New-PackTuneAppPolicy} `
-    -NewChocoApp ${function:New-PackTuneChocolateyApp} -NewWingetApp ${function:New-PackTuneWingetApp} -SignIn ${function:Invoke-PackTunePkceSignIn}
+    -NewChocoApp { param([string]$ChocoName, [string]$PackageSource, [string]$Assignment, [string]$UpdateMode, [int]$GraceHours, [string]$Version, [bool]$NoIconPrompt) $Bound = @{} + $PSBoundParameters; $Bound.Remove('NoIconPrompt'); New-PackTuneChocolateyApp @Bound -NoIconPrompt:$NoIconPrompt -SkipTestReason 'recreated by an import' } `
+    -NewWingetApp { param([string]$WingetId, [string]$Assignment, [string]$UpdateMode, [int]$GraceHours, [string]$Version, [bool]$NoIconPrompt) $Bound = @{} + $PSBoundParameters; $Bound.Remove('NoIconPrompt'); New-PackTuneWingetApp @Bound -NoIconPrompt:$NoIconPrompt -SkipTestReason 'recreated by an import' } -SignIn ${function:Invoke-PackTunePkceSignIn}
 
 # Tests: the package store is a fake in memory (file given by the environment variable)
 if ($env:PACKTUNE_FAKE_STORE -and (Test-Path -LiteralPath $env:PACKTUNE_FAKE_STORE)) { . $env:PACKTUNE_FAKE_STORE }
