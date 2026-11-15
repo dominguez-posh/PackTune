@@ -242,7 +242,7 @@ Every update setting (version, mode, grace period, package source, delays, sched
 
 ### Exit codes of the device scripts
 
-Intune's Win32 install status shows the exit code of `install.ps1` per device and app. So that the code says why, every install, update and uninstall script exits with a PackTune code (61001 to 61099) for its own causes. They are clear of Intune's default return codes (0 and 1707 success, 3010 soft reboot, 1641 hard reboot, 1618 retry) and are never added to an app's return code list, so Intune counts each as a failure. `1618` stays the code for "another installation runs on the device" (the mutex wait). When an installer, choco or winget fails without a more specific cause, the script exits with its real exit code (1603, 0x8A15..., ...); PackTune turns the common ones into a short text.
+Intune's Win32 install status shows the exit code of `install.ps1` per device and app. So that the code says why, every install, update and uninstall script exits with a PackTune code (61001 to 61099) for its own causes. They are clear of Intune's default return codes (0 and 1707 success, 3010 soft reboot, 1641 hard reboot, 1618 retry) and are never added to an app's return code list, so Intune counts each as a failure. `1618` stays the code for "another installation runs on the device" (the mutex wait). When an installer, choco or winget fails without a more specific cause, the script exits with its real exit code (1603, 0x8A15..., ...); PackTune turns the common ones into a short text. A failed path never exits with a code of Intune's default return code list: if the installer returns 1618 or 1707 there, the script exits with 61017 instead (0, 3010 and 1641 are successes of the installer and never reach a failed path).
 
 | Code | Name | Cause |
 | --- | --- | --- |
@@ -256,6 +256,7 @@ Intune's Win32 install status shows the exit code of `install.ps1` per device an
 | 61014 | DiskFull | not enough free disk space |
 | 61015 | PackageManagerFailed | choco reported a failure without a more specific cause (see the device log) |
 | 61016 | NoMachineInstaller | the package has no installer for all users of the device (machine scope) |
+| 61017 | InstallerReservedCode | the installer failed but returned 1618 or 1707, which Intune counts as retry or success |
 | 61020 | FolderProtect | the PackTune folder on the device could not be protected |
 | 61021 | HelpersCopy | the update helpers could not be copied on the device |
 | 61022 | TaskRegister | the update tasks could not be registered on the device |
@@ -264,7 +265,9 @@ Intune's Win32 install status shows the exit code of `install.ps1` per device an
 
 The table lives in one place, `PackTune-ExitCodes.ps1`: the device scripts get it as text and PackTune reads the causes from it (`Tests\Check-ExitCodes.ps1` checks that both agree and that this table is complete). The causes of choco come from its output (not found, unreachable, checksum, download, disk space); the winget ones from its documented results (`0x8A150008`, `0x8A15000F`, `0x8A150010`, `0x8A150011`, `0x8A150014`).
 
-**Upgrading:** the codes change the device scripts, so the device script revision is raised to 10. That changes the policy fingerprint of every app: devices run install.ps1 once more after the update (nothing is reinstalled, the update tasks and the marker are written again).
+**Failing updates reach Intune too.** Periodic updates run in a scheduled task (`update.ps1`), so Intune never sees their exit code. `update.ps1` writes the same cause codes into `last-result.json` (with `failures`, `firstFailure` and `retry`). When the last update attempt of an installed app failed three times in a row over at least a day, the last one at least six hours ago (a failed attempt only, not a wait for a condition, the time window or the user's deadline; not when the retry setting is *None*), the detection rule reports the app as not detected. Intune then runs `install.ps1`, which tries the update again through `update.ps1` (its conditions, time window and retry setting apply; nothing is reinstalled or uninstalled) and exits with the cause code. A successful update clears it and the app is detected again; the six hour minimum keeps it from looping.
+
+**Upgrading:** the codes change the device scripts, so the device script revision is raised (now 11). That changes the policy fingerprint of every app: devices run install.ps1 once more after the update (nothing is reinstalled, the update tasks and the marker are written again).
 
 ### One operation at a time
 

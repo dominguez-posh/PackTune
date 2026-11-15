@@ -97,7 +97,7 @@ $script:DefaultSettings = [ordered]@{
 }
 $script:UpdateModes = "Off", "Startup", "Custom"
 # Raised whenever the device scripts change in a way devices must pick up (it is part of the policy fingerprint)
-$script:DeviceScriptRevision = 10
+$script:DeviceScriptRevision = 11
 # Longest random delay of the update tasks that is read back from the notes (one week)
 $script:MaxDelayMinutes = 10080
 
@@ -1043,6 +1043,20 @@ function Get-FeedText {
 
 function Invoke-ChocoFeed {
     param([Parameter(Mandatory = $true)][string]$Query)
+    # Test hook (the GUI smoke must not need the internet): packages of a fixture file are answered from it, everything else as usual
+    if ($env:PACKTUNE_FEED_FIXTURE -and (Test-Path -LiteralPath $env:PACKTUNE_FEED_FIXTURE)) {
+        $FixId = if ($Query -match "(?i)(?:id='|Id%20eq%20')([^']+)'") { [uri]::UnescapeDataString($Matches[1]).ToLower() }
+        $Hits = @(@((Get-Content -LiteralPath $env:PACKTUNE_FEED_FIXTURE -Raw | ConvertFrom-Json)) | Where-Object { $FixId -and ([string]$_.Name).ToLower() -eq $FixId })
+        if ($Hits.Count) {
+            foreach ($H in $Hits) {
+                if ($Query -match 'IsLatestVersion' -and -not $H.IsLatest) { continue }
+                [pscustomobject]@{ Name = [string]$H.Name; Title = [string]$H.Title; Version = [string]$H.Version; Summary = [string]$H.Summary; Description = [string]$H.Description
+                    Authors = [string]$H.Authors; SoftwareSite = [string]$H.SoftwareSite; SoftwareLicense = ''; IconUrl = ''; Downloads = '1000'; Tags = [string]$H.Tags
+                    IsLatest = [bool]$H.IsLatest; LicenseNote = Get-ChocoLicenseNote ([string]$H.Name) }
+            }
+            return
+        }
+    }
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $Uri = if ($Query -match '^https?://') { $Query } else { $script:Settings.MetadataFeed.TrimEnd("/") + "/" + $Query }
     # The community feed limits requests: on 429, 503 or a timeout wait (Retry-After, else 5, 10, 20 s) and ask again
@@ -1451,7 +1465,7 @@ function Get-ChocoIconBase64 {
 function Get-DeviceScriptCommon {
     # Functions of install.ps1 and update.ps1, for Chocolatey and winget apps: the device wide lock and the protected
     # folders of the update helpers (both run as SYSTEM)
-    return (Get-DeviceExitCodeBlock) + @'
+    return (Get-DeviceExitCodeBlock) + (Get-DeviceRetryCheckText) + @'
 # Every folder of this tool on the device is under %ProgramFiles%\PackTune: Chocolatey\<package>, Winget\<id>,
 # Winget\Logs, Runtime. Before the rename it was %ProgramFiles%\IntuneChocoDeployment ($OldToolRoot): install.ps1 and the
 # runtime remove their part of it (Remove-OldToolFolder), nothing else touches it. Users cannot create anything in %ProgramFiles%, so no user can prepare
@@ -1685,13 +1699,28 @@ function Write-DeviceLog([string]$Text) {
 #   cause             short text, e.g. "ok", "up to date", "waiting: on battery", "failed: exit code 1603"
 #   installedVersion  installed version after the attempt, "" when unknown
 #   targetVersion     version aimed at (pinned version or newest known), "" when unknown
+#   failures          failed attempts of this action in a row (0 when the last attempt did not fail)
+#   firstFailure      time of the first failed attempt of that row, "" when none
+#   retry             false when the app's retry setting is "None": Intune must not run install.ps1 again for a failing update
 # $ResultFile is set by the scripts once the folder is protected.
 function Save-LastResult([string]$Action, [string]$Status, [int]$ExitCode, [string]$Cause, [string]$Installed = "", [string]$Target = "") {
     if (-not $ResultFile) { return }
     $Clean = { param($Text) $Short = ([string]$Text -replace '[^\x20-\x7E]', '?'); if ($Short.Length -gt 120) { $Short.Substring(0, 120) } else { $Short } }
     try {
+        # Failed attempts in a row (same action): the detection rule asks for a new run of install.ps1 only when an update keeps failing
+        $Failures = 0; $First = ""
+        if ($Status -eq "failed") {
+            $Failures = 1; $First = (Get-Date).ToString("o")
+            try {
+                $Old = Get-Content -LiteralPath $ResultFile -Raw | ConvertFrom-Json
+                if ($Old.status -eq "failed" -and $Old.action -eq $Action -and $Old.firstFailure) { $Failures = [int]$Old.failures + 1; $First = [string]$Old.firstFailure }
+            }
+            catch { }
+        }
+        $RetryOk = if (Get-Variable -Name RetryViaIntune -ErrorAction SilentlyContinue) { [bool]$RetryViaIntune } else { $true }
         $Result = [ordered]@{ format = 1; package = (& $Clean $LogId); lastAttempt = (Get-Date).ToString("o"); action = $Action; status = $Status
-            exitCode = $ExitCode; cause = (& $Clean $Cause); installedVersion = (& $Clean $Installed); targetVersion = (& $Clean $Target) }
+            exitCode = $ExitCode; cause = (& $Clean $Cause); installedVersion = (& $Clean $Installed); targetVersion = (& $Clean $Target)
+            failures = $Failures; firstFailure = $First; retry = $RetryOk }
         Write-ProtectedFile $ResultFile ($Result | ConvertTo-Json -Compress)
     }
     catch { }
@@ -1823,6 +1852,7 @@ function Get-DeviceUpdateCommon {
     # Get-PendingUpdate (Pending, Installed, Target), Get-InstalledText and Invoke-SourceMaintenance.
     return @'
 $S = $Config.Schedule
+$RetryViaIntune = $S.RetryMode -ne "None"
 $TaskId = $Config.TaskId
 $LogTag = "$Mode/$Trigger"
 $ResultFile = Join-Path $PSScriptRoot "last-result.json"
@@ -2282,6 +2312,7 @@ $LogId = $Package -replace '[^A-Za-z0-9._-]', '_'
 $LogTag = if ($Uninstall) { "uninstall" } else { "install" }
 $ResultFile = ""
 $Sched = $ScheduleJson | ConvertFrom-Json
+$RetryViaIntune = $Sched.RetryMode -ne "None"
 function Remove-UpdateTasks {
     foreach ($Name in $TaskNames) {
         Unregister-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Confirm:$false -ErrorAction SilentlyContinue
@@ -2313,7 +2344,7 @@ if ($Uninstall) {
     }
     # Tasks, helpers and marker only go when the software is gone; otherwise Intune reports the error and retries
     Write-DeviceLog "choco uninstall $Package exit code $ExitCode"
-    if ($ExitCode -notin 0, 1605, 1614, 1641, 3010) { Write-Output "choco uninstall failed with exit code $ExitCode"; exit $ExitCode }
+    if ($ExitCode -notin 0, 1605, 1614, 1641, 3010) { Write-Output "choco uninstall failed with exit code $ExitCode"; exit (Resolve-PackageFailure $ExitCode "") }
     Remove-UpdateTasks
     try { Remove-ItemSafely $AppRoot } catch { Write-Output "$AppRoot could not be removed: $($_.Exception.Message)" }
     Remove-OldToolFolder "Chocolatey\$Package"
@@ -2387,6 +2418,16 @@ catch {
     exit $PTExit.TaskRegister
 }
 
+# An update that keeps failing (update.ps1 runs as a task, Intune never sees it) is tried again here, through update.ps1: its conditions, time
+# window, retry setting and the user's deadline still apply; nothing is reinstalled. A failure exits with the cause code, success clears it.
+if ($Installed -and $Mode -ne "Off" -and (Test-UpdateRetryDue $ResultFile)) {
+    Write-Output "The last updates of $Package failed repeatedly, trying the update again"
+    Write-DeviceLog "update failed repeatedly, retried by Intune"
+    & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File (Join-Path $AppRoot "update.ps1") -Mode Startup -Trigger Retry
+    $RetryCode = $LASTEXITCODE
+    if ($RetryCode -notin 0, 1641, 3010) { exit $RetryCode }
+}
+
 # The detection rule compares this marker with the policy in Intune
 try { Write-ProtectedFile (Join-Path $AppRoot "policy.txt") $Policy }
 catch { Write-Output "The policy marker could not be written: $($_.Exception.Message)"; exit $PTExit.PolicyWrite }
@@ -2450,12 +2491,12 @@ function Invoke-SourceMaintenance {
     }
 }
 function Invoke-Upgrade {
-    if (-not (Enter-DeploymentLock)) { Write-Log "another choco or winget installation is still running, next try later"; return 1618 }
+    if (-not (Enter-DeploymentLock)) { Write-Log "another choco or winget installation is still running, next try later"; return (Get-LockExitCode) }
     try {
         $VersionArguments = @()
         if ($Config.Version) { $VersionArguments = @("--version", $Config.Version, "--allow-downgrade") }
-        & $Choco upgrade $Package -y --no-progress @VersionArguments @SourceArguments | Out-Null
-        $Code = $LASTEXITCODE
+        $ChocoOutput = (& $Choco upgrade $Package -y --no-progress @VersionArguments @SourceArguments 2>&1 | Out-String)
+        $Code = Resolve-PackageFailure $LASTEXITCODE $ChocoOutput
     }
     finally { Exit-DeploymentLock }
     Write-Log "choco upgrade $Package exit code $Code"
@@ -2520,7 +2561,10 @@ if (-not $ChocoRoot) { $ChocoRoot = Join-Path $env:ProgramData "chocolatey" }
 # Installed, and with the update policy that is set in Intune (otherwise Intune runs install.ps1 again to apply it)
 $ProgramFilesDir = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
 $Marker = Join-Path $ProgramFilesDir "PackTune\Chocolatey\$Package\policy.txt"
+__RETRYCHECK__
 if ((Test-Path (Join-Path $ChocoRoot "lib\$Package\$Package.nuspec")) -and (Test-Path $Marker) -and ((Get-Content -Path $Marker -Raw).Trim() -eq $Policy)) {
+    # Installed, but its updates keep failing: not detected, Intune runs install.ps1, which retries the update and reports the cause
+    if (Test-UpdateRetryDue (Join-Path $ProgramFilesDir "PackTune\Chocolatey\$Package\last-result.json")) { Write-Output "$Package is installed, but its last updates failed repeatedly"; exit 1 }
     Write-Output "$Package is installed (update policy $Policy)"
     exit 0
 }
@@ -2540,7 +2584,7 @@ exit 1
     $InstallScript = $InstallScript.Replace("__VERSION__", (& $Quote $Policy.Version)).Replace("__MODE__", $Policy.UpdateMode).Replace("__GRACE__", [string][int]$Policy.GraceHours)
     $InstallScript = $InstallScript.Replace("__DISPLAYNAME__", (& $Quote $DisplayName)).Replace("__POLICY__", $Policy.Fingerprint)
     $InstallScript = $InstallScript.Replace("__DELAYMIN__", [string]$Policy.UpdateDelayMinMinutes).Replace("__DELAYMAX__", [string]$Policy.UpdateDelayMaxMinutes)
-    $DetectionScript = $DetectionScript.Replace("__PACKAGE__", $ChocoName).Replace("__POLICY__", $Policy.Fingerprint)
+    $DetectionScript = $DetectionScript.Replace("__RETRYCHECK__", (Get-DeviceRetryCheckText)).Replace("__PACKAGE__", $ChocoName).Replace("__POLICY__", $Policy.Fingerprint)
 
     Set-Content -Path (Join-Path $SourcePath "install.ps1") -Value $InstallScript -Encoding ASCII
     Set-Content -Path (Join-Path $SourcePath "update.ps1") -Value $UpdateScript -Encoding ASCII

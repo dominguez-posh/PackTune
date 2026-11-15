@@ -44,6 +44,13 @@ $fixture = Join-Path $OutDir 'popular-fixture.json'
     @{ Name = 'zzzapp'; Title = 'ZZZ App'; Version = '1.0'; Downloads = '100'; Tags = 'zzz'; Authors = 'Nobody'; SoftwareSite = 'https://example.org'; Description = 'App' }
 ) | ConvertTo-Json | Set-Content $fixture -Encoding UTF8
 
+# Packages the sandbox test steps ask the feed about (info and versions), answered from this file instead of the internet
+$feedFixture = Join-Path $OutDir 'feed-fixture.json'
+@(
+    @{ Name = 'putty.install'; Title = 'PuTTY (Install)'; Version = '0.85.0'; IsLatest = $true; Summary = 'SSH client'; Description = 'SSH and telnet client'; Authors = 'Simon Tatham'; SoftwareSite = 'https://www.chiark.greenend.org.uk/~sgtatham/putty/'; Tags = 'ssh putty' }
+    @{ Name = 'putty.install'; Title = 'PuTTY (Install)'; Version = '0.78.0'; IsLatest = $false; Summary = 'SSH client'; Description = 'SSH and telnet client'; Authors = 'Simon Tatham'; SoftwareSite = 'https://www.chiark.greenend.org.uk/~sgtatham/putty/'; Tags = 'ssh putty' }
+) | ConvertTo-Json | Set-Content $feedFixture -Encoding UTF8
+
 # Stand-in for the Microsoft sign-in: /authorize redirects straight back with a code, /token hands out tokens
 # (name "Test Admin", after a renewal "Test Admin renewed"). Runs in its own runspace while the GUI process works.
 $probe = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, 0)
@@ -128,6 +135,7 @@ $psi.EnvironmentVariables['PACKTUNE_TIMING'] = $OutDir
 # No Windows Sandbox opens: a launcher script plays the part of it (the test lab runs in background runspaces)
 $psi.EnvironmentVariables['PACKTUNE_SANDBOX_LAUNCHER'] = (Join-Path $PSScriptRoot 'Fakes\FakeSandboxLauncher.ps1')
 $psi.EnvironmentVariables['PACKTUNE_POPULAR_FIXTURE'] = $fixture
+$psi.EnvironmentVariables['PACKTUNE_FEED_FIXTURE'] = $feedFixture
 $psi.EnvironmentVariables['PACKTUNE_SMOKE_OUT'] = $OutDir
 $psi.EnvironmentVariables['PACKTUNE_SMOKE_AUTHORITY'] = "http://localhost:$authorityPort"
 $psi.EnvironmentVariables['PACKTUNE_FAKE_GITHUB'] = (Join-Path $PSScriptRoot 'Fakes\FakeGitHub.ps1')

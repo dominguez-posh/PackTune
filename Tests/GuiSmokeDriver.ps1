@@ -1642,6 +1642,17 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $app = Get-SelectedTenantApp
                 # the current state is read from the app's assignments (here: the fake has the all-users assignment of the deployment)
                 $script:AssignInfo.Remove($app.Id); Update-TenantAssign $app
+                $s.Phase = 30; return $false
+            }
+            30 {
+                if (-not (Test-Idle)) { return $false }
+                Update-TenantSummary (Get-SelectedTenantApp)
+                $s.Phase = 31; return $false
+            }
+            31 {
+                if (-not (Test-Idle)) { return $false }
+                Update-TenantSummary (Get-SelectedTenantApp)
+                Test-Smoke 'In tenant: the failed devices of the app are listed with the cause of their exit code, from the same mapping as the Status page' ($ui.TxtSumFailedDevices.Visibility -eq 'Visible' -and $ui.TxtSumFailedDevices.Text -like '*NB-0420 (0x*): fatal error during installation*' -and $ui.TxtSumFailedDevices.Text -like '*PC-0142 (exit 61011): the package source cannot be reached*' -and $ui.TxtSumFailedDevices.Text -like '*PC-0777*hash does not match*') $ui.TxtSumFailedDevices.Text
                 $s.Phase = 3; return $false
             }
             3 {
