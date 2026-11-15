@@ -716,6 +716,7 @@
                                                 </Grid>
                                                 <Button x:Name="BtnTenantRemove" Style="{StaticResource DangerGhost}" Content="Remove from Intune..." Margin="0,8,0,0"/>
                                                 <TextBlock x:Name="TxtTenantRemoveNote" Style="{StaticResource Hint}" Margin="0,6,0,0" TextWrapping="Wrap" Visibility="Collapsed"/>
+                                                <Button x:Name="BtnTenantRuntimeUpdate" Content="Update" Margin="0,6,0,0" Visibility="Collapsed" ToolTip="Updates the PackTune Runtime app in Intune in place (same app, dependencies and assignments stay)."/>
                                                 <Button x:Name="BtnTenantSetUninstall" Content="Set to Uninstall" Margin="0,6,0,0" Visibility="Collapsed" ToolTip="Gives the app the assignment Uninstall for all users: devices that have it remove it. Remove the app from Intune when no device reports it any more."/>
                                             </StackPanel>
                                         </StackPanel>

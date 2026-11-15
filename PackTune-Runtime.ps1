@@ -19,6 +19,8 @@ $script:OldWingetRuntimeName = "winget runtime"
 $script:OldWingetRuntimeMarker = "WingetRuntimeApp"
 # Raised when the install, update or detection script of the runtime app changes (part of its detection)
 $script:RuntimeRevision = 5
+# One line per revision: what changes on the devices (shown with "Update available"); add a line when the revision is raised
+$script:RuntimeChanges = @{ 5 = "Tray agent for update notifications on the devices (one per user session); the logon task runs in parallel on multi-session hosts." }
 
 #region scripts
 
@@ -302,12 +304,16 @@ exit 0
 
 #region the app in the tenant
 
-function Install-PackTuneRuntime {
-    # Creates the "PackTune Runtime" Win32 app in the tenant (once; see Get-PackTuneRuntimeWin32ID)
-    Assert-PackTunePrerequisites
-    Assert-PackTuneConnection
-    Write-Host "Starting to deploy the $($script:RuntimeName) as win32 app to Intune"
-
+function Get-PackTuneRuntimeNotes {
+    # The marker of the runtime app plus the revision of its scripts: the tool compares it with its own revision (apps without it count as older)
+    "$($script:RuntimeMarker);runtimeRevision=$($script:RuntimeRevision)"
+}
+function Get-PackTuneRuntimeRevision([string]$Notes) {
+    if ($Notes -match 'runtimeRevision=(\d+)') { return [int]$Matches[1] }
+    return 0
+}
+function New-PackTuneRuntimePackage {
+    # The package of the runtime app (install, update and tray script, detection with the revision): for the creation and the update
     $WorkPath = New-PackTuneWorkFolder -Name "_packtune-runtime"
     $SourcePath = Join-Path $WorkPath "source"
     $Scripts = Get-PackTuneRuntimeScripts
@@ -316,13 +322,23 @@ function Install-PackTuneRuntime {
     Set-Content -Path (Join-Path $SourcePath "tray.ps1") -Value $Scripts.Tray -Encoding ASCII
     $DetectionFile = Join-Path $WorkPath "detection.ps1"
     Set-Content -Path $DetectionFile -Value $Scripts.Detection -Encoding ASCII
+    [pscustomobject]@{ Package = (New-PackTunePackage -WorkPath $WorkPath); DetectionFile = $DetectionFile }
+}
 
-    $Package = New-PackTunePackage -WorkPath $WorkPath
+function Install-PackTuneRuntime {
+    # Creates the "PackTune Runtime" Win32 app in the tenant (once; see Get-PackTuneRuntimeWin32ID)
+    Assert-PackTunePrerequisites
+    Assert-PackTuneConnection
+    Write-Host "Starting to deploy the $($script:RuntimeName) as win32 app to Intune"
+
+    $Built = New-PackTuneRuntimePackage
+    $Package = $Built.Package
+    $DetectionFile = $Built.DetectionFile
     $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $DetectionFile }
     $RequirementRule = Invoke-IntuneModule { New-IntuneWin32AppRequirementRule -Architecture "AllWithARM64" -MinimumSupportedWindowsRelease W10_1809 }
 
     $App = Invoke-IntuneModule {
-        Add-IntuneWin32App -FilePath $Package.Path -DisplayName $script:RuntimeName -RequirementRule $RequirementRule -Notes $script:RuntimeMarker `
+        Add-IntuneWin32App -FilePath $Package.Path -DisplayName $script:RuntimeName -RequirementRule $RequirementRule -Notes (Get-PackTuneRuntimeNotes) `
             -Description "Makes Chocolatey and winget usable on the device and keeps both up to date. Dependency of every app deployed with PackTune." `
             -Publisher "PackTune" -RestartBehavior suppress -InstallExperience system `
             -InstallCommandLine "powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1" `
@@ -377,7 +393,7 @@ function Get-PackTuneRuntimeApps {
         $A = @(Invoke-IntuneModule { Get-IntuneWin32App -ID $Id } | Where-Object { $_ -and [string]$_.id -eq $Id }) | Select-Object -First 1
         if ($A -and [string]$A.notes -like "*$($script:RuntimeMarker)*") { $Found[[string]$A.id] = $A }
     }
-    @($Found.Values | Sort-Object { [string]$_.createdDateTime } | ForEach-Object { [pscustomobject]@{ Id = [string]$_.id; DisplayName = [string]$_.displayName; Created = [string]$_.createdDateTime } })
+    @($Found.Values | Sort-Object { [string]$_.createdDateTime } | ForEach-Object { [pscustomobject]@{ Id = [string]$_.id; DisplayName = [string]$_.displayName; Created = [string]$_.createdDateTime; Revision = (Get-PackTuneRuntimeRevision ([string]$_.notes)) } })
 }
 
 function Get-PackTuneRuntimeWin32ID {
@@ -390,6 +406,39 @@ function Get-PackTuneRuntimeWin32ID {
     Write-Host "$($script:RuntimeName) is not in Intune, it will be deployed now"
     return Install-PackTuneRuntime
 }#Returns the Intune ID of the PackTune Runtime app
+
+function Update-PackTuneRuntime {
+    <#
+        Brings the PackTune Runtime app of the tenant to the revision of this tool, in place: the same app id, so every dependency and assignment
+        stays. The new content first, then detection (marker of the new revision) and notes in one change; read back by id before it counts as
+        done. Devices then fail the detection once and run the new install. No new app, no supersedence.
+    #>
+    param([string]$AppId)
+    Assert-PackTunePrerequisites
+    Assert-PackTuneConnection
+    if (-not $AppId) { $AppId = [string](@(Get-PackTuneRuntimeApps) | Select-Object -First 1).Id }
+    if ($AppId -notmatch '^[0-9a-fA-F-]{36}$') { throw "There is no $($script:RuntimeName) in the tenant to update." }
+    $Own = @(Invoke-IntuneModule { Get-IntuneWin32App -ID $AppId } | Where-Object { $_ -and [string]$_.id -eq $AppId }) | Select-Object -First 1
+    if (-not $Own -or [string]$Own.notes -notlike "*$($script:RuntimeMarker)*") { throw "App $AppId is not a $($script:RuntimeName) of this tool. Nothing was changed." }
+    $Old = Get-PackTuneRuntimeRevision ([string]$Own.notes)
+    if ($Old -ge $script:RuntimeRevision) { Write-Host "$($script:RuntimeName) is at revision $Old already."; return $AppId }
+    Write-Host "Updating $($script:RuntimeName) ($AppId) from revision $Old to $($script:RuntimeRevision) in place"
+    $Built = New-PackTuneRuntimePackage
+    Write-Host "Uploading the new content"
+    Invoke-IntuneModule { Update-IntuneWin32AppPackageFile -ID $AppId -FilePath $Built.Package.Path } | Out-Null
+    Write-Host "Updating detection rule and notes"
+    $DetectionRule = Invoke-IntuneModule { New-IntuneWin32AppDetectionRuleScript -ScriptFile $Built.DetectionFile }
+    Invoke-IntuneModule { Set-IntuneWin32App -ID $AppId -DetectionRule @($DetectionRule) -Notes (Get-PackTuneRuntimeNotes) } | Out-Null
+    $Back = $null
+    for ($Try = 1; $Try -le 6 -and -not $Back; $Try++) {
+        $Read = @(Invoke-IntuneModule { Get-IntuneWin32App -ID $AppId } | Where-Object { $_ -and [string]$_.id -eq $AppId }) | Select-Object -First 1
+        if ($Read -and (Get-PackTuneRuntimeRevision ([string]$Read.notes)) -ge $script:RuntimeRevision) { $Back = $Read }
+        elseif ($Try -lt 6) { Start-Sleep -Seconds $script:RuntimeReadBackSeconds }
+    }
+    if (-not $Back) { throw "The $($script:RuntimeName) ($AppId) was changed, but Intune does not show revision $($script:RuntimeRevision) when read back. Check Intune > Apps > Windows; the update is tried again with the next start." }
+    Write-Host "$($script:RuntimeName) is at revision $($script:RuntimeRevision) now (read back from Intune): devices install it at their next check."
+    return $AppId
+}#Updates the PackTune Runtime app in place to the revision of this tool
 
 function Remove-PackTuneRuntimeDuplicates {
     <#
@@ -562,7 +611,8 @@ function Get-PackTuneAppsWithRuntimeState {
 function Get-PackTuneRuntimeState {
     <#
         What the interface shows under readiness: State is "Missing" (no PackTune Runtime in the tenant), "Migrate"
-        (runtime there, but apps still depend on the old dependency apps or have no runtime dependency), "Ready".
+        (runtime there, but apps still depend on the old dependency apps or have no runtime dependency), "Ready", or "Outdated" (the
+        runtime of the tenant has an older revision than this tool: RuntimeRevision < ToolRevision, Update-PackTuneRuntime brings it up).
         UnusedOld = old dependency apps nothing depends on (can be removed, see Remove-PackTuneUnusedDependencyApps).
     #>
     $RuntimeApps = @(Get-PackTuneRuntimeApps)
@@ -572,9 +622,13 @@ function Get-PackTuneRuntimeState {
     $OnOld = @($Apps | Where-Object { $_.OldDependencies.Count -gt 0 })
     $Without = @($Apps | Where-Object { -not $_.HasRuntime })
     $Unused = @(Get-PackTuneUnusedDependencyApps -OldApps $Old)
-    $State = if (-not $RuntimeId) { "Missing" } elseif ($OnOld.Count -gt 0 -or $Without.Count -gt 0) { "Migrate" } else { "Ready" }
+    $Revision = if ($RuntimeApps.Count) { [int]$RuntimeApps[0].Revision } else { 0 }
+    $Outdated = [bool]($RuntimeId -and $Revision -lt $script:RuntimeRevision)
+    $Change = [string]$script:RuntimeChanges[[int]$script:RuntimeRevision]
+    $State = if (-not $RuntimeId) { "Missing" } elseif ($Outdated) { "Outdated" } elseif ($OnOld.Count -gt 0 -or $Without.Count -gt 0) { "Migrate" } else { "Ready" }
     [pscustomobject]@{
         State = $State; RuntimePresent = [bool]$RuntimeId; RuntimeId = $RuntimeId
+        RuntimeRevision = $Revision; ToolRevision = [int]$script:RuntimeRevision; Outdated = $Outdated; Change = $Change
         OldDependencyApps = $Old; AppsOnOldDependencies = $OnOld; AppsWithoutRuntime = $Without; UnusedOld = $Unused
         # More than one runtime app: the extra ones (all but the oldest), listed for a cleanup on request
         RuntimeDuplicates = @($RuntimeApps | Select-Object -Skip 1)
