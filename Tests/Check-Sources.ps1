@@ -206,6 +206,26 @@ Test-Check 'runtime: a valid signature of another Microsoft publisher is refused
 
 $runtimeId = Get-PackTuneRuntimeWin32ID
 Test-Check 'runtime app found again, not created twice' ($runtimeId -eq $runtime[0].id -and @(Get-Store | Where-Object { $_.notes -like '*PackTuneRuntimeApp*' }).Count -eq 1)
+# --- the runtime app records its revision; an older one is updated in place
+$rtNow = @(Get-Store | Where-Object id -eq $runtimeId)[0]
+Test-Check 'runtime revision: the notes carry the marker and the revision of the tool' ($rtNow.notes -eq "PackTuneRuntimeApp;runtimeRevision=$($script:RuntimeRevision)" -and (Get-PackTuneRuntimeState).RuntimeRevision -eq $script:RuntimeRevision -and (Get-PackTuneRuntimeState).State -ne 'Outdated')
+$rtStore = Join-Path $env:LOCALAPPDATA 'fake-intune.json'
+$all = @(Get-Store); foreach ($x in $all) { if ($x.id -eq $runtimeId) { $x.notes = 'PackTuneRuntimeApp'; $x.detection = 'b2xk' } }
+ConvertTo-Json -InputObject @($all) -Depth 8 | Set-Content $rtStore
+$st = Get-PackTuneRuntimeState
+Test-Check 'runtime revision: an app without a revision counts as older, state Outdated with the numbers and what changes' ($st.State -eq 'Outdated' -and $st.RuntimeRevision -eq 0 -and $st.ToolRevision -eq $script:RuntimeRevision -and $st.Change -like '*Tray*') $st.State
+$before = @(Get-Store); $rtBefore = $before | Where-Object id -eq $runtimeId
+$depsBefore = @($before | Where-Object { @($_.dependencies).targetId -contains $runtimeId } | ForEach-Object id)
+$null = Update-PackTuneRuntime 6>&1
+$after = @(Get-Store); $rtAfter = $after | Where-Object id -eq $runtimeId
+Test-Check 'runtime update: same app id, no second runtime app, new content uploaded' (@($after | Where-Object { $_.notes -like '*PackTuneRuntimeApp*' }).Count -eq 1 -and $rtAfter.uploads -eq ([int]$rtBefore.uploads + 1))
+Test-Check 'runtime update: notes carry the new revision and the detection checks it (read back)' ($rtAfter.notes -eq "PackTuneRuntimeApp;runtimeRevision=$($script:RuntimeRevision)" -and [Text.Encoding]::ASCII.GetString([Convert]::FromBase64String([string]$rtAfter.detection)) -match "\`$Revision = '$($script:RuntimeRevision)'")
+$depsAfter = @($after | Where-Object { @($_.dependencies).targetId -contains $runtimeId } | ForEach-Object id)
+Test-Check 'runtime update: dependencies on it and its assignment stay, no supersedence' ($depsBefore.Count -ge 1 -and ($depsAfter -join ',') -eq ($depsBefore -join ',') -and $rtAfter.assignment -eq $rtBefore.assignment -and @($rtAfter.supersedence).Count -eq 0 -and (Get-PackTuneRuntimeState).State -ne 'Outdated')
+$null = Update-PackTuneRuntime 6>&1
+Test-Check 'runtime update: nothing to do when the revision is current (no second upload)' ((Get-Store | Where-Object id -eq $runtimeId).uploads -eq $rtAfter.uploads)
+$m = ''; try { $null = Update-PackTuneRuntime -AppId $id1 } catch { $m = $_.Exception.Message }
+Test-Check 'runtime update: an app that is no PackTune Runtime is refused, nothing changed' ($m -like '*is not a PackTune Runtime*') $m
 # a winget app from before the runtime existed
 $legacy = Get-Store | Where-Object id -eq $id1
 $stored = Get-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') -Raw | ConvertFrom-Json

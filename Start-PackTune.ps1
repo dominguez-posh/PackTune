@@ -1165,6 +1165,10 @@ function Get-ReadinessItems {
                     @{ Key = 'deps'; Title = 'Dependency app (PackTune Runtime)'; State = 'bad'; Wait = $busyDeps
                        Text = $(if ($busyDeps) { 'Deploying PackTune Runtime to Intune ...' } else { "Not in the tenant yet. $depsText." })
                        Fix = 'Create'; Action = { Start-DependencyDeploy } } }
+                elseif ($info.State -eq 'Outdated') {
+                    @{ Key = 'depsupdate'; Title = 'Dependency app (PackTune Runtime)'; State = 'warn'; Wait = (Test-TaskRunning 'runtimeupdate')
+                       Text = $(if (Test-TaskRunning 'runtimeupdate') { 'Updating PackTune Runtime in Intune ...' } else { Get-RuntimeUpdateText $info })
+                       Fix = 'Update'; Action = { Start-RuntimeUpdate } } }
                 elseif ($info.State -eq 'Migrate') {
                     $n = @($script:WingetNoRuntime).Count
                     @{ Key = 'deps'; Title = 'Dependency app (PackTune Runtime)'; State = 'warn'; Optional = $true; Wait = (Test-TaskRunning 'runtime')
@@ -1337,6 +1341,22 @@ function Start-RuntimeDuplicateCleanup {
     Update-Readiness
 }
 
+function Get-RuntimeUpdateText($Info) {
+    "Update available (revision $($Info.RuntimeRevision) -> $($Info.ToolRevision)): $($Info.Change) The app is updated in place, nothing else changes; devices install it at their next check."
+}
+function Start-RuntimeUpdate {
+    # The runtime app of the tenant gets the new content, detection and notes in place (same app id: dependencies and assignments stay)
+    if ($script:GraphDown) { throw "Can't check the tenant right now ($($script:GraphDown.Cause)). PackTune Runtime is not updated from a failed read." }
+    if (Test-TaskRunning 'runtimeupdate') { return }
+    Update-UiToken
+    [void](Start-UiTask -Kind 'runtimeupdate' -Title 'Updating the PackTune Runtime in Intune' -Display 'PackTune Runtime' -NeedsAuth -Work 'Update-PackTuneRuntime | Out-Null' -OnDone {
+        param($Result, $Job)
+        if ($Job.Status -eq 'succeeded') { Write-UiLog 'The PackTune Runtime is updated in Intune (read back).' 'Success'; Show-Toast 'PackTune Runtime is up to date.' 'ok' }
+        $script:RuntimeInfo = $null
+        if ($Job.Status -eq 'succeeded') { Start-DependencyCheck; Update-Readiness; Complete-SetupStep $true } else { Update-Readiness; Complete-SetupStep $false 'updating PackTune Runtime' }
+    })
+    Update-Readiness
+}
 function Start-DependencyDeploy {
     if ($script:GraphDown) { throw "Can't check the tenant right now ($($script:GraphDown.Cause)). PackTune Runtime is not created from a failed read." }
     # Chocolatey app and winget runtime app, once per tenant (each is created only when it is missing)
@@ -3899,8 +3919,11 @@ function Update-TenantButtons {
     $ui.BtnTenantRelease.Visibility = ConvertTo-Vis ($app.UpdateAvailable -and -not $noPolicy)
     $ui.TxtTenantAvailableNote.Visibility = ConvertTo-Vis ((-not $noPolicy) -and (@([string]$app.Intents -split ',') -contains 'available') -and (@([string]$app.Intents -split ',') -notcontains 'required'))
     $noRuntime = @($script:WingetNoRuntime | Where-Object { $_.Id -eq $app.Id }).Count -gt 0
-    $ui.TxtDependencyNote.Visibility = ConvertTo-Vis ($noRuntime -or $reading)
-    $ui.TxtDependencyNote.Text = if ($reading) { 'Updating the list ...' } elseif ($noRuntime) { 'This app still uses the old dependency apps. Switch to PackTune Runtime (banner above the list) moves it over.' } else { '' }
+    $rtOutdated = [bool]($app.IsDependency -and $script:RuntimeInfo -and $script:RuntimeInfo.Outdated -and [string]$app.Id -eq [string]$script:RuntimeInfo.RuntimeId)
+    $ui.BtnTenantRuntimeUpdate.Visibility = ConvertTo-Vis $rtOutdated
+    $ui.BtnTenantRuntimeUpdate.IsEnabled = (Test-SignedIn) -and -not (Test-TaskRunning 'runtimeupdate')
+    $ui.TxtDependencyNote.Visibility = ConvertTo-Vis ($noRuntime -or $reading -or $rtOutdated)
+    $ui.TxtDependencyNote.Text = if ($reading) { 'Updating the list ...' } elseif ($rtOutdated) { Get-RuntimeUpdateText $script:RuntimeInfo } elseif ($noRuntime) { 'This app still uses the old dependency apps. Switch to PackTune Runtime (banner above the list) moves it over.' } else { '' }
     if ($noPolicy) { $script:TenantPolicyApp = ''; return }
     $ui.BtnTenantApply.IsEnabled = (Test-SignedIn) -and -not $busy
     $ui.BtnTenantRelease.IsEnabled = (Test-SignedIn) -and -not $busy
@@ -3978,6 +4001,7 @@ Add-Click $ui.BtnTenantTest {
     if (-not $app) { return }
     Start-PackageTest -Package $app.Package -Source $app.Source -Title $app.DisplayName -Version (Get-TenantVersion) -Policy (Read-TenantPolicy)
 }
+Add-Click $ui.BtnTenantRuntimeUpdate { Start-RuntimeUpdate }
 Add-Click $ui.BtnTenantSetUninstall { $app = Get-ActionApp; if ($app) { Start-AssignChange 'Uninstall' $app } }
 Add-Click $ui.BtnTenantRemove {
     $app = Get-ActionApp

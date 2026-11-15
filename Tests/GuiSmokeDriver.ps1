@@ -1029,7 +1029,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
     @{ Name = 'PackTune Runtime states: Ready, Migrate, Missing'; Phase = 0; Do = {
         param($s)
         function Write-Store($Apps) { ConvertTo-Json -InputObject @($Apps) -Depth 6 | Set-Content (Join-Path $env:LOCALAPPDATA 'fake-intune.json') }
-        function Get-DepsItem { Get-ReadinessItems | Where-Object Key -in 'deps', 'tenant' | Select-Object -First 1 }
+        function Get-DepsItem { Get-ReadinessItems | Where-Object Key -in 'deps', 'tenant', 'depsupdate' | Select-Object -First 1 }
         switch ($s.Phase) {
             0 {
                 if (-not (Test-Idle)) { return $false }
@@ -1098,6 +1098,30 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
             7 {
                 if (-not (Test-Idle)) { return $false }
                 Test-Smoke 'all apps depend on the new runtime: Ready again' ($script:RuntimeInfo.State -eq 'Ready') $script:RuntimeInfo.State
+                # Outdated: the runtime of the tenant was made by an older revision (no revision in its notes)
+                $all = @(Get-StoreApps); foreach ($x in $all) { if ($x.displayName -eq 'PackTune Runtime') { $x.notes = 'PackTuneRuntimeApp'; $x.detection = 'b2xk'; $script:SmokeRuntimeUploads = [int]$x.uploads } }
+                Write-Store $all
+                Start-DependencyCheck
+                $s.Phase = 8; return $false
+            }
+            8 {
+                if (-not (Test-Idle)) { return $false }
+                $item = Get-DepsItem
+                Show-Page 'Start'
+                Test-Smoke 'Outdated: item says Update available with both revisions and what changes, button Update, part of the set up' ($script:RuntimeInfo.State -eq 'Outdated' -and $item.Fix -eq 'Update' -and -not $item.Optional -and $item.Text -like "Update available (revision 0 -> $($script:RuntimeRevision)):*Tray*") "$($script:RuntimeInfo.State) $($item.Text)"
+                Save-SmokeShot '29b-start-runtime-outdated'
+                Show-Page 'Tenant'; Update-TenantRows -Force
+                $row = @($script:TenantRowList | Where-Object { $_['Title'] -eq 'PackTune Runtime' })[0]
+                $ui.LstTenant.SelectedItem = $row
+                Test-Smoke 'In tenant: the runtime panel shows the same text and an Update button' ($ui.BtnTenantRuntimeUpdate.Visibility -eq 'Visible' -and $ui.TxtDependencyNote.Text -like 'Update available (revision 0*') "$($ui.BtnTenantRuntimeUpdate.Visibility) $($ui.TxtDependencyNote.Text)"
+                Show-Page 'Start'
+                Start-SetupAll
+                $s.Phase = 9; return $false
+            }
+            9 {
+                if ($script:SetupRunning -or -not (Test-Idle)) { return $false }
+                $rt = @(Get-StoreApps | Where-Object { $_.displayName -eq 'PackTune Runtime' })
+                Test-Smoke 'Set up everything updates the runtime in place: same single app, new content, revision recorded, state no longer Outdated' ($rt.Count -eq 1 -and $rt[0].notes -like "*runtimeRevision=$($script:RuntimeRevision)" -and [int]$rt[0].uploads -eq ($script:SmokeRuntimeUploads + 1) -and $script:RuntimeInfo.State -ne 'Outdated') "$($rt[0].notes) $($script:RuntimeInfo.State)"
                 $true
             }
         } } }
