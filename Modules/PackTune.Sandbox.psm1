@@ -784,12 +784,14 @@ Write-LabLine 'Detecting the PackTune Runtime (its detection script) ...'
 $Started = Get-Date
 $OutFile = Join-Path $env:TEMP 'packtune-runtime-detect.txt'
 $Process = Start-Process -FilePath $PowerShell -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'Detect.ps1') -PassThru -NoNewWindow -RedirectStandardOutput $OutFile
+$null = $Process.Handle   # keeps the exit code readable after the wait (Start-Process -PassThru quirk)
 while (-not $Process.WaitForExit(10000)) {
     $Seconds = [int]((Get-Date) - $Started).TotalSeconds
     $Busy = (@(Get-Process | Sort-Object CPU -Descending | Select-Object -First 3 | ForEach-Object { $_.ProcessName }) -join ', ')
     Write-LabLine "Detection still running ($Seconds s); busiest processes: $Busy"
     if ($Seconds -ge 180) { try { $Process.Kill() } catch { }; Write-LabLine 'PackTune Runtime detection: timed out after 3 minutes'; exit 1 }
 }
+$Process.WaitForExit()
 $Detected = $Process.ExitCode
 $Out = if (Test-Path -LiteralPath $OutFile) { (Get-Content -LiteralPath $OutFile -Raw) } else { '' }
 Write-LabLine "Detection finished after $([int]((Get-Date) - $Started).TotalSeconds) s"

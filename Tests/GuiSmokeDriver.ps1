@@ -1108,7 +1108,7 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 if (-not (Test-Idle)) { return $false }
                 $item = Get-DepsItem
                 Show-Page 'Start'
-                Test-Smoke 'Outdated: item says Update available with both revisions and what changes, button Update, part of the set up' ($script:RuntimeInfo.State -eq 'Outdated' -and $item.Fix -eq 'Update' -and -not $item.Optional -and $item.Text -like "Update available (revision 0 -> $($script:RuntimeRevision)):*Tray*") "$($script:RuntimeInfo.State) $($item.Text)"
+                Test-Smoke 'Outdated: item says Update available with both revisions and what changes, button Update, part of the set up' ($script:RuntimeInfo.State -eq 'Outdated' -and $item.Fix -eq 'Update' -and -not $item.Optional -and $item.Text -like "Update available (revision 0 -> $($script:RuntimeRevision)):*App Installer*") "$($script:RuntimeInfo.State) $($item.Text)"
                 Save-SmokeShot '29b-start-runtime-outdated'
                 Show-Page 'Tenant'; Update-TenantRows -Force
                 $row = @($script:TenantRowList | Where-Object { $_['Title'] -eq 'PackTune Runtime' })[0]

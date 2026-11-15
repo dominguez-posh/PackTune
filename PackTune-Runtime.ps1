@@ -222,7 +222,9 @@ try {
         Assert-MicrosoftSigned $Installer
         Write-Step "Visual C++ runtime: installing it silently (up to 10 minutes)"
         $Process = Start-Process -FilePath $Installer -ArgumentList "/install", "/quiet", "/norestart" -PassThru
-        if (-not $Process.WaitForExit(600000)) { try { $Process.Kill() } catch { }; Write-Step "Visual C++ runtime: the installer did not finish in 10 minutes and was stopped" }
+        $Limit = (Get-Date).AddMinutes(10)
+        while (-not $Process.WaitForExit(15000) -and (Get-Date) -lt $Limit) { Write-Step "Visual C++ runtime: the installer is still running ($([int]((Get-Date) - $Process.StartTime).TotalSeconds) s; Windows Installer is slow in a fresh sandbox)" }
+        if (-not $Process.HasExited) { try { $Process.Kill() } catch { }; Write-Step "Visual C++ runtime: the installer did not finish in 10 minutes and was stopped" }
         else { Write-Step "Visual C++ runtime: installer exit code $($Process.ExitCode) after $([int]((Get-Date) - $Process.StartTime).TotalSeconds) s" }
         Remove-ItemSafely $Work
     }
