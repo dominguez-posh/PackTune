@@ -1043,6 +1043,20 @@ function Get-FeedText {
 
 function Invoke-ChocoFeed {
     param([Parameter(Mandatory = $true)][string]$Query)
+    # Test hook (the GUI smoke must not need the internet): packages of a fixture file are answered from it, everything else as usual
+    if ($env:PACKTUNE_FEED_FIXTURE -and (Test-Path -LiteralPath $env:PACKTUNE_FEED_FIXTURE)) {
+        $FixId = if ($Query -match "(?i)(?:id='|Id%20eq%20')([^']+)'") { [uri]::UnescapeDataString($Matches[1]).ToLower() }
+        $Hits = @(@((Get-Content -LiteralPath $env:PACKTUNE_FEED_FIXTURE -Raw | ConvertFrom-Json)) | Where-Object { $FixId -and ([string]$_.Name).ToLower() -eq $FixId })
+        if ($Hits.Count) {
+            foreach ($H in $Hits) {
+                if ($Query -match 'IsLatestVersion' -and -not $H.IsLatest) { continue }
+                [pscustomobject]@{ Name = [string]$H.Name; Title = [string]$H.Title; Version = [string]$H.Version; Summary = [string]$H.Summary; Description = [string]$H.Description
+                    Authors = [string]$H.Authors; SoftwareSite = [string]$H.SoftwareSite; SoftwareLicense = ''; IconUrl = ''; Downloads = '1000'; Tags = [string]$H.Tags
+                    IsLatest = [bool]$H.IsLatest; LicenseNote = Get-ChocoLicenseNote ([string]$H.Name) }
+            }
+            return
+        }
+    }
     [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
     $Uri = if ($Query -match '^https?://') { $Query } else { $script:Settings.MetadataFeed.TrimEnd("/") + "/" + $Query }
     # The community feed limits requests: on 429, 503 or a timeout wait (Retry-After, else 5, 10, 20 s) and ask again
