@@ -227,10 +227,13 @@
             <Grid.RowDefinitions><RowDefinition Height="52"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
 
             <!-- Busy bar: what runs in the background, indeterminate; a click opens Activity -->
-            <Border x:Name="BoxBusy" Grid.Row="2" Visibility="Collapsed" Background="{StaticResource AccentFaint}" BorderBrush="#D6E6F7" BorderThickness="0,1,0,0" Cursor="Hand" ToolTip="Open Activity" AutomationProperties.Name="Background work, open Activity">
+            <Border x:Name="BoxBusy" Grid.Row="2" Background="{StaticResource AccentFaint}" BorderBrush="#D6E6F7" BorderThickness="0,1,0,0" Cursor="Hand" ToolTip="Open Activity" AutomationProperties.Name="Status of the background work">
                 <StackPanel>
                     <ProgressBar x:Name="PbBusy" IsIndeterminate="True" Height="3" BorderThickness="0" Background="Transparent"/>
-                    <TextBlock x:Name="TxtBusy" Margin="20,4,20,5" FontSize="12" Foreground="{StaticResource Text2}" TextTrimming="CharacterEllipsis"/>
+                    <StackPanel Orientation="Horizontal" Margin="20,4,20,5">
+                        <Ellipse x:Name="DotReady" Width="9" Height="9" Margin="0,0,8,0" VerticalAlignment="Center" Fill="#2E7D32" Visibility="Collapsed"/>
+                        <TextBlock x:Name="TxtBusy" FontSize="12" Foreground="{StaticResource Text2}" TextTrimming="CharacterEllipsis" MaxWidth="900"/>
+                    </StackPanel>
                 </StackPanel>
             </Border>
 

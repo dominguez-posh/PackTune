@@ -1681,7 +1681,27 @@ $script:SmokeSteps = [System.Collections.ArrayList]@(
                 $script:StuckMinutes = 5
                 Test-Smoke 'stuck tasks are stopped, the day log says so, a red toast tells it' ((Get-SmokeLog) -match 'Loading details of Panel Tool\] did not finish within' -and @($script:Toasts | Where-Object { $_.Kind -eq 'bad' -and $_.Text -like '*did not finish in time*' }).Count -ge 1 -and -not (Test-TaskRunning 'versions')) (Get-SmokeLog)
                 Update-BusyBar
-                Test-Smoke 'busy bar is gone when nothing runs' ($ui.BoxBusy.Visibility -eq 'Collapsed')
+                Test-Smoke 'nothing runs: no progress bar, a status dot instead' ($ui.PbBusy.Visibility -eq 'Collapsed' -and $ui.DotReady.Visibility -eq 'Visible')
+                # the four states of the indicator
+                $script:TenantApps = @($script:TenantApps); if ($null -eq $script:TenantApps) { $script:TenantApps = @() }
+                $script:ReadyProblemSource = { @() }; $script:ReadFailures.Clear(); $script:Refreshing = $false
+                if (-not $script:StoreState) { $script:StoreState = [pscustomobject]@{ State = 'Ready'; Message = 'ok' } }
+                Update-BusyBar
+                Test-Smoke 'ready: a green dot and Ready once everything loaded without problems' ($ui.TxtBusy.Text -eq 'Ready' -and $ui.DotReady.Fill.Color.ToString() -eq '#FF2E7D32' -and $script:ReadyKind -eq 'ready') "$($ui.TxtBusy.Text) $($script:ReadyKind)"
+                $script:ReadyProblemSource = { @('Package store not reachable', 'Status script missing') }
+                Update-BusyBar
+                Test-Smoke 'problem: orange dot with the count and the first cause' ($ui.TxtBusy.Text -eq 'Ready with 2 problems: Package store not reachable' -and $ui.DotReady.Fill.Color.ToString() -eq '#FFE08A00' -and $script:ReadyKind -eq 'problem') $ui.TxtBusy.Text
+                $script:ReadyProblemSource = $null
+                $script:ReadFailures['tenant'] = 'Tenant apps: No permission'
+                $script:ReadyProblemSource = { @($script:ReadFailures.Values) }
+                Update-BusyBar
+                Test-Smoke 'a failed background read is a problem with its cause' ($ui.TxtBusy.Text -eq 'Ready with 1 problem: Tenant apps: No permission') $ui.TxtBusy.Text
+                $script:ReadFailures.Clear(); $script:ReadyProblemSource = { @() }
+                $savedAuth = $script:Shared.Auth; $script:Shared.Auth = $null
+                Update-BusyBar
+                Test-Smoke 'not signed in: grey Not signed in' ($ui.TxtBusy.Text -eq 'Not signed in' -and $script:ReadyKind -eq 'signedout' -and $ui.DotReady.Fill.Color.ToString() -eq '#FF8A8A8A') $ui.TxtBusy.Text
+                $script:Shared.Auth = $savedAuth; $script:ReadyProblemSource = $null
+                Update-BusyBar
                 Show-Page 'Apps'
                 return $true
             }
