@@ -145,4 +145,13 @@ Test-Check 'language preference: German is stored' ((Get-PackTuneSettings).Proto
 $s.ProtocolLanguage = 'fr'; Save-PackTuneSettings -Settings $s | Out-Null
 Test-Check 'language preference: anything else falls back to English' ((Get-PackTuneSettings).ProtocolLanguage -eq 'en')
 
+# --- settings: saving works while another reader holds the file for a moment (the race behind the flaky smoke step)
+$ready = Join-Path $work 'lock-ready.txt'
+$holder = Start-Job -ArgumentList $script:SettingsPath, $ready -ScriptBlock { param($Path, $Ready) $f = [IO.File]::Open($Path, 'Open', 'Read', 'Read'); 'x' | Set-Content $Ready; Start-Sleep -Milliseconds 400; $f.Dispose() }
+for ($i = 0; $i -lt 100 -and -not (Test-Path $ready); $i++) { Start-Sleep -Milliseconds 50 }
+$s = Get-PackTuneSettings; $s.ProtocolLanguage = 'de'
+$threw = $false; try { Save-PackTuneSettings -Settings $s | Out-Null } catch { $threw = $true }
+Wait-Job $holder | Out-Null; Remove-Job $holder -Force
+Test-Check 'settings: a short lock by another reader does not lose the change, no half-written file' ((-not $threw) -and ((Get-PackTuneSettings).ProtocolLanguage -eq 'de') -and (@(Get-ChildItem (Split-Path $script:SettingsPath) -Filter 'settings.json.*.tmp').Count -eq 0))
+
 if ($script:Failed) { "$script:Failed check(s) failed."; exit 1 } else { 'All checks passed.' }

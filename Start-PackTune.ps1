@@ -5454,10 +5454,11 @@ function Show-ProtocolHistory([bool]$Open) {
 $ui.CmbProtocolLanguage.ItemsSource = @('English', 'Deutsch')
 $ui.CmbProtocolLanguage.SelectedIndex = if ($script:Settings.ProtocolLanguage -eq 'de') { 1 } else { 0 }
 $ui.CmbProtocolLanguage.Add_SelectionChanged({
+    # The page follows the switch even when the preference cannot be stored; the error is shown after the text is right
+    try { Update-ProtocolView } catch { Show-Error $_.Exception.Message }
     try {
         $s = Get-PackTuneSettings; $s.ProtocolLanguage = Get-ProtocolLanguage
         [void](Save-PackTuneSettings -Settings $s); $script:Settings = Get-PackTuneSettings
-        Update-ProtocolView
     } catch { Show-Error $_.Exception.Message }
 })
 $ui.LstProtocolHistory.Add_SelectionChanged({
