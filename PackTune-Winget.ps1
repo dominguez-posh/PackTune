@@ -215,9 +215,11 @@ Start-Transcript -Path (Join-Path $Root "Logs\$SafeId.log") -Append | Out-Null
 
 __GETWINGET__
 
-# Right after the setup (Autopilot) App Installer may not be registered yet: wait up to 10 minutes
+# Right after the setup (Autopilot) App Installer may not be registered yet: wait up to 10 minutes. In the test lab (lab.flag, put next to the
+# script by the lab only; the PackTune Runtime went in as the step before) a missing winget is a result, not something to wait for.
+$WaitRounds = if (Test-Path -LiteralPath (Join-Path $PSScriptRoot "lab.flag")) { 1 } else { 20 }
 $Winget = Get-Winget
-for ($Wait = 0; -not $Winget -and $Wait -lt 20; $Wait++) { Write-Output "winget not found yet, waiting"; Start-Sleep -Seconds 30; $Winget = Get-Winget }
+for ($Wait = 0; -not $Winget -and $Wait -lt $WaitRounds; $Wait++) { Write-Output "winget not found yet, waiting"; Start-Sleep -Seconds 30; $Winget = Get-Winget }
 if (-not $Winget) { Write-Output "winget.exe not found (App Installer missing)"; Stop-Transcript | Out-Null; exit $PTExit.WingetMissing }
 Write-Output "Using $Winget"
 

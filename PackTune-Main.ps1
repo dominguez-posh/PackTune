@@ -3109,13 +3109,15 @@ function Copy-LabPackageFiles {
         $Name = if ($File.Name -eq "install.ps1") { "choco-app.ps1" } else { $File.Name }
         Copy-Item -LiteralPath $File.FullName -Destination (Join-Path $Destination $Name) -Force
     }
+    # Tells the winget install script that it runs in the lab, where the runtime step came before (it does not wait for winget for 10 minutes there)
+    Set-Content -LiteralPath (Join-Path $Destination "lab.flag") -Value "PackTune test lab" -Encoding ASCII
 }#Copies the generated package files into the lab project
 
 function Test-PackTunePackage {
     <#
         Tests a package in Windows Sandbox with the test lab built into PackTune (Modules\PackTune.Sandbox.psm1):
-        a fresh sandbox installs Chocolatey (in Intune it is a dependency app), then you run Install, Detect and
-        Uninstall with one click each, as SYSTEM like Intune, and report the result. Returns the verdict.
+        a fresh sandbox first installs the PackTune Runtime (the dependency app of Intune: Chocolatey and winget for
+        SYSTEM, its own step), then you run Install, Detect and Uninstall with one click each, as SYSTEM like Intune, and report the result. Returns the verdict.
     #>
     param(
         [Parameter(Mandatory = $true)][string]$ChocoName,
@@ -3143,40 +3145,17 @@ function Test-PackTunePackage {
     $DetectionFile = if ($IsWinget) { New-WingetPackageScripts -WingetId $Package -SourcePath $SourcePath -Policy $Policy -DisplayName $Info.Title }
     else { New-ChocoPackageScripts -ChocoName $Package -SourcePath $SourcePath -Policy $Policy -DisplayName $Info.Title }
 
-    # Lab scripts: Chocolatey first (Intune installs it as dependency), then the package's own install.ps1.
+    # Lab scripts: like on a device the PackTune Runtime (Chocolatey and winget for SYSTEM) is the dependency and goes in first, as its own step of the
+    # lab with the real install and detection script of the runtime app (see Write-PackTuneRuntimeFiles); the package then runs as deployed.
     # The package script is copied as choco-app.ps1: Install.ps1 and install.ps1 are the same file on Windows.
-    $DownloadUrl = $script:Settings.ChocolateyDownloadUrl.Replace("'", "''")
-    $LabInstall = @"
-# Win32 Test Lab: Chocolatey (a dependency app in Intune), then the package as deployed
-`$Choco = Join-Path `$env:ProgramData 'chocolatey\bin\choco.exe'
-if (-not (Test-Path `$Choco)) {
-    Write-Output 'Installing Chocolatey (in Intune it is the dependency app)'
-    Set-ExecutionPolicy Bypass -Scope Process -Force
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
-    if ('$DownloadUrl') { `$env:chocolateyDownloadUrl = '$DownloadUrl' }
-    Invoke-Expression ((New-Object Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-    if (-not (Test-Path `$Choco)) { Write-Output 'Chocolatey could not be installed'; exit 1 }
-}
-& "`$PSScriptRoot\choco-app.ps1"
-exit `$LASTEXITCODE
-"@
-    if ($IsWinget) {
-        # Windows Sandbox has no working winget for SYSTEM: Microsoft's module installs it for all users first
-        $LabInstall = @'
-# Win32 Test Lab: winget (part of Windows on real devices), then the package as deployed
-$Found = Get-ChildItem -Path (Join-Path $env:ProgramFiles "WindowsApps") -Filter "Microsoft.DesktopAppInstaller_*_8wekyb3d8bbwe" -Directory -ErrorAction SilentlyContinue | Where-Object { Test-Path (Join-Path $_.FullName "winget.exe") }
-if (-not $Found) {
-    Write-Output 'Installing winget for the test (real devices already have it)'
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
-    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force | Out-Null
-    Install-Module Microsoft.WinGet.Client -Force -Scope AllUsers -AllowClobber
-    Import-Module Microsoft.WinGet.Client
-    Repair-WinGetPackageManager -AllUsers -Latest -Force
-}
+    $RuntimeWork = New-PackTuneWorkFolder -Name "test-runtime"
+    $RuntimeDetection = Write-PackTuneRuntimeFiles -WorkPath $RuntimeWork
+    $RuntimeSource = Join-Path $RuntimeWork "source"
+    $LabInstall = @'
+# Win32 Test Lab: the package as deployed (the PackTune Runtime went in as the step before, like in Intune)
 & "$PSScriptRoot\choco-app.ps1"
 exit $LASTEXITCODE
 '@
-    }
     $LabUninstall = "& `"`$PSScriptRoot\choco-app.ps1`" -Uninstall`r`nexit `$LASTEXITCODE"
     $LabDetect = Get-Content -Path $DetectionFile -Raw
 
@@ -3184,7 +3163,7 @@ exit $LASTEXITCODE
     New-Item -ItemType Directory -Path $LabFiles -Force | Out-Null
     Copy-LabPackageFiles -SourcePath $SourcePath -Destination $LabFiles
 
-    $LabParams = @{ Scripts = @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $LabDetect } }
+    $LabParams = @{ Scripts = @{ "Install.ps1" = $LabInstall; "Uninstall.ps1" = $LabUninstall; "Detect.ps1" = $LabDetect }; RuntimeSourcePath = $RuntimeSource; RuntimeDetection = (Get-Content -Path $RuntimeDetection -Raw) }
     if ($FromVersion) {
         # The previous version: its own package files and detection, the same lab scripts
         $PreviousPolicy = New-PackTuneAppPolicy -Package $Package -Version $FromVersion -UpdateMode $UpdateMode -GraceHours $GraceHours -PackageSource $(if ($IsWinget) { "" } else { $script:Settings.PackageSource }) `
@@ -3201,7 +3180,7 @@ exit $LASTEXITCODE
         $LabParams.PreviousVersion = $FromVersion
     }
 
-    Write-Host "Opening the test lab in Windows Sandbox for $($Info.Title): detect, install$(if ($FromVersion) { " (version $FromVersion first, then the update)" }), detect, uninstall, detect"
+    Write-Host "Opening the test lab in Windows Sandbox for $($Info.Title): dependency (PackTune Runtime), detect, install$(if ($FromVersion) { " (version $FromVersion first, then the update)" }), detect, uninstall, detect"
     $Result = Start-PackTuneWin32Lab -DisplayName "$($Info.Title) ($Source)" -Version $(if ($Version) { $Version } else { $Info.Version }) -SourcePath $LabFiles -AutoRun:$AutoRun @LabParams
     Write-Host "Test result: $($Result.Verdict). $($Result.Message)"
     # Kept per source, package, version and architecture: the app list shows it and the deploy gate reads it

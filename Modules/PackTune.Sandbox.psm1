@@ -767,6 +767,25 @@ function Invoke-PackTuneMsixCapture {
 
 #region Win32 test lab
 
+function Get-PackTuneLabRuntimeStep {
+    # The step "Dependency: PackTune Runtime" of the lab: the install.ps1 of the runtime app as Intune runs it (SYSTEM, 64-bit PowerShell), then its
+    # detection script; the step passes when the install gives a success code and the detection says detected. It only sequences the two real scripts.
+    return @'
+# Lab step: install the PackTune Runtime like Intune (install.ps1 as SYSTEM), then run its detection rule.
+$ErrorActionPreference = 'Continue'
+$PowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+& $PowerShell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'install.ps1')
+$Code = $LASTEXITCODE
+Write-Output "PackTune Runtime install.ps1 exit code $Code"
+if ($Code -notin 0, 1707, 3010, 1641) { exit $Code }
+$Out = & $PowerShell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'Detect.ps1')
+$Detected = $LASTEXITCODE
+if ($Detected -ne 0 -or -not ([string]$Out).Trim()) { Write-Output "PackTune Runtime detection: not detected (exit code $Detected)"; exit 1 }
+Write-Output "PackTune Runtime detection: $(([string]$Out).Trim())"
+exit 0
+'@
+}
+
 function Start-PackTuneWin32Lab {
     <#
         Opens the test lab in a fresh sandbox and plays the package through the paths Intune takes, as SYSTEM like the Intune
@@ -781,6 +800,9 @@ function Start-PackTuneWin32Lab {
     param(
         [Parameter(Mandatory = $true)][string]$DisplayName, [string]$Version = '', [Parameter(Mandatory = $true)][hashtable]$Scripts,
         [string]$SourcePath, [hashtable]$PreviousScripts, [string]$PreviousSourcePath, [string]$PreviousVersion = '',
+        # The dependency app (PackTune Runtime): its install.ps1 (and the other package files) in -RuntimeSourcePath, its detection as -RuntimeDetection.
+        # The lab installs it first, as its own step, exactly like Intune does before the app; when it fails nothing else runs.
+        [string]$RuntimeSourcePath, [string]$RuntimeDetection,
         [switch]$AutoRun, [Nullable[bool]]$Networking, [int]$TimeoutMinutes
     )
     foreach ($Required in 'Install.ps1', 'Uninstall.ps1', 'Detect.ps1') { if (-not $Scripts.ContainsKey($Required)) { throw "The lab needs the script $Required." } }
@@ -788,12 +810,21 @@ function Start-PackTuneWin32Lab {
     if ($HasPrevious) { foreach ($Required in 'Install.ps1', 'Uninstall.ps1', 'Detect.ps1') { if (-not $PreviousScripts.ContainsKey($Required)) { throw "The previous version needs the script $Required." } } }
     if (-not $TimeoutMinutes) { $TimeoutMinutes = if ($AutoRun) { [int]$script:Options.JobTimeoutMinutes } else { 480 } }
     if ($null -eq $Networking) { $Networking = [bool]$script:Options.Networking }
+    $HasRuntime = [bool]$RuntimeSourcePath
+    if ($HasRuntime -and -not ($RuntimeDetection -and (Test-Path -LiteralPath (Join-Path $RuntimeSourcePath 'install.ps1')))) { throw 'The runtime step needs install.ps1 in the runtime folder and its detection script.' }
     Write-SandboxLog 'Step 1 of 4: preparing the test (creating the sandbox files).'
-    $Job = New-SandboxJob -Mode Lab -Name $DisplayName -Data @{ AutoClose = $false; AutoRun = [bool]$AutoRun; DisplayName = $DisplayName; Version = $Version; HasPrevious = $HasPrevious; PreviousVersion = $PreviousVersion }
+    $Job = New-SandboxJob -Mode Lab -Name $DisplayName -Data @{ AutoClose = $false; AutoRun = [bool]$AutoRun; DisplayName = $DisplayName; Version = $Version; HasPrevious = $HasPrevious; PreviousVersion = $PreviousVersion; HasRuntime = $HasRuntime }
     $Source = Join-Path $Job 'input\source'
     New-Item -ItemType Directory -Path $Source -Force | Out-Null
     if ($SourcePath) { Copy-Item -Path (Join-Path $SourcePath '*') -Destination $Source -Recurse -Force }
     foreach ($Name in $Scripts.Keys) { Set-Content -Path (Join-Path $Source $Name) -Value $Scripts[$Name] -Encoding UTF8 }
+    if ($HasRuntime) {
+        $Runtime = Join-Path $Job 'input\source-runtime'
+        New-Item -ItemType Directory -Path $Runtime -Force | Out-Null
+        Copy-Item -Path (Join-Path $RuntimeSourcePath '*') -Destination $Runtime -Recurse -Force
+        Set-Content -Path (Join-Path $Runtime 'Detect.ps1') -Value $RuntimeDetection -Encoding UTF8
+        Set-Content -Path (Join-Path $Runtime 'Runtime.ps1') -Value (Get-PackTuneLabRuntimeStep) -Encoding UTF8
+    }
     if ($HasPrevious) {
         $Previous = Join-Path $Job 'input\source-previous'
         New-Item -ItemType Directory -Path $Previous -Force | Out-Null
@@ -815,7 +846,7 @@ function Start-PackTuneWin32Lab {
 
 #endregion
 
-Export-ModuleMember -Function Set-PackTuneSandboxLog, Set-PackTuneSandboxOption, Set-PackTuneSandboxLauncher, Get-PackTuneSandboxWorkspace, Test-PackTuneSandboxAvailable, Test-PackTuneSandboxRunning, Wait-PackTuneSandboxClosed,
+Export-ModuleMember -Function Get-PackTuneLabRuntimeStep, Set-PackTuneSandboxLog, Set-PackTuneSandboxOption, Set-PackTuneSandboxLauncher, Get-PackTuneSandboxWorkspace, Test-PackTuneSandboxAvailable, Test-PackTuneSandboxRunning, Wait-PackTuneSandboxClosed,
     ConvertTo-PackTuneMsixVersion, ConvertTo-PackTuneMsixPackageName, Get-PackTuneNextMsixVersion,
     Get-PackTuneToolchain, Get-PackTuneToolchainState, Update-PackTuneToolchain,
     Get-PackTuneMsixInfo, Get-PackTuneMsixIdentity, New-PackTuneSigningCertificate, Remove-PackTuneSigningCertificate, Invoke-PackTuneSigning,
