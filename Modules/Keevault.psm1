@@ -18,17 +18,114 @@ function Set-PackTuneSignInLog {
 function Write-SignInLog([string]$Text, [string]$Level = 'Info') { & $script:Log $Text $Level }
 
 # ---------------------------------------------------------------- Keevault MCP client (JSON-RPC over stdio)
+# Keevault.exe is started as Node (ELECTRON_RUN_AS_NODE) with the MCP host script: whatever runs there runs with the rights
+# of this process, which may be elevated (AVDTune runs this module as administrator). So the exe and the script are taken
+# only from fixed places of this user (or Program Files), never from the path of a running process, and they must not be
+# writable by anyone but this user, administrators and the system. Keevault is not Authenticode-signed (checked on
+# 0.10.0.0): a signature, once present, must be valid and from a pinned publisher; a pinned SHA256 list can be set too
+# (Set-KeevaultTrust). The running Keevault counts only in this session and for this user.
+$script:KeevaultPublishers = @()       # pinned signer subjects (Keevault ships unsigned today)
+$script:KeevaultSha256 = @()           # optional pinned SHA256 hashes of Keevault.exe (empty = not pinned)
+$script:KeevaultProcessSource = $null  # tests: scriptblock returning @{ Id; SessionId; Path; OwnerSid }
+$script:WriteRightsMask = 0x2 -bor 0x4 -bor 0x10 -bor 0x40 -bor 0x100 -bor 0x10000 -bor 0x40000 -bor 0x80000 -bor 0x10000000 -bor 0x40000000
+
+function Set-KeevaultTrust {
+    <# Pins the Keevault signer subjects and/or SHA256 hashes of Keevault.exe (for example an elevated caller like AVDTune). #>
+    param([string[]]$Publisher, [string[]]$Sha256)
+    if ($PSBoundParameters.ContainsKey('Publisher')) { $script:KeevaultPublishers = @($Publisher | Where-Object { $_ }) }
+    if ($PSBoundParameters.ContainsKey('Sha256')) { $script:KeevaultSha256 = @($Sha256 | Where-Object { $_ } | ForEach-Object { $_.ToUpperInvariant() }) }
+}
+
+function Get-KeevaultTrustedRoots {
+    @((Join-Path $env:LOCALAPPDATA 'Programs\Keevault'), (Join-Path $env:ProgramFiles 'Keevault')) | Where-Object { $_ }
+}
+
+function Test-KeevaultPathUnder([string]$Path, [string[]]$Roots) {
+    if (-not $Path) { return $false }
+    $full = try { [IO.Path]::GetFullPath($Path) } catch { return $false }
+    foreach ($r in $Roots) { $root = [IO.Path]::GetFullPath($r).TrimEnd('\') + '\'; if ($full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { return $true } }
+    $false
+}
+
+function Get-KeevaultWriteRisk {
+    <#
+    The principals other than this user, administrators, SYSTEM and TrustedInstaller that may change the file or one of its
+    folders up to (and including) $Root (write, append, delete, change permissions or owner). Empty = trusted.
+    #>
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Root)
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $allowed = @($me, 'S-1-5-18', 'S-1-5-32-544', 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464')
+    $rootFull = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $risk = New-Object System.Collections.Generic.List[string]
+    $item = [IO.Path]::GetFullPath($Path)
+    while ($item) {
+        if (-not (Test-Path -LiteralPath $item)) { $risk.Add("$item is missing"); break }
+        $acl = Get-Acl -LiteralPath $item
+        $owner = try { $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value } catch { '' }
+        if ($owner -notin $allowed) { $risk.Add("$item is owned by $owner") }
+        foreach ($ace in $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])) {
+            if ($ace.AccessControlType -ne 'Allow') { continue }
+            if ($ace.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) { continue }
+            if (([int64]$ace.FileSystemRights -band $script:WriteRightsMask) -and $ace.IdentityReference.Value -notin $allowed) { $risk.Add("$($ace.IdentityReference.Value) may change $item") }
+        }
+        if ($item.TrimEnd('\') -ieq $rootFull) { break }
+        $parent = Split-Path $item -Parent
+        if (-not $parent -or $parent -eq $item) { break }
+        $item = $parent
+    }
+    @($risk)
+}
+
+function Get-KeevaultProcesses {
+    # The running Keevault processes with session and owner (the owner query works for own processes without elevation)
+    if ($script:KeevaultProcessSource) { return @(& $script:KeevaultProcessSource) }
+    foreach ($p in @(Get-Process Keevault -ErrorAction SilentlyContinue)) {
+        $sid = try { [string](Get-CimInstance Win32_Process -Filter "ProcessId=$($p.Id)" -ErrorAction Stop | Invoke-CimMethod -MethodName GetOwnerSid -ErrorAction Stop).Sid } catch { '' }
+        [pscustomobject]@{ Id = $p.Id; SessionId = $p.SessionId; Path = $(try { $p.Path } catch { '' }); OwnerSid = $sid }
+    }
+}
+
 function Find-KeevaultMcp {
-    <# Where Keevault and its MCP host script are, and whether it is installed, MCP is switched on and the app runs. #>
-    $running = Get-Process Keevault -ErrorAction SilentlyContinue | Where-Object Path | Select-Object -First 1
-    $exe = if ($running) { $running.Path } else { Join-Path $env:LOCALAPPDATA 'Programs\Keevault\Keevault.exe' }
+    <#
+    Where Keevault and its MCP host script are, and whether it is installed, MCP is switched on and the app runs. The exe is
+    the installed one of this user (or Program Files); a running Keevault counts only in this session, for this user and
+    with that same exe. The trust of the files is checked by Assert-KeevaultTrust before anything is started.
+    #>
+    $exe = @(Get-KeevaultTrustedRoots | ForEach-Object { Join-Path $_ 'Keevault.exe' } | Where-Object { Test-Path -LiteralPath $_ }) | Select-Object -First 1
+    if (-not $exe) { $exe = Join-Path $env:LOCALAPPDATA 'Programs\Keevault\Keevault.exe' }
     $script = Join-Path $env:APPDATA 'KeyVault PwSafe\mcp\keevault-mcp.cjs'
+    $me = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $session = (Get-Process -Id $PID).SessionId
+    $running = @(Get-KeevaultProcesses | Where-Object { $_.SessionId -eq $session -and $_.OwnerSid -eq $me -and $_.Path -and ([IO.Path]::GetFullPath($_.Path) -ieq [IO.Path]::GetFullPath($exe)) }) | Select-Object -First 1
     [pscustomobject]@{
         Exe        = $exe
         Script     = $script
-        Installed  = (Test-Path $exe)
-        McpEnabled = (Test-Path $script)
+        Installed  = (Test-Path -LiteralPath $exe)
+        McpEnabled = (Test-Path -LiteralPath $script)
         Running    = [bool]$running
+    }
+}
+
+function Assert-KeevaultTrust {
+    <# Refuses to start Keevault as Node unless the exe and the MCP script are where and what they should be (see above). #>
+    param([Parameter(Mandatory)]$Kv)
+    $roots = @(Get-KeevaultTrustedRoots)
+    if (-not (Test-KeevaultPathUnder $Kv.Exe $roots)) { throw "Keevault is not started from $($Kv.Exe): only an installation under $($roots -join ' or ') is used." }
+    $root = @($roots | Where-Object { Test-KeevaultPathUnder $Kv.Exe @($_) })[0]
+    $risk = @(Get-KeevaultWriteRisk -Path $Kv.Exe -Root $root)
+    if ($risk.Count) { throw "Keevault is not started: its program files can be changed by others ($($risk[0])). Reinstall Keevault or fix the permissions." }
+    $scriptRoot = Join-Path $env:APPDATA 'KeyVault PwSafe'
+    $risk = @(Get-KeevaultWriteRisk -Path $Kv.Script -Root $scriptRoot)
+    if ($risk.Count) { throw "Keevault's MCP script is not used: it can be changed by others ($($risk[0]))." }
+    $sig = Get-AuthenticodeSignature -FilePath $Kv.Exe
+    if ($sig.Status -ne 'NotSigned') {
+        if ($sig.Status -ne 'Valid') { throw "Keevault is not started: its signature is $($sig.Status)." }
+        if ($script:KeevaultPublishers.Count -and [string]$sig.SignerCertificate.Subject -notin $script:KeevaultPublishers) { throw "Keevault is not started: it is signed by '$($sig.SignerCertificate.Subject)', not by the pinned publisher." }
+    }
+    elseif ($script:KeevaultPublishers.Count) { throw 'Keevault is not started: it is not signed, but a publisher is pinned.' }
+    if ($script:KeevaultSha256.Count) {
+        $hash = (Get-FileHash -LiteralPath $Kv.Exe -Algorithm SHA256).Hash
+        if ($hash -notin $script:KeevaultSha256) { throw "Keevault is not started: Keevault.exe ($hash) is not one of the pinned versions." }
     }
 }
 
@@ -39,6 +136,7 @@ function Connect-KeevaultMcp {
     if (-not $kv.Installed) { throw 'Keevault is not installed on this computer.' }
     if (-not $kv.McpEnabled) { throw 'AI agents (MCP) are switched off in Keevault: Keevault > Settings > AI agents (MCP) > switch on and save.' }
     if (-not $kv.Running) { throw 'Keevault is not running. Start and unlock Keevault, then sign in again.' }
+    Assert-KeevaultTrust $kv
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $kv.Exe
@@ -130,6 +228,29 @@ function Close-KeevaultMcp {
 }
 
 # ---------------------------------------------------------------- embedded browser (WebView2)
+function Test-PackTuneMicrosoftSigned([string]$Path) {
+    # Valid Authenticode signature whose signer is Microsoft Corporation (exact organization, not a look-alike)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    $sig = Get-AuthenticodeSignature -FilePath $Path
+    $sig.Status -eq 'Valid' -and [string]$sig.SignerCertificate.Subject -match '(^|,\s*)O=Microsoft Corporation(\s*,|$)'
+}
+
+function Test-PackTuneWebView2Sdk {
+    <# Why the cached WebView2 SDK must not be loaded, or $null: signatures, the hashes of the checked download, permissions. #>
+    param([Parameter(Mandatory)][string]$CacheFolder)
+    $manifestPath = Join-Path $CacheFolder 'webview2-sdk.json'
+    $m = try { Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json } catch { $null }
+    if (-not $m -or -not $m.Sha256) { return 'no record of the checked download' }
+    foreach ($name in 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.Wpf.dll', 'WebView2Loader.dll') {
+        $f = Join-Path $CacheFolder $name
+        if (-not (Test-PackTuneMicrosoftSigned $f)) { return "$name is missing or not signed by Microsoft" }
+        if ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne [string]$m.Sha256.$name) { return "$name is not the file of the checked download ($($m.Version))" }
+    }
+    $risk = @(Get-KeevaultWriteRisk -Path (Join-Path $CacheFolder 'Microsoft.Web.WebView2.Core.dll') -Root $CacheFolder)
+    if ($risk.Count) { return "the folder can be changed by others: $($risk[0])" }
+    $null
+}
+
 function Get-PackTuneWebView2 {
     <#
     Loads the WebView2 SDK (Core + WPF) for the embedded sign-in window. Downloaded once from NuGet into
@@ -140,7 +261,10 @@ function Get-PackTuneWebView2 {
     $core = Join-Path $CacheFolder 'Microsoft.Web.WebView2.Core.dll'
     $wpf = Join-Path $CacheFolder 'Microsoft.Web.WebView2.Wpf.dll'
     $loader = Join-Path $CacheFolder 'WebView2Loader.dll'
-    if (-not ((Test-Path $core) -and (Test-Path $wpf) -and (Test-Path $loader))) {
+    $manifest = Join-Path $CacheFolder 'webview2-sdk.json'
+    # Without the manifest of a checked download (older versions) the SDK is downloaded again: nothing unchecked is loaded
+    $loaded = [bool]('Microsoft.Web.WebView2.Wpf.WebView2' -as [type])
+    if (-not $loaded -and -not ((Test-Path $core) -and (Test-Path $wpf) -and (Test-Path $loader) -and (Test-Path $manifest))) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
         $index = Invoke-RestMethod 'https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/index.json' -TimeoutSec 20
         $version = @($index.versions | Where-Object { $_ -notmatch '-' })[-1]
@@ -163,14 +287,23 @@ function Get-PackTuneWebView2 {
         }
         finally { $zip.Dispose(); Remove-Item $nupkg -Force -ErrorAction SilentlyContinue }
         foreach ($f in $core, $wpf, $loader) {
-            $sig = if (Test-Path $f) { Get-AuthenticodeSignature -FilePath $f }
-            if (-not $sig -or $sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'O=Microsoft Corporation') {
+            if (-not (Test-PackTuneMicrosoftSigned $f)) {
                 Remove-Item $CacheFolder -Recurse -Force -ErrorAction SilentlyContinue
                 throw "The WebView2 SDK file $(Split-Path $f -Leaf) is missing or not signed by Microsoft."
             }
         }
+        # What was checked: version and hashes, compared again on every load
+        $hashes = [ordered]@{}
+        foreach ($f in $core, $wpf, $loader) { $hashes[(Split-Path $f -Leaf)] = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash }
+        ([ordered]@{ Version = $version; Sha256 = $hashes } | ConvertTo-Json) | Set-Content -LiteralPath $manifest -Encoding UTF8
     }
     if (-not ('Microsoft.Web.WebView2.Wpf.WebView2' -as [type])) {
+        # Checked on every load, not only after the download: fail closed, the next sign-in downloads it again
+        $problem = Test-PackTuneWebView2Sdk -CacheFolder $CacheFolder
+        if ($problem) {
+            Remove-Item $CacheFolder -Recurse -Force -ErrorAction SilentlyContinue
+            throw "The WebView2 SDK in $CacheFolder failed its check ($problem) and was removed. Sign in again to download it fresh from NuGet."
+        }
         Add-Type -Path $core
         Add-Type -Path $wpf
         [Microsoft.Web.WebView2.Core.CoreWebView2Environment]::SetLoaderDllFolderPath($CacheFolder)
@@ -344,6 +477,31 @@ function Get-PackTuneSessionFolder {
 }
 
 $script:SignInEnvironments = @{}
+
+function Remove-PackTuneTempProfile {
+    <# Deletes a temporary sign-in profile (cookies) once its WebView2 browser process has ended; retries while files are locked. #>
+    param([Parameter(Mandatory)][string]$Folder, [int]$BrowserPid, [int]$WaitSeconds = 10, [int]$Tries = 20, [int]$DelayMs = 250)
+    if ($BrowserPid) {
+        try { $p = Get-Process -Id $BrowserPid -ErrorAction Stop; [void]$p.WaitForExit($WaitSeconds * 1000) } catch { }
+    }
+    for ($i = 0; $i -lt $Tries; $i++) {
+        if (-not (Test-Path -LiteralPath $Folder)) { return $true }
+        try { Remove-Item -LiteralPath $Folder -Recurse -Force -ErrorAction Stop; return $true } catch { Start-Sleep -Milliseconds $DelayMs }
+    }
+    Write-SignInLog "The temporary sign-in profile $Folder could not be deleted yet; it is removed at the next start." 'Warning'
+    $false
+}
+
+function Clear-PackTuneSignInLeftovers {
+    <# Temporary sign-in profiles of earlier runs (%TEMP%\PackTuneSignIn-*) that are older than a sign-in can take. #>
+    param([int]$OlderThanMinutes = 30)
+    $cut = (Get-Date).AddMinutes(-$OlderThanMinutes)
+    foreach ($d in @(Get-ChildItem -LiteralPath ([IO.Path]::GetTempPath()) -Directory -Filter 'PackTuneSignIn-*' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt $cut })) {
+        try { Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction Stop } catch { }
+    }
+}
+# Leftovers of earlier runs go at the start (best effort: a profile still in use stays)
+try { Clear-PackTuneSignInLeftovers } catch { }
 function Get-PackTuneEnvironment {
     <# ONE CoreWebView2Environment per profile folder, created once and used by every sign-in window and the keep-alive window
        (all of them need the same options: none; the passkey shim is a script, not an environment option). Waits with the dispatcher
@@ -508,6 +666,7 @@ function Invoke-PackTuneBrowserSignIn {
     $wv.Add_CoreWebView2InitializationCompleted({
         param($s, $e)
         if (-not $e.IsSuccess) { $ctx.Error = "The embedded browser could not start: $($e.InitializationException.Message)"; $win.Close(); return }
+        try { $ctx.BrowserPid = $s.CoreWebView2.BrowserProcessId } catch { }
         $s.CoreWebView2.Settings.AreDevToolsEnabled = $false
         $s.CoreWebView2.Settings.IsStatusBarEnabled = $false
         if ($Passkey) { [void]$s.CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync($script:PasskeyShimScript) }
@@ -613,8 +772,8 @@ function Invoke-PackTuneBrowserSignIn {
     finally {
         $watch.Stop()
         $wv.Dispose()
-        if (-not $persistent) { Start-Sleep -Milliseconds 300 }
-        if (-not $persistent) { Remove-Item $userData -Recurse -Force -ErrorAction SilentlyContinue }
+        # The temporary profile holds the session cookies: deleted after its browser process has ended, with retries
+        if (-not $persistent) { [void]$script:SignInEnvironments.Remove($userData); [void](Remove-PackTuneTempProfile -Folder $userData -BrowserPid $ctx.BrowserPid) }
     }
 
     if ($ctx.Error) { throw $ctx.Error }
@@ -717,5 +876,5 @@ function Connect-PackTuneWithKeevault {
     $token
 }
 
-Export-ModuleMember -Function Set-PackTuneSignInLog, Find-KeevaultMcp, Connect-KeevaultMcp, Invoke-KeevaultMcpRequest, Invoke-KeevaultMcpTool, Close-KeevaultMcp,
+Export-ModuleMember -Function Set-PackTuneSignInLog, Set-KeevaultTrust, Find-KeevaultMcp, Connect-KeevaultMcp, Invoke-KeevaultMcpRequest, Invoke-KeevaultMcpTool, Close-KeevaultMcp,
     Get-PackTuneWebView2, Get-PackTuneEnvironment, Set-PackTuneSignInMethod, Get-PackTuneCookieSummary, Get-PackTuneSessionFolder, Start-PackTuneSessionHold, Close-PackTuneSessionHold, Clear-PackTuneSession, Get-PackTuneAuthorizeUrl, Request-PackTuneToken, Invoke-PackTuneBrowserSignIn, Connect-PackTuneWithKeevault
