@@ -1,5 +1,5 @@
 # The Microsoft sign-in of PackTune in an embedded browser (WebView2): authorization code with PKCE (public client,
-# loopback redirect), token redemption, the WebView2 SDK (checked on every load), the shared and the
+# loopback redirect), token redemption, the WebView2 SDK (pinned version, checked on every load), the shared and the
 # temporary sign-in profiles. Needs no Keevault: Modules\Keevault.psm1 builds on it (it fills this window from Keevault),
 # and other tools (AVDTune) use it alone. The token goes to the IntuneWin32App module with Set-PackTuneToken.
 
@@ -54,77 +54,82 @@ function Test-PackTuneMicrosoftSigned([string]$Path) {
     $sig.Status -eq 'Valid' -and [string]$sig.SignerCertificate.Subject -match '(^|,\s*)O=Microsoft Corporation(\s*,|$)'
 }
 
+# The WebView2 SDK is pinned: this NuGet version and these SHA256 hashes (package and the three files used), no "latest"
+# lookup. Changing the version is a deliberate code change: new version, new hashes (nupkg hash cross-checked against the
+# SHA512 packageHash of the NuGet catalog), Tests\Check-SignIn.ps1.
+$script:WebView2SdkVersion = '1.0.4314.35'   # Microsoft.Web.WebView2, published 2026-10-23
+$script:WebView2NupkgSha256 = '90778DEB1B77E36292828B4B5833C9255C27533F40E0DDD55891AE718944EDC4'
+$script:WebView2DllSha256 = [ordered]@{
+    'Microsoft.Web.WebView2.Core.dll' = 'ACDD517B951829F763D1255F32DF1E6A936CB8623A7EBFF6B8B24172DEDE6BD6'
+    'Microsoft.Web.WebView2.Wpf.dll'  = 'BAAFA0A595C2CEFB3BE8F18288C3DB76F52E3966C8B99957D5E56CAF1B137BC1'
+    'WebView2Loader.dll'              = 'D3FCE90BDEECB08596E377DEA6A316354DD8949E32FF09B89D51BE00C14E21B6'
+}
+$script:WebView2Download = $null   # tests: scriptblock (Uri, OutFile) instead of the download
+
 function Test-PackTuneWebView2Sdk {
-    <# Why the cached WebView2 SDK must not be loaded, or $null: signatures, the hashes of the checked download, permissions. #>
+    <# Why the cached WebView2 SDK must not be loaded, or $null: Microsoft signature, the pinned hashes, permissions. #>
     param([Parameter(Mandatory)][string]$CacheFolder)
-    $manifestPath = Join-Path $CacheFolder 'webview2-sdk.json'
-    $m = try { Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json } catch { $null }
-    if (-not $m -or -not $m.Sha256) { return 'no record of the checked download' }
-    foreach ($name in 'Microsoft.Web.WebView2.Core.dll', 'Microsoft.Web.WebView2.Wpf.dll', 'WebView2Loader.dll') {
+    foreach ($name in $script:WebView2DllSha256.Keys) {
         $f = Join-Path $CacheFolder $name
         if (-not (Test-PackTuneMicrosoftSigned $f)) { return "$name is missing or not signed by Microsoft" }
-        if ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne [string]$m.Sha256.$name) { return "$name is not the file of the checked download ($($m.Version))" }
+        if ((Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash -ne $script:WebView2DllSha256[$name]) { return "$name is not the pinned file of version $($script:WebView2SdkVersion)" }
     }
     $risk = @(Get-PackTuneWriteRisk -Path (Join-Path $CacheFolder 'Microsoft.Web.WebView2.Core.dll') -Root $CacheFolder)
     if ($risk.Count) { return "the folder can be changed by others: $($risk[0])" }
     $null
 }
 
-function Get-PackTuneWebView2 {
-    <#
-    Loads the WebView2 SDK (Core + WPF) for the embedded sign-in window. Downloaded once from NuGet into
-    $CacheFolder; the DLLs must carry a valid Microsoft signature. Needs the WebView2 runtime (part of Windows 11,
-    otherwise installed with Edge).
-    #>
+function Install-PackTuneWebView2Sdk {
+    <# Downloads the pinned WebView2 SDK into $CacheFolder: package hash first, then signature and hash of every file. #>
     param([Parameter(Mandatory)][string]$CacheFolder)
-    $core = Join-Path $CacheFolder 'Microsoft.Web.WebView2.Core.dll'
-    $wpf = Join-Path $CacheFolder 'Microsoft.Web.WebView2.Wpf.dll'
-    $loader = Join-Path $CacheFolder 'WebView2Loader.dll'
-    $manifest = Join-Path $CacheFolder 'webview2-sdk.json'
-    # Without the manifest of a checked download (older versions) the SDK is downloaded again: nothing unchecked is loaded
-    $loaded = [bool]('Microsoft.Web.WebView2.Wpf.WebView2' -as [type])
-    if (-not $loaded -and -not ((Test-Path $core) -and (Test-Path $wpf) -and (Test-Path $loader) -and (Test-Path $manifest))) {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-        $index = Invoke-RestMethod 'https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/index.json' -TimeoutSec 20
-        $version = @($index.versions | Where-Object { $_ -notmatch '-' })[-1]
-        Write-SignInLog "Downloading the WebView2 SDK $version for the embedded sign-in ..."
-        $nupkg = Join-Path ([IO.Path]::GetTempPath()) "webview2-$version.zip"
-        Invoke-WebRequest -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$version/microsoft.web.webview2.$version.nupkg" -OutFile $nupkg -UseBasicParsing -TimeoutSec 120
+    $version = $script:WebView2SdkVersion
+    Write-SignInLog "Downloading the WebView2 SDK $version for the embedded sign-in ..."
+    $nupkg = Join-Path ([IO.Path]::GetTempPath()) ("webview2-$version-" + [guid]::NewGuid().ToString('N') + '.zip')
+    $uri = "https://api.nuget.org/v3-flatcontainer/microsoft.web.webview2/$version/microsoft.web.webview2.$version.nupkg"
+    try {
+        if ($script:WebView2Download) { & $script:WebView2Download $uri $nupkg }
+        else {
+            [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+            Invoke-WebRequest -Uri $uri -OutFile $nupkg -UseBasicParsing -TimeoutSec 120
+        }
+        $got = (Get-FileHash -LiteralPath $nupkg -Algorithm SHA256).Hash
+        if ($got -ne $script:WebView2NupkgSha256) { throw "The downloaded WebView2 SDK $version is not the pinned package (SHA256 $got); nothing was installed." }
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         if (Test-Path $CacheFolder) { Remove-Item $CacheFolder -Recurse -Force }
         New-Item -ItemType Directory -Path $CacheFolder -Force | Out-Null
+        $wanted = @{
+            'lib/net462/Microsoft.Web.WebView2.Core.dll' = 'Microsoft.Web.WebView2.Core.dll'
+            'lib/net462/Microsoft.Web.WebView2.Wpf.dll'  = 'Microsoft.Web.WebView2.Wpf.dll'
+            'runtimes/win-x64/native/WebView2Loader.dll' = 'WebView2Loader.dll'
+        }
         $zip = [IO.Compression.ZipFile]::OpenRead($nupkg)
-        try {
-            $wanted = @{
-                'lib/net462/Microsoft.Web.WebView2.Core.dll' = $core
-                'lib/net462/Microsoft.Web.WebView2.Wpf.dll'  = $wpf
-                'runtimes/win-x64/native/WebView2Loader.dll' = $loader
-            }
-            foreach ($e in $zip.Entries) {
-                if ($wanted.ContainsKey($e.FullName)) { [IO.Compression.ZipFileExtensions]::ExtractToFile($e, $wanted[$e.FullName], $true) }
-            }
-        }
-        finally { $zip.Dispose(); Remove-Item $nupkg -Force -ErrorAction SilentlyContinue }
-        foreach ($f in $core, $wpf, $loader) {
-            if (-not (Test-PackTuneMicrosoftSigned $f)) {
-                Remove-Item $CacheFolder -Recurse -Force -ErrorAction SilentlyContinue
-                throw "The WebView2 SDK file $(Split-Path $f -Leaf) is missing or not signed by Microsoft."
-            }
-        }
-        # What was checked: version and hashes, compared again on every load
-        $hashes = [ordered]@{}
-        foreach ($f in $core, $wpf, $loader) { $hashes[(Split-Path $f -Leaf)] = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash }
-        ([ordered]@{ Version = $version; Sha256 = $hashes } | ConvertTo-Json) | Set-Content -LiteralPath $manifest -Encoding UTF8
+        try { foreach ($e in $zip.Entries) { if ($wanted.ContainsKey($e.FullName)) { [IO.Compression.ZipFileExtensions]::ExtractToFile($e, (Join-Path $CacheFolder $wanted[$e.FullName]), $true) } } }
+        finally { $zip.Dispose() }
     }
+    finally { Remove-Item -LiteralPath $nupkg -Force -ErrorAction SilentlyContinue }
+    $problem = Test-PackTuneWebView2Sdk -CacheFolder $CacheFolder
+    if ($problem) { Remove-Item $CacheFolder -Recurse -Force -ErrorAction SilentlyContinue; throw "The WebView2 SDK $version was not installed: $problem." }
+    ([ordered]@{ Version = $version } | ConvertTo-Json) | Set-Content -LiteralPath (Join-Path $CacheFolder 'webview2-sdk.json') -Encoding UTF8
+}
+
+function Get-PackTuneWebView2 {
+    <#
+    Loads the WebView2 SDK (Core + WPF) for the embedded sign-in window: the pinned version, downloaded once from NuGet
+    into $CacheFolder and checked on every load (Microsoft signature, pinned hashes, permissions). A cache of another
+    version is replaced; a cache of this version that fails its check is removed and the call fails (fail closed; the next
+    sign-in downloads it again). Needs the WebView2 runtime (part of Windows 11, otherwise installed with Edge).
+    #>
+    param([Parameter(Mandatory)][string]$CacheFolder)
     if (-not ('Microsoft.Web.WebView2.Wpf.WebView2' -as [type])) {
-        # Checked on every load, not only after the download: fail closed, the next sign-in downloads it again
+        $marker = try { Get-Content -LiteralPath (Join-Path $CacheFolder 'webview2-sdk.json') -Raw | ConvertFrom-Json } catch { $null }
+        if ([string]$marker.Version -ne $script:WebView2SdkVersion) { Install-PackTuneWebView2Sdk -CacheFolder $CacheFolder }
         $problem = Test-PackTuneWebView2Sdk -CacheFolder $CacheFolder
         if ($problem) {
             Remove-Item $CacheFolder -Recurse -Force -ErrorAction SilentlyContinue
             throw "The WebView2 SDK in $CacheFolder failed its check ($problem) and was removed. Sign in again to download it fresh from NuGet."
         }
-        Add-Type -Path $core
-        Add-Type -Path $wpf
+        Add-Type -Path (Join-Path $CacheFolder 'Microsoft.Web.WebView2.Core.dll')
+        Add-Type -Path (Join-Path $CacheFolder 'Microsoft.Web.WebView2.Wpf.dll')
         [Microsoft.Web.WebView2.Core.CoreWebView2Environment]::SetLoaderDllFolderPath($CacheFolder)
     }
     try { [void][Microsoft.Web.WebView2.Core.CoreWebView2Environment]::GetAvailableBrowserVersionString() }
