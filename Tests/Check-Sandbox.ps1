@@ -242,12 +242,14 @@ Set-PackTuneSandboxLauncher -Launcher {
     & $mod { $script:FakeProcs = @($script:FakeProcs) + @(222, 223) }
     @{ State = 'Succeeded'; Step = 'Done'; Message = 'ok'; Result = @{ Verdict = 'Passed'; Notes = 'n' } } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $job 'status.json')
 }
+& $mod { $script:RealForeign = ${function:Test-PackTuneForeignSandbox}; function script:Test-PackTuneForeignSandbox { $false } }   # this block checks the closing; a foreign sandbox that blocks a start is checked further down
 & $mod { $script:FakeProcs = @(111) }   # a sandbox process that was there before (not PackTune's)
 Set-PackTuneSandboxOption -Name KeepLabOpen -Value $false   # the default keeps the lab sandbox open for the next test (checked below)
 $labClose = Start-PackTuneWin32Lab -DisplayName 'Close App' -Scripts @{ 'Install.ps1' = 'exit 0'; 'Uninstall.ps1' = 'exit 0'; 'Detect.ps1' = 'x' } -AutoRun
 $stopped = & $mod { @($script:StopCalls) }; $left = & $mod { @($script:FakeProcs) }
 Test-Check 'close: after the verdict the sandbox PackTune started is closed, the result stays visible first' ($labClose.Verdict -eq 'Passed' -and (@($stopped) -join ',') -eq '222,223' -and (@($script:Logs | Where-Object { $_ -like '*sandbox closes in*' }).Count -eq 1) -and (@($script:Logs | Where-Object { $_ -like 'Windows Sandbox closed*' }).Count -eq 1))
 Test-Check 'close: a sandbox process that was there before PackTune launched (the user''s) is never touched' ((@($left) -join ',') -eq '111' -and $stopped -notcontains 111)
+& $mod { Set-Item function:script:Test-PackTuneForeignSandbox $script:RealForeign }
 & $mod { $script:StopCalls.Clear(); $script:FakeProcs = @() }
 $script:Logs.Clear()
 Set-PackTuneSandboxOption -Name KeepOpen -Value $true
