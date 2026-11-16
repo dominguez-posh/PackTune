@@ -34,6 +34,9 @@ $script:Options = @{
     KeepLabOpen       = $true
     # A lab sandbox counts as alive while its heartbeat file (written every few seconds from inside) is not older than this
     HeartbeatSeconds  = 30
+    # "New sandbox": how long PackTune waits for its own old lab sandbox to go away by itself before it closes the processes it started
+    NewSandboxWaitSeconds = 20
+    NewSandboxMaxSeconds  = 90
     # A started sandbox that has not written its first status after this long is said so in the log; after the second time the test fails with the cause
     StartWarnSeconds  = 60
     StartFailSeconds  = 180
@@ -194,13 +197,31 @@ function Test-PackTuneForeignSandbox {
 }
 
 function Request-PackTuneNewLabSandbox {
-    # "New sandbox": asks PackTune's own lab sandbox to shut down (the next test starts a clean one). Returns $true when there was one. Never touches another sandbox.
+    <#
+        "New sandbox": closes PackTune's own old lab sandbox and waits until it is gone (the next test then starts a clean one). Only the sandbox
+        whose heartbeat carries the token PackTune gave it counts (Get-PackTuneLabSession); a sandbox of the user or of anything else is never
+        touched. First the lab inside is asked to shut down (request file); when its processes are still there after NewSandboxWaitSeconds, the
+        processes that did not exist when PackTune started it are closed. Returns $true when there was an own sandbox (and it is gone now),
+        $false when there was none; throws when the old sandbox does not go away.
+    #>
     $Session = Get-PackTuneLabSession
     if (-not $Session) { return $false }
+    $Mine = { @(Get-SandboxProcessIds | Where-Object { $_ -notin @($Session.Before) }) }
+    Write-SandboxLog 'Closing the old test sandbox ...'
     New-Item -ItemType File -Path (Join-Path $Session.Dir 'newsandbox.request') -Force | Out-Null
     Remove-Item -LiteralPath (Get-PackTuneLabSessionFile) -Force -ErrorAction SilentlyContinue
-    Write-SandboxLog 'The lab sandbox is asked to close; the next test starts in a new one.'
-    $true
+    $Started = Get-Date
+    $Closed = $false
+    while (((Get-Date) - $Started).TotalSeconds -lt $script:Options.NewSandboxMaxSeconds) {
+        if (-not (@(& $Mine)).Count) { Write-SandboxLog 'The old test sandbox is closed.'; $script:SandboxOwned = $null; return $true }
+        if (-not $Closed -and ((Get-Date) - $Started).TotalSeconds -ge $script:Options.NewSandboxWaitSeconds) {
+            Write-SandboxLog 'The old test sandbox is still open: closing the processes PackTune started for it ...'
+            foreach ($Id in @(& $Mine)) { Stop-SandboxProcessId -Id $Id }
+            $Closed = $true
+        }
+        Start-Sleep -Seconds ([Math]::Max(0, $script:Options.PollSeconds))
+    }
+    throw 'The old test sandbox did not close. Close it yourself, then try again.'
 }
 
 #endregion
@@ -933,9 +954,7 @@ function Start-PackTuneWin32Lab {
     $env:PACKTUNE_SANDBOX_NEW = ''   # the menu item "Start the next test in a new sandbox" counts once
     $Session = Get-PackTuneLabSession
     if ($Session -and $WantNew) {
-        [void](Request-PackTuneNewLabSandbox)
-        $Until = (Get-Date).AddSeconds(60)
-        while (-not (Test-FakeLauncher) -and (Test-PackTuneSandboxRunning) -and (Get-Date) -lt $Until) { Start-Sleep -Seconds 2 }
+        [void](Request-PackTuneNewLabSandbox)   # waits until the old sandbox is gone, says "Closing the old test sandbox ..." meanwhile
         $Session = $null
     }
     if (-not $Session -and (Test-PackTuneForeignSandbox)) {

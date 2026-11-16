@@ -461,6 +461,45 @@ Remove-Item $sf -Force -ErrorAction SilentlyContinue
 $labText = Get-Content (Join-Path $repo 'Sandbox\Lab.ps1') -Raw; $hostText = Get-Content (Join-Path $repo 'Sandbox\LabHost.ps1') -Raw; $bootText = Get-Content (Join-Path $repo 'Sandbox\Bootstrap.ps1') -Raw
 Test-Check 'lab inside: the host stays, writes the heartbeat with the token, takes requests, a New sandbox button and the request file shut the sandbox down' ($bootText -match 'LabHost.ps1' -and $hostText -match 'heartbeat.json' -and $hostText -match 'Token' -and $hostText -match 'request.json' -and $hostText -match 'newsandbox.request' -and $hostText -match 'shutdown.exe' -and $hostText -match 'New sandbox')
 Test-Check 'lab inside: the panel says "reused sandbox, started .., test n", cleans up a leftover installation once before the test, and a reusable sandbox is not shut down at the end' ($labText -match 'reused sandbox, started' -and $labText -match 'CleanedOnce' -and $labText -match 'already installed from an earlier test' -and $labText -match 'if \(\$job.Reusable\) \{ \$form.Close\(\); return \}' -and $labText -match 'btnNew')
+# --- New sandbox: closes PackTune's own old sandbox (token proven), waits until it is gone, never a foreign one
+Set-PackTuneSandboxOption -Name PollSeconds -Value 0
+Set-PackTuneSandboxOption -Name NewSandboxWaitSeconds -Value 0
+Set-PackTuneSandboxOption -Name NewSandboxMaxSeconds -Value 5
+$script:Logs = New-Object System.Collections.ArrayList
+Set-PackTuneSandboxLog -Sink { param($Text, $Level) [void]$script:Logs.Add($Text) }
+Remove-Item (Join-Path $env:LOCALAPPDATA 'PackTune\Sandbox\lab-session.json') -Force -ErrorAction SilentlyContinue
+& $mod { $script:Stopped = New-Object System.Collections.ArrayList; $script:FakeIds = @(); function script:Get-SandboxProcessIds { @($script:FakeIds) }; function script:Stop-SandboxProcessId([int]$Id) { [void]$script:Stopped.Add($Id); $script:FakeIds = @($script:FakeIds | Where-Object { $_ -ne $Id }) } }
+Set-PackTuneSandboxLauncher -Launcher {
+    param($Path)
+    $dir = Split-Path $Path -Parent
+    if ($Path -like '*.wsb') {
+        & $mod { $script:FakeIds = @(222, 223) }
+        $j = Get-Content (Join-Path $dir 'job.json') -Raw | ConvertFrom-Json
+        @{ Token = $j.SessionToken; Started = (Get-Date).ToString('o'); Updated = (Get-Date).ToString('o'); State = 'Idle'; Tests = 1 } | ConvertTo-Json | Set-Content (Join-Path $dir 'heartbeat.json')
+    }
+    @{ State = 'Succeeded'; Step = 'Done'; Message = 'ok'; Result = @{ Verdict = 'Passed'; Notes = 'n' } } | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $dir 'status.json')
+}
+$scr2 = @{ 'Install.ps1' = 'exit 0'; 'Uninstall.ps1' = 'exit 0'; 'Detect.ps1' = 'x' }
+$env:PACKTUNE_SANDBOX_FAKEIDS = ''
+$null = Start-PackTuneWin32Lab -DisplayName 'Old App' -Scripts $scr2 -AutoRun
+$own = Get-PackTuneLabSession
+Test-Check 'new sandbox setup: PackTune started the lab sandbox (processes 222 and 223), the session proves it with the token' ($own -and (@(& $mod { $script:FakeIds }) -join ',') -eq '222,223')
+$ok = Request-PackTuneNewLabSandbox
+$left = @(& $mod { $script:FakeIds }) -join ','
+Test-Check 'new sandbox: the processes PackTune started are closed and waited for, the log says closing and closed' ($ok -and $left -eq '' -and ((@(& $mod { $script:Stopped }) | Sort-Object) -join ',') -eq '222,223' -and @($script:Logs | Where-Object { $_ -like 'Closing the old test sandbox*' }).Count -eq 1 -and @($script:Logs | Where-Object { $_ -like 'The old test sandbox is closed*' }).Count -eq 1) "$left"
+Test-Check 'new sandbox: the old session is gone afterwards' ($null -eq (Get-PackTuneLabSession))
+& $mod { $script:Stopped.Clear(); $script:FakeIds = @(333) }
+Test-Check 'new sandbox: with no sandbox of PackTune (333 is somebody else''s) nothing is closed and it says there was none' (-not (Request-PackTuneNewLabSandbox) -and @(& $mod { $script:Stopped }).Count -eq 0 -and (@(& $mod { $script:FakeIds }) -join ',') -eq '333')
+# a sandbox that does not go away: an error, not a new sandbox beside it
+& $mod { $script:FakeIds = @(); function script:Stop-SandboxProcessId([int]$Id) { } }
+$null = Start-PackTuneWin32Lab -DisplayName 'Stubborn App' -Scripts $scr2 -AutoRun
+$threw = ''; try { [void](Request-PackTuneNewLabSandbox) } catch { $threw = $_.Exception.Message }
+Test-Check 'new sandbox: an old sandbox that does not close is an error with the way out, never a second sandbox beside it' ($threw -like '*did not close*close it yourself*') $threw
+Set-PackTuneSandboxLauncher -Launcher $null
+Set-PackTuneSandboxLog -Sink { param($Text, $Level) }
+Remove-Item (Join-Path $env:LOCALAPPDATA 'PackTune\Sandbox\lab-session.json') -Force -ErrorAction SilentlyContinue
+$smokeText = Get-Content (Join-Path $repo 'Start-PackTune.ps1') -Raw
+Test-Check 'menu: New sandbox runs as a job (Closing the old test sandbox) so the window does not freeze' ($smokeText -match "Kind 'newsandbox'" -and $smokeText -match 'Closing the old test sandbox')
 # --- every step ends with its own state before the next one starts; a start failure is visible
 $p = @(New-LabPlan -Version '1.0' -HasRuntime $true)[0]
 $p[2].State = 'Running'

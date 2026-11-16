@@ -4801,7 +4801,17 @@ function Show-TestMenu([ValidateSet('Detail', 'Tenant', 'Custom')][string]$Kind,
     $close.Header = 'New sandbox: close the open test sandbox now'
     $labAlive = $null; try { $labAlive = Get-PackTuneLabSession } catch { }
     $close.IsEnabled = [bool]$labAlive
-    $close.Add_Click({ try { if (Request-PackTuneNewLabSandbox) { Show-Toast 'The test sandbox closes; the next test starts in a new one.' 'info' } } catch { Show-Error $_.Exception.Message } })
+    $close.Add_Click({
+        # A job (the wait can take a minute): Activity shows "Closing the old test sandbox ..." while it waits
+        try {
+            if (Test-TaskRunning 'newsandbox') { return }
+            [void](Start-UiTask -Kind 'newsandbox' -Title 'Closing the old test sandbox' -Display 'Test sandbox' -Work 'Request-PackTuneNewLabSandbox | Out-Null' -OnDone {
+                param($Result, $Job)
+                if ($Job.Status -eq 'succeeded') { Show-Toast 'The old test sandbox is closed; the next test starts in a new one.' 'ok' } else { Show-Toast 'The old test sandbox did not close: close it yourself.' 'warn' }
+            })
+        }
+        catch { Show-Error $_.Exception.Message }
+    })
     [void]$menu.Items.Add($close)
     Show-Flyout $menu $Target
 }
