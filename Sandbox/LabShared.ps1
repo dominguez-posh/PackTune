@@ -187,6 +187,20 @@ function Set-LabStepResult {
     $Step
 }
 
+function Set-LabStepFailed {
+    # A step the lab could not judge (an error while it recorded the result): it ends as Failed with the reason, never stays "running"
+    param([Parameter(Mandatory = $true)]$Step, [string]$Message)
+    $Step.State = 'Failed'
+    $Step.Detail = "Expected: $($Step.Expect). The lab could not record the result of this step: $Message"
+    $Step
+}
+
+function Close-LabOpenSteps {
+    # Before the next step starts or the verdict is made: every step that is still marked as running while nothing runs ends as Failed
+    param([Parameter(Mandatory = $true)]$Steps, [string]$Reason = 'no result was recorded for it')
+    foreach ($s in @($Steps | Where-Object { $_.State -eq 'Running' })) { [void](Set-LabStepFailed -Step $s -Message $Reason) }
+}
+
 function Get-LabSummary {
     # Verdict of a run: Passed when every step passed; Failed at the first step that did not, with its cause; Failed when the run stopped early.
     param([Parameter(Mandatory = $true)]$Steps)

@@ -121,6 +121,17 @@ function Update-Summary {
 }
 
 function Complete-LabStep($s, $r) {
+    # Whatever goes wrong while the result is recorded, the step ends with its own state (the next step never starts beside a "running" one)
+    try { Complete-LabStepCore $s $r }
+    catch {
+        $script:Queue.Clear()
+        [void](Set-LabStepFailed -Step $s -Message $_.Exception.Message)
+        try { Set-StepView $s; Show-StepOutput $s; Update-Summary } catch { }
+    }
+    if ($s.State -eq 'Running') { [void](Set-LabStepFailed -Step $s -Message 'no result was recorded'); $script:Queue.Clear() }
+}
+
+function Complete-LabStepCore($s, $r) {
     [void](Set-LabStepResult -Step $s -Result $r)
     # A step that did not give the expected result ends the run
     $wasQueued = $job.AutoRun -or $script:Queue.Count -gt 0
@@ -249,6 +260,8 @@ $timer.Add_Tick({
         if ($result) { $step = $script:Running.Step; $script:Running = $null; Complete-LabStep $step $result }
         else { try { Update-StepProgress } catch { } }
     }
+    if (-not $script:Running -and -not $script:Cleanup) { Close-LabOpenSteps $steps }
+    if (-not $script:Running -and $script:Queue.Count -gt 0 -and (@($steps | Where-Object State -eq 'Failed').Count -gt 0)) { $script:Queue.Clear() }
     if (-not $script:Running -and $script:Queue.Count -gt 0) {
         $next = $script:Queue[0]; $script:Queue.RemoveAt(0)
         Start-LabStep $next

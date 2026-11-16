@@ -461,6 +461,31 @@ Remove-Item $sf -Force -ErrorAction SilentlyContinue
 $labText = Get-Content (Join-Path $repo 'Sandbox\Lab.ps1') -Raw; $hostText = Get-Content (Join-Path $repo 'Sandbox\LabHost.ps1') -Raw; $bootText = Get-Content (Join-Path $repo 'Sandbox\Bootstrap.ps1') -Raw
 Test-Check 'lab inside: the host stays, writes the heartbeat with the token, takes requests, a New sandbox button and the request file shut the sandbox down' ($bootText -match 'LabHost.ps1' -and $hostText -match 'heartbeat.json' -and $hostText -match 'Token' -and $hostText -match 'request.json' -and $hostText -match 'newsandbox.request' -and $hostText -match 'shutdown.exe' -and $hostText -match 'New sandbox')
 Test-Check 'lab inside: the panel says "reused sandbox, started .., test n", cleans up a leftover installation once before the test, and a reusable sandbox is not shut down at the end' ($labText -match 'reused sandbox, started' -and $labText -match 'CleanedOnce' -and $labText -match 'already installed from an earlier test' -and $labText -match 'if \(\$job.Reusable\) \{ \$form.Close\(\); return \}' -and $labText -match 'btnNew')
+# --- every step ends with its own state before the next one starts; a start failure is visible
+$p = @(New-LabPlan -Version '1.0' -HasRuntime $true)[0]
+$p[2].State = 'Running'
+Close-LabOpenSteps $p
+Test-Check 'steps: one that is still "running" while nothing runs ends as Failed with the reason, not left open' ($p[2].State -eq 'Failed' -and $p[2].Detail -like '*could not record the result*no result was recorded*')
+$p = @(New-LabPlan -Version '1.0')[0]; $p[1].State = 'Running'
+[void](Set-LabStepFailed -Step $p[1] -Message 'boom')
+Test-Check 'steps: a step the lab could not judge gets its own Failed state and the cause' ($p[1].State -eq 'Failed' -and $p[1].Detail -like '*boom*' -and (Get-LabSummary $p).Verdict -eq 'Failed')
+$labText2 = Get-Content (Join-Path $repo 'Sandbox\Lab.ps1') -Raw
+Test-Check 'steps: the lab records every result through a wrapper that always ends the step, and closes open steps before it starts the next' ($labText2 -match 'function Complete-LabStepCore' -and $labText2 -match 'Set-LabStepFailed -Step \$s' -and $labText2 -match 'Close-LabOpenSteps \$steps')
+# start failure: no status from the sandbox
+$script:Logs = New-Object System.Collections.ArrayList
+Set-PackTuneSandboxLog -Sink { param($Text, $Level) [void]$script:Logs.Add("$Level|$Text") }
+Set-PackTuneSandboxOption -Name PollSeconds -Value 1
+Set-PackTuneSandboxOption -Name StartWarnSeconds -Value 1
+Set-PackTuneSandboxOption -Name StartFailSeconds -Value 3
+Set-PackTuneSandboxLauncher -Launcher $null
+$env:PACKTUNE_SANDBOX_LAUNCHER = ''
+$jobNo = Join-Path $work 'job-no-status'; New-Item -ItemType Directory -Path $jobNo -Force | Out-Null
+$st = & $mod { param($j) $script:Launcher = $null; function script:Test-FakeLauncher { $false }; function script:Test-PackTuneSandboxRunning { $true }; Wait-SandboxJob -JobPath $j -TimeoutMinutes 1 } $jobNo
+Test-Check 'start failure: a sandbox that never reports is said in the log after the warning time and fails the test with the cause (memory) after the fail time' ($st.State -eq 'Failed' -and $st.Message -like '*did not run the start script*never reported*' -and @($script:Logs | Where-Object { $_ -like 'Warning|The sandbox has not reported after*' }).Count -eq 1) $st.Message
+Set-PackTuneSandboxOption -Name PollSeconds -Value 0
+Set-PackTuneSandboxOption -Name StartWarnSeconds -Value 60
+Set-PackTuneSandboxOption -Name StartFailSeconds -Value 180
+Set-PackTuneSandboxLog -Sink { param($Text, $Level) }
 Remove-Item $work -Recurse -Force -ErrorAction SilentlyContinue
 if ($script:Failed) { "$script:Failed check(s) failed."; exit 1 }
 'All checks passed.'

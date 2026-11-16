@@ -34,6 +34,9 @@ $script:Options = @{
     KeepLabOpen       = $true
     # A lab sandbox counts as alive while its heartbeat file (written every few seconds from inside) is not older than this
     HeartbeatSeconds  = 30
+    # A started sandbox that has not written its first status after this long is said so in the log; after the second time the test fails with the cause
+    StartWarnSeconds  = 60
+    StartFailSeconds  = 180
 }
 $script:SandboxOwned = $null                         # what PackTune launched: the sandbox processes that existed before, and when
 # The SDK signing tools: this NuGet package version and its SHA256 only (checked 2026-11-14: all 44 PE files of bin\*\x64
@@ -320,6 +323,17 @@ function Start-SandboxProcess {
     Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\WindowsSandbox.exe') -ArgumentList "`"$WsbPath`""
 }
 
+function Get-PackTuneSandboxMemoryText {
+    # The most likely reason a sandbox does not start: not enough free memory for the 4 GB it is given
+    try {
+        $Free = [int]((Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).FreePhysicalMemory / 1024)
+        $Need = [int]$script:Options.MemoryMB
+        if ($Free -lt $Need + 1024) { return "Free memory is $Free MB, the sandbox is given $Need MB: too little (other programs or sessions use it)." }
+        return "Free memory is $Free MB (the sandbox is given $Need MB)."
+    }
+    catch { return '' }
+}
+
 function Wait-SandboxJob {
     # Waits until the sandbox reports Succeeded or Failed in status.json; writes each new step to the log
     param([Parameter(Mandatory = $true)][string]$JobPath, [int]$TimeoutMinutes = 45)
@@ -327,10 +341,22 @@ function Wait-SandboxJob {
     $Deadline = (Get-Date).AddMinutes($TimeoutMinutes)
     $Started = Get-Date
     $LastStep = ''
+    $Warned = $false
     while ((Get-Date) -lt $Deadline) {
         Start-Sleep -Seconds $script:Options.PollSeconds
         $Status = $null
         if (Test-Path $StatusPath) { try { $Status = Get-Content $StatusPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json } catch { } }
+        # A start failure is never silent: no first status from the sandbox after a minute is said in the log, after three minutes the test fails with the likely cause
+        if (-not $Status -and -not (Test-FakeLauncher)) {
+            $Waited = ((Get-Date) - $Started).TotalSeconds
+            if (-not $Warned -and $Waited -ge $script:Options.StartWarnSeconds) {
+                $Warned = $true
+                Write-SandboxLog "The sandbox has not reported after $([int]$Waited) s: Windows Sandbox is still booting, or it could not run the start script of the test. $(Get-PackTuneSandboxMemoryText)" 'Warning'
+            }
+            if ($Waited -ge $script:Options.StartFailSeconds) {
+                return [pscustomobject]@{ State = 'Failed'; Step = $LastStep; Message = "The sandbox did not run the start script of the test within $([int]$Waited) s (it never reported). $(Get-PackTuneSandboxMemoryText) Close other programs or restart Windows Sandbox, then try again." }
+            }
+        }
         if ($Status) {
             if ($Status.Step -and $Status.Step -ne $LastStep) { $LastStep = $Status.Step; Write-SandboxLog "  [sandbox] $($Status.Step)" }
             if ($Status.State -in 'Succeeded', 'Failed') { return $Status }
@@ -956,6 +982,8 @@ function Start-PackTuneWin32Lab {
     }
     else {
         $Wsb = New-SandboxConfig -JobPath $Job -Networking ([bool]$Networking) -NoToolchain
+        $MemoryText = Get-PackTuneSandboxMemoryText
+        if ($MemoryText -like '*too little*') { Write-SandboxLog $MemoryText 'Warning' }
         Write-SandboxLog 'Step 2 of 4: starting Windows Sandbox (the window opens in a moment).'
         Start-SandboxProcess -WsbPath $Wsb
         Save-PackTuneLabSession ([pscustomobject]@{ Dir = $Job; Token = $Token; Started = $Data.SessionStarted; Tests = 1; Before = @($script:SandboxOwned.Before) })
