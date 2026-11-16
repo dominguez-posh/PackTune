@@ -4784,11 +4784,25 @@ function Show-TestMenu([ValidateSet('Detail', 'Tenant', 'Custom')][string]$Kind,
     [void]$menu.Items.Add((New-Object System.Windows.Controls.Separator))
     $keep = New-Object System.Windows.Controls.MenuItem
     $keep.Header = 'Keep the sandbox open after the test'
-    $keep.ToolTip = 'For manual checks. Off: PackTune closes the sandbox it started about 10 seconds after the result; close it yourself before you deploy when this is on.'
+    $keep.ToolTip = 'The test sandbox already stays open after a test and the next test reuses it. This also keeps a capture sandbox open, for manual checks.'
     [System.Windows.Controls.ToolTipService]::SetIsEnabled($keep, $false)
     $keep.IsCheckable = $true; $keep.IsChecked = ($env:PACKTUNE_SANDBOX_KEEPOPEN -eq '1')
     $keep.Add_Click({ param($src) $env:PACKTUNE_SANDBOX_KEEPOPEN = $(if ($src.IsChecked) { '1' } else { '' }) })
     [void]$menu.Items.Add($keep)
+    # The test sandbox is reused by the next test; these start clean
+    $fresh = New-Object System.Windows.Controls.MenuItem
+    $fresh.Header = 'Start the next test in a new sandbox'
+    $fresh.ToolTip = 'The open test sandbox is closed first (only the one PackTune started), then the test runs in a clean one.'
+    [System.Windows.Controls.ToolTipService]::SetIsEnabled($fresh, $false)
+    $fresh.IsCheckable = $true; $fresh.IsChecked = ($env:PACKTUNE_SANDBOX_NEW -eq '1')
+    $fresh.Add_Click({ param($src) $env:PACKTUNE_SANDBOX_NEW = $(if ($src.IsChecked) { '1' } else { '' }) })
+    [void]$menu.Items.Add($fresh)
+    $close = New-Object System.Windows.Controls.MenuItem
+    $close.Header = 'New sandbox: close the open test sandbox now'
+    $labAlive = $null; try { $labAlive = Get-PackTuneLabSession } catch { }
+    $close.IsEnabled = [bool]$labAlive
+    $close.Add_Click({ try { if (Request-PackTuneNewLabSandbox) { Show-Toast 'The test sandbox closes; the next test starts in a new one.' 'info' } } catch { Show-Error $_.Exception.Message } })
+    [void]$menu.Items.Add($close)
     Show-Flyout $menu $Target
 }
 Add-Click $ui.BtnDetailTestMenu { Show-TestMenu 'Detail' $ui.BtnDetailTestMenu }
@@ -4798,7 +4812,7 @@ function Block-SandboxStart {
     # $true (with a message) when no sandbox test can start now: one is running, or Windows Sandbox is open
     $msg = ''
     if (Test-TaskRunning 'test') { $msg = 'A sandbox test is already running (Windows Sandbox runs one at a time). It is in Activity.' }
-    elseif (-not $script:SandboxOverride) { try { if (Test-PackTuneSandboxRunning) { $msg = 'Windows Sandbox is already open. Close it first (Windows Sandbox runs one at a time).' } } catch { } }
+    elseif (-not $script:SandboxOverride) { try { if (Test-PackTuneForeignSandbox) { $msg = 'A Windows Sandbox is open that PackTune did not start (maybe yours). Close it first: Windows runs only one at a time and PackTune never uses or closes a sandbox it did not start.' } } catch { } }
     if ($msg) { Show-Toast $msg 'warn'; Write-UiLog $msg 'Warning' }
     [bool]$msg
 }

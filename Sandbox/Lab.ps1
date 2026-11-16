@@ -6,7 +6,9 @@
 # Plain ASCII: Windows PowerShell 5.1 reads scripts without a byte order mark in the local code page.
 param(
     [string]$JobDir = 'C:\PackTuneSandbox\Job',
-    [string]$LocalDir = 'C:\PackTuneSandboxLocal'
+    [string]$LocalDir = 'C:\PackTuneSandboxLocal',
+    # The folder of the sandbox session (the first test's folder); a reused sandbox runs further tests in <SessionDir>\tests\<n>
+    [string]$SessionDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,6 +24,9 @@ $RuntimeSource = Join-Path $LocalDir 'input\source-runtime'
 $ShotDir = Join-Path $env:TEMP 'packtune\labshots'
 New-Item -ItemType Directory $ShotDir -Force | Out-Null
 $job = Get-Content (Join-Path $JobDir 'job.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if (-not $SessionDir) { $SessionDir = $JobDir }
+$script:CleanedOnce = $false
+$script:Cleanup = $null
 $script:Started = Get-Date
 $script:Running = $null
 $script:Closing = $false
@@ -56,8 +61,14 @@ $form = New-Object System.Windows.Forms.Form
 $form.Text = 'PackTune test lab'; $form.StartPosition = 'CenterScreen'; $form.ClientSize = New-Object System.Drawing.Size(780, 600); $form.BackColor = $C.Back
 $form.FormBorderStyle = 'FixedSingle'; $form.MaximizeBox = $false
 $form.Controls.Add((New-LabLabel "$($job.DisplayName) $($job.Version)" 16 12 740 28 14))
-$info = New-LabLabel 'Run the steps one by one, or all at once. They run as SYSTEM, like on a managed device.' 16 44 740 22 9.5 $C.Muted
+$info = New-LabLabel 'Run the steps one by one, or all at once. They run as SYSTEM, like on a managed device.' 16 44 614 22 9.5 $C.Muted
 $form.Controls.Add($info)
+# Which sandbox this is: new, or reused for a further test (the lab knows and says so)
+$sessionStarted = try { ([datetime]$job.SessionStarted).ToString('HH:mm') } catch { '' }
+$sessionText = if ($job.Reused) { "reused sandbox, started $sessionStarted, test $($job.TestNumber)" } else { "new sandbox$(if ($sessionStarted) { ", started $sessionStarted" })" }
+$sessionLabel = New-LabLabel $sessionText 440 16 316 22 9 $C.Muted
+$sessionLabel.TextAlign = 'MiddleRight'
+$form.Controls.Add($sessionLabel)
 $rows = @{}
 foreach ($s in $steps) {
     $y = 74 + ($s.Index - 1) * 34
@@ -76,7 +87,9 @@ $form.Controls.Add($output)
 $btnAll = New-LabButton 'Run all steps' $C.Primary 16 540 240 44
 $btnFail = New-LabButton 'Report failure' $C.Danger 270 540 240 44
 $btnOk = New-LabButton 'Finish: success' $C.Success 524 540 232 44
-$form.Controls.AddRange(@($btnAll, $btnFail, $btnOk))
+$btnNew = New-LabButton 'New sandbox' $C.Muted 640 42 116 26
+$btnNew.Font = New-Object System.Drawing.Font('Segoe UI', 8.5, [System.Drawing.FontStyle]::Bold)
+$form.Controls.AddRange(@($btnAll, $btnFail, $btnOk, $btnNew))
 
 # ---------------------------------------------------------------- behavior
 function Write-JobStatus([string]$State, [string]$Step, [string]$Message = '', $Result = $null) {
@@ -108,9 +121,37 @@ function Update-Summary {
 }
 
 function Complete-LabStep($s, $r) {
+    # Whatever goes wrong while the result is recorded, the step ends with its own state (the next step never starts beside a "running" one)
+    try { Complete-LabStepCore $s $r }
+    catch {
+        $script:Queue.Clear()
+        [void](Set-LabStepFailed -Step $s -Message $_.Exception.Message)
+        try { Set-StepView $s; Show-StepOutput $s; Update-Summary } catch { }
+    }
+    if ($s.State -eq 'Running') { [void](Set-LabStepFailed -Step $s -Message 'no result was recorded'); $script:Queue.Clear() }
+}
+
+function Complete-LabStepCore($s, $r) {
     [void](Set-LabStepResult -Step $s -Result $r)
     # A step that did not give the expected result ends the run
+    $wasQueued = $job.AutoRun -or $script:Queue.Count -gt 0
     if ($s.State -eq 'Failed') { $script:Queue.Clear() }
+    # Before a test the app must not be there. In a sandbox that was used before it can be (an aborted run): it is uninstalled once, with the
+    # uninstall script of the package, and the detection runs again; when it is still there the run says so and suggests a new sandbox.
+    if ($s.State -eq 'Failed' -and $s.Finding -like 'Already detected*' -and $job.Reusable) {
+        if (-not $script:CleanedOnce) {
+            $script:CleanedOnce = $true
+            $first = $steps | Where-Object { $_.Kind -eq 'Uninstall' } | Select-Object -First 1
+            $dir = if ($s.Target -eq 'previous') { $PreviousSource } else { $Source }
+            $s.State = 'NotRun'; $s.Finding = ''
+            Set-StepView $s
+            $info.Text = "The app is already installed from an earlier test: uninstalling it first (clean-up before the test) ..."
+            $script:Cleanup = @{ Step = $s; Queued = $wasQueued; Handle = (Start-LabCommand -CommandLine $commands.Uninstall -WorkingDirectory $dir -AsSystem) }
+            return
+        }
+        $s.Finding = 'Already detected before the install, also after a clean-up uninstall: start a New sandbox for a clean test.'
+        $s.Detail += ' Still there after the clean-up uninstall.'
+    }
     try {
         $b = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
         $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
@@ -149,6 +190,16 @@ function Update-StepProgress {
         $script:Progress.StatusAt = Get-Date; $script:Progress.StatusLine = $line
         Write-JobStatus 'Running' $line
     }
+}
+
+function Update-Cleanup {
+    # The clean-up uninstall of a leftover installation: when it is done the step that found it runs again (and the rest, in a run of all steps)
+    $c = $script:Cleanup
+    $r = Get-LabCommandResult $c.Handle
+    if (-not $r) { $elapsed = [int]((Get-Date) - $c.Handle.Started).TotalSeconds; $info.Text = "Clean-up before the test: uninstalling the leftover installation ($elapsed s) ..."; return }
+    $script:Cleanup = $null
+    $info.Text = "Clean-up before the test finished (exit code $($r.ExitCode))."
+    if ($c.Queued) { $c.Step.Index..$steps.Count | ForEach-Object { [void]$script:Queue.Add($_) } } else { Start-LabStep $c.Step.Index }
 }
 
 function Start-LabStep([int]$Index) {
@@ -193,6 +244,8 @@ function Close-Lab([string]$Verdict, [string]$Message) {
     Save-LabResults $Verdict $Message
     $result = [ordered]@{ Verdict = $Verdict; Notes = $Message; Steps = @($steps | ForEach-Object { [ordered]@{ Title = $_.Title; State = $_.State; ExitCode = $_.ExitCode; Detected = $_.Detected } }) }
     Write-JobStatus $(if ($Verdict -eq 'Passed') { 'Succeeded' } else { 'Failed' }) 'Done' $Message $result
+    # A reusable sandbox stays: the next test (also for another app) runs in it; otherwise it closes like before
+    if ($job.Reusable) { $form.Close(); return }
     $form.Hide()
     Start-Sleep -Seconds 2
     shutdown.exe /s /t 0
@@ -201,11 +254,14 @@ function Close-Lab([string]$Verdict, [string]$Message) {
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 1000
 $timer.Add_Tick({
+    if ($script:Cleanup) { try { Update-Cleanup } catch { $script:Cleanup = $null }; return }
     if ($script:Running) {
         $result = Get-LabCommandResult $script:Running.Handle
         if ($result) { $step = $script:Running.Step; $script:Running = $null; Complete-LabStep $step $result }
         else { try { Update-StepProgress } catch { } }
     }
+    if (-not $script:Running -and -not $script:Cleanup) { Close-LabOpenSteps $steps }
+    if (-not $script:Running -and $script:Queue.Count -gt 0 -and (@($steps | Where-Object State -eq 'Failed').Count -gt 0)) { $script:Queue.Clear() }
     if (-not $script:Running -and $script:Queue.Count -gt 0) {
         $next = $script:Queue[0]; $script:Queue.RemoveAt(0)
         Start-LabStep $next
@@ -220,6 +276,13 @@ $timer.Add_Tick({
 
 foreach ($s in $steps) { $idx = $s.Index; $rows[$idx].Run.Add_Click({ Start-LabStep $idx }.GetNewClosure()) }
 $btnAll.Add_Click({ if (-not $script:Running) { $script:Queue.Clear(); 1..$steps.Count | ForEach-Object { [void]$script:Queue.Add($_) } } })
+$btnNew.Add_Click({
+    if ($script:Running) { $info.Text = 'A step is still running: wait for it or cancel it first.'; return }
+    if (-not $job.Reusable) { $info.Text = 'This sandbox closes after the test anyway.'; return }
+    # The host of the lab shuts the sandbox down; this test is reported as not finished (the next test starts in a clean sandbox)
+    New-Item -ItemType File -Path (Join-Path $SessionDir 'newsandbox.request') -Force | Out-Null
+    $info.Text = 'The sandbox closes now. The next test starts in a new one.'
+})
 $btnOk.Add_Click({
     if ($script:Running) { $info.Text = 'A step is still running: wait for it or cancel it first.'; return }
     Close-Lab 'Passed' 'Reported as successful in the test lab.'
