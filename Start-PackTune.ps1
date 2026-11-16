@@ -4799,7 +4799,8 @@ function Show-TestMenu([ValidateSet('Detail', 'Tenant', 'Custom')][string]$Kind,
     [void]$menu.Items.Add($fresh)
     $close = New-Object System.Windows.Controls.MenuItem
     $close.Header = 'New sandbox: close the open test sandbox now'
-    $close.IsEnabled = [bool](try { Get-PackTuneLabSession } catch { $null })
+    $labAlive = $null; try { $labAlive = Get-PackTuneLabSession } catch { }
+    $close.IsEnabled = [bool]$labAlive
     $close.Add_Click({ try { if (Request-PackTuneNewLabSandbox) { Show-Toast 'The test sandbox closes; the next test starts in a new one.' 'info' } } catch { Show-Error $_.Exception.Message } })
     [void]$menu.Items.Add($close)
     Show-Flyout $menu $Target
