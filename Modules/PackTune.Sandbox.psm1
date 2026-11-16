@@ -342,12 +342,14 @@ function Wait-SandboxJob {
     $Started = Get-Date
     $LastStep = ''
     $Warned = $false
+    $SeenStatus = $false   # the watchdog is only for a sandbox that never reported (a status that is being replaced is not read for a moment)
     while ((Get-Date) -lt $Deadline) {
         Start-Sleep -Seconds $script:Options.PollSeconds
         $Status = $null
         if (Test-Path $StatusPath) { try { $Status = Get-Content $StatusPath -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json } catch { } }
         # A start failure is never silent: no first status from the sandbox after a minute is said in the log, after three minutes the test fails with the likely cause
-        if (-not $Status -and -not (Test-FakeLauncher)) {
+        if ($Status) { $SeenStatus = $true }
+        if (-not $Status -and -not $SeenStatus -and -not (Test-FakeLauncher)) {
             $Waited = ((Get-Date) - $Started).TotalSeconds
             if (-not $Warned -and $Waited -ge $script:Options.StartWarnSeconds) {
                 $Warned = $true
