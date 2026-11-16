@@ -144,7 +144,13 @@ $stdout = $process.StandardOutput.ReadToEndAsync()
 $stderr = $process.StandardError.ReadToEndAsync()
 $finished = $process.WaitForExit(15 * 60 * 1000)
 if ($authorityState.Listener) { $authorityState.Listener.Stop() }
-if (-not $finished) { $process.Kill(); throw 'The GUI smoke test did not finish within 15 minutes.' }
+if (-not $finished) {
+    # Only the process this script started, with the processes it started (the whole tree): nothing else is touched
+    $stuck = try { (Get-Content (Join-Path $OutDir 'current-step.txt') -Raw).Trim() } catch { 'unknown' }
+    & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Null
+    if (-not $process.HasExited) { try { $process.Kill() } catch { } }
+    throw "The GUI smoke test did not finish within 15 minutes (last step: $stuck)."
+}
 if ($stderr.Result.Trim()) { "--- stderr ---"; $stderr.Result }
 if ($Driver -notlike '*GuiSmokeDriver.ps1') { return }
 if (-not (Test-Path $results)) { "--- stdout ---"; $stdout.Result; throw 'The GUI smoke test wrote no results.' }

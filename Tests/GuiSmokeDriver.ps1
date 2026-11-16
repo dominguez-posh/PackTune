@@ -2397,6 +2397,17 @@ $script:SmokeTimer.Add_Tick({
         }
         $step = $script:SmokeSteps[0]
         try { Set-Content (Join-Path $script:SmokeOut 'current-step.txt') "$($step.Name) phase=$($step.Phase)" } catch { }
+        # Every wait is bounded: a step that stays in the same phase for too long (a job that never ends, a fake that never answers) fails with
+        # what was running and the smoke goes on with the next step, instead of waiting for the outer 15-minute guard
+        $where = "$($step.Name)|$($step.Phase)"
+        if ($script:StepWhere -ne $where) { $script:StepWhere = $where; $script:StepSince = Get-Date }
+        $limit = if ($env:PACKTUNE_SMOKE_STEP_SECONDS) { [int]$env:PACKTUNE_SMOKE_STEP_SECONDS } else { 360 }
+        if (((Get-Date) - $script:StepSince).TotalSeconds -gt $limit) {
+            $busy = @($script:Tasks | ForEach-Object { "$($_.Job.Kind) '$($_.Job.Title)' $($_.Job.Status)" }) -join '; '
+            Test-Smoke "step '$($step.Name)' did not advance" $false "stuck in phase $($step.Phase) for more than $limit s; running: $(if ($busy) { $busy } else { 'nothing' })"
+            $script:SmokeSteps.RemoveAt(0); $script:StepWhere = ''
+            return
+        }
         try { $done = & $step.Do $step }
         catch { Test-Smoke "step '$($step.Name)'" $false "$($_.Exception.Message) @ $($_.InvocationInfo.ScriptLineNumber)"; $done = $true }
         if ($done) { $script:SmokeSteps.RemoveAt(0) }

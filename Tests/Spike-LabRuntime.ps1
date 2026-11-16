@@ -19,6 +19,7 @@ if (Get-Process -Name WindowsSandbox, WindowsSandboxClient, WindowsSandboxRemote
 $work = Join-Path ([IO.Path]::GetTempPath()) ('PackTuneLabRuntimeSpike-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory -Path $work -Force | Out-Null
 $env:LOCALAPPDATA = $work
+$env:PACKTUNE_SANDBOX_REAL = '1'   # a live run: the real Windows Sandbox processes count
 . (Join-Path $repo 'PackTune-Main.ps1')
 Set-PackTuneSandboxOption -Name JobTimeoutMinutes -Value $TimeoutMinutes
 Set-PackTuneSandboxLog -Sink { param($Text, $Level) Write-Host $Text }
