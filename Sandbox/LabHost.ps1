@@ -84,4 +84,5 @@ $timer.Add_Tick({
 Start-LabTest $JobDir $LocalDir ([string]$job.DisplayName)
 Update-IdleText
 $form.Add_Shown({ $form.Hide(); $timer.Start() })
-[void]$form.ShowDialog()
+# Application.Run keeps the loop alive while the form is hidden (a hidden ShowDialog would end the host)
+[System.Windows.Forms.Application]::Run($form)
