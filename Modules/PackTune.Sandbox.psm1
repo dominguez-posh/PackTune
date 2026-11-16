@@ -135,8 +135,20 @@ function Test-PackTuneSandboxAvailable {
     Test-Path (Join-Path $env:SystemRoot 'System32\WindowsSandbox.exe')
 }
 
+function Test-SandboxIsolated {
+    <#
+        Tests never look at the real Windows Sandbox processes (a sandbox of the user or of another agent made the smoke and the checks wait for it).
+        A run whose %LOCALAPPDATA% is not the real profile's (every check and the smoke set their own) is isolated: the process lookup answers from
+        PACKTUNE_SANDBOX_FAKEIDS (a comma list of ids, empty = no sandbox) instead. The live spikes set PACKTUNE_SANDBOX_REAL=1 to look at the real ones.
+    #>
+    if ($env:PACKTUNE_SANDBOX_REAL -eq '1') { return $false }
+    $Real = [Environment]::GetFolderPath('LocalApplicationData')
+    [bool]($env:LOCALAPPDATA -and $Real -and ($env:LOCALAPPDATA.TrimEnd('\') -ne $Real.TrimEnd('\')))
+}
+
 function Test-PackTuneSandboxRunning {
     <# Windows Sandbox runs one instance at a time. #>
+    if (Test-SandboxIsolated) { return [bool]@(Get-SandboxProcessIds).Count }
     [bool](Get-Process -Name 'WindowsSandboxRemoteSession', 'WindowsSandboxClient' -ErrorAction SilentlyContinue)
 }
 
@@ -245,7 +257,8 @@ function Test-FakeLauncher {
 }
 
 function Get-SandboxProcessIds {
-    # Ids of the Windows Sandbox processes that run now (replaceable in tests)
+    # Ids of the Windows Sandbox processes that run now (replaceable in tests; isolated runs read PACKTUNE_SANDBOX_FAKEIDS, never the real processes)
+    if (Test-SandboxIsolated) { return @(([string]$env:PACKTUNE_SANDBOX_FAKEIDS -split ',') | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ }) }
     @(Get-Process -Name 'WindowsSandbox', 'WindowsSandboxClient', 'WindowsSandboxRemoteSession' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
 }
 

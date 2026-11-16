@@ -16,6 +16,16 @@ $script:Failed = 0
 function Test-Check([string]$Name, $Ok, $Detail) { if ($Ok) { "PASS  $Name" } else { $script:Failed++; "FAIL  $Name  $Detail" } }
 Import-Module (Join-Path $repo 'Modules\PackTune.Sandbox.psm1') -Force
 $mod = Get-Module PackTune.Sandbox
+# --- tests never look at the real Windows Sandbox processes
+Test-Check 'isolation: a run with its own %LOCALAPPDATA% (every check and the smoke) is isolated from the real sandbox processes' (& $mod { Test-SandboxIsolated })
+$env:PACKTUNE_SANDBOX_FAKEIDS = ''
+Test-Check 'isolation: no fake ids: no sandbox is running, whatever runs on the computer' (-not (Test-PackTuneSandboxRunning) -and @(& $mod { Get-SandboxProcessIds }).Count -eq 0)
+$env:PACKTUNE_SANDBOX_FAKEIDS = '77,88'
+Test-Check 'isolation: PACKTUNE_SANDBOX_FAKEIDS is the answer instead (ids 77 and 88, a sandbox is running)' ((Test-PackTuneSandboxRunning) -and (@(& $mod { Get-SandboxProcessIds }) -join ',') -eq '77,88')
+$env:PACKTUNE_SANDBOX_FAKEIDS = ''
+$env:PACKTUNE_SANDBOX_REAL = '1'
+Test-Check 'isolation: only a live spike (PACKTUNE_SANDBOX_REAL=1) looks at the real processes' (-not (& $mod { Test-SandboxIsolated }))
+$env:PACKTUNE_SANDBOX_REAL = ''
 Set-PackTuneSandboxLog -Sink { param($Text, $Level) }
 Set-PackTuneSandboxOption -Name PollSeconds -Value 0
 Add-Type -AssemblyName System.IO.Compression.FileSystem
